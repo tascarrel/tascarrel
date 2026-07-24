@@ -115,7 +115,7 @@ const VM_LOG_COMPLETED_INSTANCE_HISTORY_LIMIT: usize = 256;
 const WORKSPACE_WATCH_CHANNEL_CAPACITY: NonZeroUsize =
     NonZeroUsize::new(256).expect("the workspace watcher capacity is non-zero");
 const WORKSPACE_WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
-const VM_STARTUP_FAILURE_LOG_GRACE_PERIOD: Duration = Duration::from_secs(10);
+const VM_FAILURE_LOG_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 /// Global VM settings shared by every lazily started managed workspace.
 #[derive(Clone, Debug)]
@@ -1712,6 +1712,14 @@ async fn workspace_worker(
         .await;
         active.answer(first).await;
         let stop = active.run(&mut commands, &mut shutdown).await;
+        if active.vm.is_some()
+            && matches!(
+                &stop,
+                ActiveStop::Mux(_) | ActiveStop::ControlPlane(_) | ActiveStop::WorkspaceServices(_)
+            )
+        {
+            wait_for_guest_failure_diagnostics(&workspace, "runtime", &mut shutdown).await;
+        }
         active.shutdown().await;
         match stop {
             ActiveStop::Requested(response) => {
@@ -2724,20 +2732,7 @@ async fn finish_failed_workspace_start(
     shutdown: &mut watch::Receiver<bool>,
 ) -> StartupError {
     if vm.is_some() && matches!(&error, StartupError::Failed(_)) {
-        info!(
-            workspace = %workspace,
-            grace_seconds = VM_STARTUP_FAILURE_LOG_GRACE_PERIOD.as_secs(),
-            "waiting for guest startup diagnostics before stopping QEMU"
-        );
-        tokio::select! {
-            () = tokio::time::sleep(VM_STARTUP_FAILURE_LOG_GRACE_PERIOD) => {}
-            () = wait_for_shutdown(shutdown) => {
-                info!(
-                    workspace = %workspace,
-                    "guest startup diagnostic grace period interrupted by host shutdown"
-                );
-            }
-        }
+        wait_for_guest_failure_diagnostics(workspace, "startup", shutdown).await;
     }
     if let Some(vm) = vm {
         shutdown_vm(vm).await;
@@ -2746,6 +2741,29 @@ async fn finish_failed_workspace_start(
         finish_vm_log_writer(task).await;
     }
     error
+}
+
+async fn wait_for_guest_failure_diagnostics(
+    workspace: &WorkspaceName,
+    phase: &'static str,
+    shutdown: &mut watch::Receiver<bool>,
+) {
+    info!(
+        workspace = %workspace,
+        phase,
+        grace_seconds = VM_FAILURE_LOG_GRACE_PERIOD.as_secs(),
+        "waiting for guest failure diagnostics before stopping QEMU"
+    );
+    tokio::select! {
+        () = tokio::time::sleep(VM_FAILURE_LOG_GRACE_PERIOD) => {}
+        () = wait_for_shutdown(shutdown) => {
+            info!(
+                workspace = %workspace,
+                phase,
+                "guest failure diagnostic grace period interrupted by host shutdown"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
