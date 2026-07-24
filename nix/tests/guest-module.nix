@@ -6,6 +6,12 @@
 
 let
   dataDevice = "/dev/disk/by-id/virtio-tascarrel-data";
+  foreignSystem = if pkgs.stdenv.hostPlatform.isx86_64 then "aarch64-linux" else "x86_64-linux";
+  foreignHello =
+    if pkgs.stdenv.hostPlatform.isx86_64 then
+      pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic.hello
+    else
+      pkgs.pkgsCross.gnu64.pkgsStatic.hello;
   guestInstanceId = "guest_instance_1111111111111111111111";
 in
 pkgs.testers.runNixOSTest {
@@ -99,8 +105,13 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("tascarrel-guest.service")
     machine.wait_for_unit("apparmor.service")
     machine.wait_for_unit("nftables.service")
+    machine.wait_for_unit("systemd-binfmt.service")
     machine.succeed("grep -Fx 'tascarrel-pod (enforce)' /sys/kernel/security/apparmor/profiles")
     machine.succeed("grep -Fx 'tascarrel-pod-containers (enforce)' /sys/kernel/security/apparmor/profiles")
+    machine.succeed("grep -q '^flags:.*F' /proc/sys/fs/binfmt_misc/${foreignSystem}")
+    machine.succeed("${pkgs.lib.getExe pkgs.file} -Lb /run/binfmt/${foreignSystem} | grep -F 'statically linked'")
+    machine.succeed("${pkgs.lib.getExe foreignHello} | grep -Fx 'Hello, world!'")
+    machine.succeed("mkdir /tmp/binfmt-root; cp ${pkgs.lib.getExe foreignHello} /tmp/binfmt-root/hello; chroot /tmp/binfmt-root /hello | grep -Fx 'Hello, world!'")
     machine.succeed("test -c /dev/virtio-ports/${portName}")
     machine.succeed("test \"$(cat /run/tascarrel/ready)\" = /dev/virtio-ports/${portName}")
     machine.succeed("grep -Fx 'nameserver 192.0.2.53' /etc/resolv.conf")

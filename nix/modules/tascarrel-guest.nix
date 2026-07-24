@@ -14,6 +14,13 @@ let
     ;
   cfg = config.services.tascarrel-guest;
   system = pkgs.stdenv.hostPlatform.system;
+  emulatedSystem =
+    if system == "x86_64-linux" then
+      "aarch64-linux"
+    else if system == "aarch64-linux" then
+      "x86_64-linux"
+    else
+      throw "Tascarrel guests do not support ${system}";
   dataDiskDevice = "/dev/disk/by-id/virtio-tascarrel-data";
   stateDirectory = "/var/lib/tascarrel";
   podNixRoot = "${stateDirectory}/nix-store";
@@ -306,6 +313,10 @@ in
     ];
 
     boot = {
+      binfmt = {
+        emulatedSystems = [ emulatedSystem ];
+        preferStaticEmulators = true;
+      };
       supportedFilesystems = [
         "btrfs"
         "9p"
