@@ -66,6 +66,12 @@ pub enum GitHostRequest {
 pub enum GitOpenResponse {
     /// An upload-pack channel is ready for raw Git protocol bytes.
     Ready,
+    /// An exact cache version is ready for workspace-seed materialization.
+    VersionedReady {
+        /// Branch selected by the cached upstream symbolic `HEAD`, when
+        /// advertised.
+        default_branch: Option<String>,
+    },
     /// A receive-pack channel is ready and has reserved a push identifier.
     ReceivePackReady {
         /// Identifier used to retrieve the terminal policy result.

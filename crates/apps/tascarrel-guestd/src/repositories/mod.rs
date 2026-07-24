@@ -31,6 +31,7 @@ use sha2::Digest as _;
 use sha2::Sha256;
 use tascarrel_api::ids::RepositoryCacheId;
 use tascarrel_api::types::repositories::RepositoryCacheVersion;
+use tascarrel_git::ReferenceName;
 use tascarrel_protocol::ErrorCode;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::GitHostRequest;
@@ -58,7 +59,9 @@ use crate::services::pods::PodService;
 
 const DEFAULT_RECONCILIATION_CONCURRENCY: usize = 4;
 const CHECKOUT_MARKER_SCHEMA: u32 = 1;
-const CHECKOUT_SCHEMA: u32 = 1;
+/// Schema 2 invalidates seeds created before default-branch checkout was
+/// enforced.
+const CHECKOUT_SCHEMA: u32 = 2;
 const CHECKOUT_MARKER_FILE: &str = "tascarrel-cache.json";
 const MAX_CHECKOUT_MARKER_BYTES: u64 = 64 * 1024;
 
@@ -145,7 +148,6 @@ impl CheckoutMarker {
 enum ReconciliationAction {
     Clone,
     Fetch,
-    Configure,
     Unchanged,
 }
 
@@ -576,10 +578,10 @@ impl GuestRepositoryManager {
                     ReconciliationAction::Clone
                 } else if existing.cache_version > expected.cache_version {
                     bail!("host cache version regressed for managed repository {path}");
-                } else if existing.cache_version < expected.cache_version {
+                } else if existing.cache_version < expected.cache_version
+                    || existing.checkout_schema != CHECKOUT_SCHEMA
+                {
                     ReconciliationAction::Fetch
-                } else if existing.checkout_schema != CHECKOUT_SCHEMA {
-                    ReconciliationAction::Configure
                 } else {
                     ReconciliationAction::Unchanged
                 }
@@ -666,10 +668,6 @@ impl GuestRepositoryManager {
                             .await?;
                     }
                 }
-                ReconciliationAction::Configure => {
-                    self.configure_repository(&checkout, &work.path, image)
-                        .await?;
-                }
                 ReconciliationAction::Unchanged => {
                     unreachable!("unchanged repositories are excluded from reconciliation")
                 }
@@ -739,20 +737,13 @@ impl GuestRepositoryManager {
                 "tascarrel://forge",
                 "+refs/heads/*:refs/remotes/origin/*",
                 "+refs/tags/*:refs/tags/*",
-                "+HEAD:refs/remotes/origin/TASCARREL_HEAD",
             ],
         );
-        self.run_transport(source, cache, &mut child, "guest Git fetch")
+        let default_branch = self
+            .run_transport(source, cache, &mut child, "guest Git fetch")
             .await?;
-        let output = self
-            .git_command(
-                checkout,
-                image,
-                ["reset", "--hard", "refs/remotes/origin/TASCARREL_HEAD"],
-            )
-            .output()
-            .await?;
-        success(&output, "reset managed repository to refreshed upstream")
+        self.checkout_default_branch(checkout, image, default_branch.as_ref())
+            .await
     }
 
     async fn clone_repository(
@@ -770,7 +761,8 @@ impl GuestRepositoryManager {
             .gid(image.user().gid())
             .kill_on_drop(true);
         self.run_transport(source, cache, &mut child, "guest Git clone")
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn run_transport(
@@ -779,7 +771,7 @@ impl GuestRepositoryManager {
         cache: Option<&RepositoryCacheVersion>,
         command: &mut Command,
         operation: &'static str,
-    ) -> Result<()> {
+    ) -> Result<Option<ReferenceName>> {
         let socket = self
             .runtime
             .join(format!("git-{}.sock", uuid::Uuid::new_v4()));
@@ -822,14 +814,25 @@ impl GuestRepositoryManager {
                 expected_version: cache.map(|cache| cache.version),
             })
             .await?;
-        match framed.read::<GitOpenResponse>().await? {
-            Some(GitOpenResponse::Ready) => {}
+        let default_branch = match framed.read::<GitOpenResponse>().await? {
+            Some(GitOpenResponse::VersionedReady { default_branch }) if cache.is_some() => {
+                default_branch
+                    .map(ReferenceName::new)
+                    .transpose()
+                    .map_err(|error| {
+                        anyhow::anyhow!("host returned an invalid default branch: {error}")
+                    })?
+            }
+            Some(GitOpenResponse::Ready) if cache.is_none() => None,
+            Some(GitOpenResponse::Ready | GitOpenResponse::VersionedReady { .. }) => {
+                bail!("host returned the wrong upload-pack response")
+            }
             Some(GitOpenResponse::ReceivePackReady { .. }) => {
                 bail!("host returned a receive-pack response for Git clone")
             }
             Some(GitOpenResponse::Error { error }) => return Err(error.into()),
             None => bail!("host closed Git channel before accepting it"),
-        }
+        };
         let mut channel = framed.into_inner();
         tokio::io::copy_bidirectional(&mut helper, &mut channel).await?;
         drop(helper);
@@ -842,7 +845,50 @@ impl GuestRepositoryManager {
         if !status.success() {
             bail!("{operation} exited with {status}: {diagnostic}");
         }
-        Ok(())
+        Ok(default_branch)
+    }
+
+    /// Resets a managed checkout to the cached default branch or current
+    /// upstream.
+    async fn checkout_default_branch(
+        &self,
+        checkout: &Path,
+        image: &ImageConfig,
+        default_branch: Option<&ReferenceName>,
+    ) -> Result<()> {
+        let Some(default_branch) = default_branch else {
+            let upstream = self
+                .git_command(
+                    checkout,
+                    image,
+                    ["rev-parse", "--verify", "--quiet", "@{upstream}"],
+                )
+                .output()
+                .await?;
+            if upstream.status.code() == Some(1) {
+                return Ok(());
+            }
+            success(&upstream, "resolve the current managed upstream")?;
+            let output = self
+                .git_command(checkout, image, ["reset", "--hard", "@{upstream}"])
+                .output()
+                .await?;
+            return success(&output, "reset managed repository to refreshed upstream");
+        };
+        let branch = default_branch
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .ok_or_else(|| anyhow::anyhow!("host default branch is not a branch"))?;
+        let upstream = format!("refs/remotes/origin/{branch}");
+        let output = self
+            .git_command(
+                checkout,
+                image,
+                ["checkout", "--force", "-B", branch, upstream.as_str()],
+            )
+            .output()
+            .await?;
+        success(&output, "check out the refreshed upstream default branch")
     }
 
     fn git_command<const N: usize>(

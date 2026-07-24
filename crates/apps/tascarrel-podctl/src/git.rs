@@ -77,7 +77,8 @@ pub(crate) async fn run_git_receive_pack() -> PodctlResult<()> {
         tascarrel_protocol::GitOpenResponse::Error { error } => {
             return Err(PodctlError::GitRejected(error).report());
         }
-        tascarrel_protocol::GitOpenResponse::Ready => {
+        tascarrel_protocol::GitOpenResponse::Ready
+        | tascarrel_protocol::GitOpenResponse::VersionedReady { .. } => {
             return Err(PodctlError::InvalidGitResponse.report());
         }
     };

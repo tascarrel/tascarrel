@@ -955,6 +955,7 @@ impl HostRepositoryManager {
         expected_cache_id: Option<String>,
         expected_version: Option<u64>,
     ) -> HostRepositoryResult<()> {
+        let versioned = expected_cache_id.is_some();
         if expected_cache_id.is_some() != expected_version.is_some() {
             framed
                 .write(&GitOpenResponse::Error {
@@ -1031,10 +1032,20 @@ impl HostRepositoryManager {
             Ok(upload_pack) => upload_pack,
             Err(report) => return reject_git_preparation(&mut framed, report).await,
         };
-        framed
-            .write(&GitOpenResponse::Ready)
-            .await
-            .map_err(protocol_report)?;
+        let default_branch = if versioned {
+            match store.cached_default_branch().await.map_err(git_report) {
+                Ok(default_branch) => default_branch.map(|branch| branch.to_string()),
+                Err(report) => return reject_git_preparation(&mut framed, report).await,
+            }
+        } else {
+            None
+        };
+        let response = if versioned {
+            GitOpenResponse::VersionedReady { default_branch }
+        } else {
+            GitOpenResponse::Ready
+        };
+        framed.write(&response).await.map_err(protocol_report)?;
         upload_pack
             .relay(framed.into_inner())
             .await

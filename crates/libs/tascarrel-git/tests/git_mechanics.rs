@@ -146,6 +146,7 @@ async fn refresh_accepts_a_nonexistent_default_branch() {
     assert_eq!(refresh.default_branch, None);
     assert_eq!(refresh.references.len(), 1);
     assert_eq!(refresh.references[0].name.as_str(), "refs/heads/main");
+    assert_eq!(fixture.store.cached_default_branch().await.unwrap(), None);
 }
 
 /// Verifies a refreshed cache advertises and checks out the upstream default
@@ -156,6 +157,16 @@ async fn refresh_preserves_the_upstream_default_branch() {
     let checkout = fixture.temporary.path().join("cache-checkout");
     let remote = format!("file://{}", fixture.store.path().display());
 
+    assert_eq!(
+        fixture
+            .store
+            .cached_default_branch()
+            .await
+            .unwrap()
+            .as_ref()
+            .map(ReferenceName::as_str),
+        Some("refs/heads/main")
+    );
     run_git(
         &fixture.git,
         fixture.temporary.path(),

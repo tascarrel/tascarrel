@@ -40,6 +40,8 @@ use crate::WorkspaceId;
 use crate::command::GitCommandOutput;
 
 const TASCARREL_REFS: &str = "refs/tascarrel";
+/// Hidden dangling target used to prevent stale cached `HEAD` advertisements.
+const NO_DEFAULT_BRANCH_REF: &str = "refs/tascarrel/no-default-branch";
 const WORKSPACE_REFS: &str = "refs/tascarrel/workspaces";
 const RECEIVE_UPDATE_HOOK: &[u8] = b"#!/bin/sh\ncase \"$1\" in\nrefs/heads/*|refs/tags/*) exit 0 ;;\n*) echo 'Tascarrel accepts pushes only to branches and tags' >&2; exit 1 ;;\nesac\n";
 
@@ -271,6 +273,38 @@ impl RepositoryStore {
     )]
     pub async fn default_branch(&self, remote: &Remote) -> GitResult<Option<ReferenceName>> {
         self.remote_default_branch(remote).await
+    }
+
+    /// Returns the branch advertised as `HEAD` by this cached store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when Git fails or the cached symbolic `HEAD` is
+    /// malformed.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.cached_default_branch",
+        level = "debug",
+        skip(self),
+        fields(repository = %self.path().display()),
+        err
+    )]
+    pub async fn cached_default_branch(&self) -> GitResult<Option<ReferenceName>> {
+        let mut command = self.command();
+        command.args(["symbolic-ref", "--quiet", "HEAD"]);
+        let output = self
+            .run(command, "resolve the cached default branch", &[])
+            .await?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => return Ok(None),
+            _ => return Err(output.failure("resolve the cached default branch")),
+        }
+        let value = output.stdout_text("resolve the cached default branch")?;
+        let reference = ReferenceName::new(value.trim())?;
+        if !reference.is_branch() || self.rev_parse(reference.as_str()).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(reference))
     }
 
     /// Imports one exact source ref into a capture-specific hidden ref.
@@ -897,15 +931,15 @@ impl RepositoryStore {
         self.run(command, "refresh upstream refs", &[remote.as_str()])
             .await?
             .success("refresh upstream refs")?;
-        if let Some(default_branch) = &default_branch {
-            let mut command = self.command();
-            command
-                .args(["symbolic-ref", "HEAD"])
-                .arg(default_branch.as_str());
-            self.run(command, "update the cached default branch", &[])
-                .await?
-                .success("update the cached default branch")?;
-        }
+        let mut command = self.command();
+        command.args(["symbolic-ref", "HEAD"]).arg(
+            default_branch
+                .as_ref()
+                .map_or(NO_DEFAULT_BRANCH_REF, ReferenceName::as_str),
+        );
+        self.run(command, "update the cached default branch", &[])
+            .await?
+            .success("update the cached default branch")?;
         Ok(default_branch)
     }
 
