@@ -10,11 +10,21 @@ nix build .#packages.aarch64-linux.vm-image
 
 `packages.<system>.tascarrel` builds the matching Linux system image, kernel, and
 initrd and packs them into one SHA-256-addressed, xz-compressed tar payload
-embedded in the final Tascarrel binary. `packages.<system>.tascarrel-cli` builds the
-CLI and host daemon without that payload for development, while
+embedded in the final Tascarrel binary. `packages.<system>.tascarrel-cli` builds
+the CLI and host daemon without that payload for development, while
 `tascarrel-distribution` is an alias for the complete `tascarrel` package.
 Additional assets can be added to the archive without changing the embedding
 scheme.
+
+The release pipeline builds portable payload archives on an x86-64 NixOS
+builder through `guest-payload-x86_64-linux` and
+`guest-payload-aarch64-linux`. The latter uses the builder's AArch64 binfmt
+support only for target derivations; frontend and archive assembly derivations
+remain native x86-64 builds. Each output contains `payload.tar.xz`,
+`payload.sha256`, `payload.size`, and `architecture`. The host Cargo build wraps
+the archive in an object for its own target, allowing the same AArch64 guest
+payload to feed both AArch64 Linux and Apple Silicon macOS releases.
+
 Linux distributions use a statically linked musl executable; macOS remains one
 executable while linking the platform system libraries.
 

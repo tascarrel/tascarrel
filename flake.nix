@@ -143,11 +143,10 @@
         in
         if pkgs.stdenv.hostPlatform.isDarwin then pkgs.qemu else pkgs.qemu_kvm;
 
-      embeddedPayloadFor =
-        system:
+      guestPayloadFor =
+        buildSystem: guestSystem:
         let
-          pkgs = pkgsFor system;
-          guestSystem = guestSystemFor system;
+          pkgs = pkgsFor buildSystem;
           nixos = nixosSystems.${guestSystem};
           image = nixos.config.system.build.image;
           imageFile = "${image}/${nixos.config.image.filePath}";
@@ -160,20 +159,19 @@
             ++ nixos.config.boot.kernelParams
           );
           architecture = lib.removeSuffix "-linux" guestSystem;
-          frontend = frontendPackageFor system;
+          frontend = frontendPackageFor buildSystem;
         in
-        pkgs.runCommand "tascarrel-${architecture}-embedded-payload"
+        pkgs.runCommand "tascarrel-${architecture}-guest-payload"
           {
             nativeBuildInputs = [
               pkgs.gnutar
-              pkgs.stdenv.cc
               pkgs.xz
             ];
           }
           ''
             mkdir -p "$out"
             payload=$(mktemp -d)
-            payload_archive=$(mktemp)
+            payload_archive="$out/payload.tar.xz"
             cp "${imageFile}" "$payload/system.erofs"
             cp "${kernelFile}" "$payload/kernel"
             cp "${initrdFile}" "$payload/initrd"
@@ -187,9 +185,15 @@
             stat --format '%s' "$payload_archive" > "$out/payload.size"
             printf '%s\n' '${architecture}' > "$out/architecture"
 
-            substitute ${./nix/embedded-payload.S} embedded-payload.S \
-              --subst-var-by payloadPath "$payload_archive"
-            $CC -c -x assembler-with-cpp embedded-payload.S -o "$out/payload.o"
+            archive_contents=$(tar -tJf "$payload_archive")
+            for required_path in \
+              ./system.erofs \
+              ./kernel \
+              ./initrd \
+              ./kernel-append \
+              ./ui/; do
+              grep -Fx "$required_path" <<< "$archive_contents"
+            done
           '';
 
       distributionPackageFor =
@@ -210,7 +214,7 @@
           cargoPackage = "tascarrel-cli";
           binaryName = "tascarrel";
           description = "Self-contained Tascarrel CLI, host daemon, and guest image";
-          embeddedPayload = embeddedPayloadFor system;
+          embeddedPayload = guestPayloadFor system (guestSystemFor system);
           doCheck = false;
         };
 
@@ -280,11 +284,13 @@
         system:
         let
           distribution = distributionPackageFor system;
+          guestPayload = guestPayloadFor system (guestSystemFor system);
         in
         {
           default = distribution;
           vm-image = nixosSystems.${guestSystemFor system}.config.system.build.image;
-          embedded-payload = embeddedPayloadFor system;
+          embedded-payload = guestPayload;
+          guest-payload = guestPayload;
           web-ui = frontendPackageFor system;
           tascarrel = distribution;
           tascarrel-cli = cliPackageFor system;
@@ -294,6 +300,10 @@
           tascarrel-guest = guestPackageFor system;
           tascarrel-podctl = podctlPackageFor system;
           tascarrel-podd = poddPackageFor system;
+        }
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          guest-payload-aarch64-linux = guestPayloadFor system "aarch64-linux";
+          guest-payload-x86_64-linux = guestPayloadFor system "x86_64-linux";
         }
       );
 

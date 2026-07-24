@@ -28,6 +28,9 @@ tascarrel-protocol = { path = "../../libs/tascarrel-protocol" }
 tascarrel-vm = { path = "../../libs/tascarrel-vm" }
 xz2 = "0.1"
 
+[build-dependencies]
+cc.workspace = true
+
 [dev-dependencies]
 tempfile = "3.20"
 
