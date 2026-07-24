@@ -1,0 +1,45 @@
+{
+  "name": "tascarrel-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "generate:types": "cd ../crates/libs/tascarrel-api && nix run 'github:silitics/sidex/53f5e11480ebf471ba37a97fa2a683be1e2bf235' -- generate ts ../../../frontend/src/api/generated",
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.6.0",
+    "@pierre/diffs": "^1.2.12",
+    "@sidex/types": "^0.0.8",
+    "@tanstack/react-form": "^1.33.2",
+    "@tanstack/react-router": "^1.170.18",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/xterm": "^6.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.24.0",
+    "pdfjs-dist": "^6.1.200",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "remark-github-blockquote-alert": "^2.1.0",
+    "shiki": "^4.3.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
+}

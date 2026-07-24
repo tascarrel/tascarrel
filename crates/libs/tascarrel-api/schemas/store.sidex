@@ -1,0 +1,38 @@
+//! Generic wire types for resumable state synchronized with tascarrel-store.
+//!
+//! A consumer applies each [`StoreEvent`] in order and retains its [`Stamp`]. The retained
+//! stamp can be supplied as the cursor of a later subscription. The producer emits a snapshot
+//! when the cursor cannot be resumed from its retained mutation history.
+
+/// A resumable state synchronization event.
+#[json(tag = "type")]
+variant StoreEvent<T, M> {
+    /// Replaces the consumer's complete cached state.
+    Snapshot: Snapshot<T>,
+    /// Advances the consumer's cached state with one mutation.
+    Mutation: StampedMutation<M>,
+}
+
+/// Identifies one exact state in an authoritative store generation.
+record Stamp {
+    /// UUID identifying the lifetime of the authoritative store state.
+    generation: string,
+    /// Number of mutations applied within the generation.
+    version: u64,
+}
+
+/// Complete store state at one stamp.
+record Snapshot<T> {
+    /// Stamp identifying the snapshot state.
+    stamp: Stamp,
+    /// Complete state represented by the snapshot.
+    value: T,
+}
+
+/// One store mutation and the stamp of its resulting state.
+record StampedMutation<M> {
+    /// Stamp identifying the state after the mutation is applied.
+    stamp: Stamp,
+    /// Mutation to apply to the consumer's cached state.
+    mutation: M,
+}

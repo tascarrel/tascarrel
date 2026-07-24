@@ -1,0 +1,345 @@
+//! Process launch and supervision API implemented by a workspace guest daemon.
+//!
+//! Actions and subscriptions target the workspace guest daemon and identify the affected pod in
+//! their typed inputs. The process registry subscription covers every supervised process in the
+//! workspace and uses the generic tascarrel-store wire model for resumption.
+//!
+//! The guest daemon parses process output into lines, removes terminal control sequences and other
+//! non-printing control characters, and truncates content beyond the configured line length. Each
+//! process log is retained in a bounded in-memory ring buffer. Its subscription uses line numbers
+//! for resumption. A subscriber receives retained lines after its last observed line followed by
+//! live lines in non-empty ordered batches. A jump in line numbers indicates that intervening
+//! lines have been evicted from the ring buffer.
+//!
+//! Pseudo-terminal output is retained separately as an unmodified, byte-addressed stream. Terminal
+//! subscriptions resume from the next expected byte offset and emit an explicit replay boundary
+//! before live output. A jump in byte offsets indicates eviction. Consumers must preserve bytes
+//! across event boundaries rather than decoding individual events as UTF-8.
+
+import common::Timestamp
+import pods::PodId
+import protocol::Actor
+import store::{Stamp, StoreEvent}
+
+// RPC
+
+/// Returns the current processes belonging to one pod.
+record GetPodProcessesAction {
+    /// Pod whose process registry entries are returned.
+    pod_id: PodId,
+}
+
+/// Current processes belonging to the selected pod.
+record GetPodProcessesOutput {
+    /// Processes retained by the guest daemon for the selected pod.
+    processes: [Process],
+}
+
+/// Launches a supervised process in one pod.
+record SpawnProcessAction {
+    /// Pod in which to launch the process.
+    pod_id: PodId,
+    /// Whether to start the pod when needed, or true when absent.
+    start_pod?: bool,
+    /// Human-readable process title.
+    title: string,
+    /// Executable path or name resolved inside the pod.
+    executable: string,
+    /// Arguments passed to the executable, excluding the executable itself.
+    arguments: [string],
+    /// Environment entries added to or overriding the pod's default process environment.
+    environment: [string: string],
+    /// Working directory inside the pod, or the pod's configured working directory when absent.
+    working_directory?: string,
+    /// Initial pseudo-terminal dimensions, or pipes when absent.
+    terminal?: ProcessTerminal,
+    /// Whether standard output should be retained in the process log, or true when absent.
+    ///
+    /// Standard output remains available to the internal process owner when logging is disabled.
+    log_stdout?: bool,
+    /// Identity and privilege profile applied to the process.
+    profile: ProcessExecutionProfile,
+}
+
+/// Identifier assigned to an admitted process.
+record SpawnProcessOutput {
+    /// Stable identifier assigned to the admitted process.
+    process_id: ProcessId
+}
+
+/// Launches the effective pod login shell as a supervised terminal process.
+///
+/// The pod's explicit `SHELL` environment value takes precedence over Tascarrel's injected
+/// interactive shell. Tascarrel supplies UTF-8 locale, xterm-256color, and true-color defaults to
+/// terminal processes unless the process action explicitly overrides them.
+record SpawnProcessTerminalAction {
+    /// Pod in which to launch the terminal.
+    pod_id: PodId,
+    /// Whether to start the pod when needed, or true when absent.
+    start_pod?: bool,
+    /// Human-readable terminal title.
+    title: string,
+    /// Initial pseudo-terminal dimensions.
+    terminal: ProcessTerminal,
+}
+
+/// Identifier assigned to the terminal process.
+record SpawnProcessTerminalOutput {
+    /// Stable identifier assigned to the admitted process.
+    process_id: ProcessId
+}
+
+/// Requests termination of one supervised process in one pod.
+record KillProcessAction {
+    /// Process to terminate.
+    process_id: ProcessId,
+    /// Signal to deliver to the supervised process group.
+    signal: ProcessSignal,
+}
+
+/// Result of requesting process termination.
+record KillProcessOutput {}
+
+/// Writes bytes to the pseudo-terminal input of one active process.
+record WriteProcessTerminalAction {
+    /// Terminal process that receives the bytes.
+    process_id: ProcessId,
+    /// Unmodified bytes to write to the pseudo-terminal.
+    data: ProcessTerminalData,
+}
+
+/// Result of writing process terminal input.
+record WriteProcessTerminalOutput {}
+
+/// Changes the pseudo-terminal dimensions of one active process.
+record ResizeProcessTerminalAction {
+    /// Terminal process to resize.
+    process_id: ProcessId,
+    /// New pseudo-terminal dimensions.
+    terminal: ProcessTerminal,
+}
+
+/// Result of changing process terminal dimensions.
+record ResizeProcessTerminalOutput {}
+
+/// Removes a terminated process from the workspace process registry.
+record RemoveProcessAction {
+    /// Process to remove.
+    process_id: ProcessId,
+}
+
+/// Result of removing a terminated process.
+record RemoveProcessOutput {}
+
+/// Captures the current screen state of a process attached to a pseudo-terminal.
+record SnapshotProcessTerminalAction {
+    /// Terminal process to capture.
+    process_id: ProcessId,
+}
+
+/// Captured state of a process terminal.
+record SnapshotProcessTerminalOutput {
+    /// ANSI-formatted text that reconstructs the captured terminal screen when rendered.
+    snapshot: string,
+}
+
+// Subscriptions
+
+/// Subscribes to sanitized log lines for one process.
+record ProcessLogSubscription {
+    /// Process whose log to receive.
+    process_id: ProcessId,
+    /// Last line already observed by the consumer, or absent to receive all retained lines.
+    last_line?: u64,
+}
+
+/// One non-empty batch of retained or live process log lines.
+record ProcessLogEvent {
+    /// Ordered sanitized lines from the process log.
+    lines: [ProcessLogLine],
+}
+
+/// Subscribes to the unmodified output byte stream of one process terminal.
+record ProcessTerminalSubscription {
+    /// Terminal process whose output to receive.
+    process_id: ProcessId,
+    /// Next byte offset expected by the consumer, or absent to start at offset zero.
+    offset?: u64,
+}
+
+/// One ordered update from a process terminal output stream.
+record ProcessTerminalEvent {
+    /// Output bytes or a marker separating replayed output from live output.
+    update: ProcessTerminalUpdate,
+}
+
+/// Subscribes to the workspace-wide process registry.
+record ProcessListChangedSubscription {
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by the workspace-wide process registry.
+record ProcessListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached process list.
+    change: StoreEvent<ProcessList, ProcessListMutation>,
+}
+
+// Domain Types
+
+/// Identifies one process within a workspace guest daemon's supervision scope.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ProcessId")]
+opaque ProcessId
+
+/// Arbitrary terminal bytes encoded as standard padded Base64 in JSON.
+#[json(type = "string")]
+#[rust(type = "crate::ProcessTerminalData")]
+opaque ProcessTerminalData
+
+/// Output stream update delivered to a terminal subscriber.
+#[json(tag = "type")]
+variant ProcessTerminalUpdate {
+    /// One non-empty range of unmodified terminal output bytes.
+    Output: ProcessTerminalOutput,
+    /// Marks the position captured when this subscription began.
+    ///
+    /// Output before this marker is replayed history. Output after it is live for this
+    /// subscription, so terminal-generated replies may be forwarded only after this marker.
+    CaughtUp: ProcessTerminalCaughtUp,
+}
+
+/// One contiguous range in a process terminal output stream.
+record ProcessTerminalOutput {
+    /// Inclusive byte offset of the first byte in `data`.
+    start_offset: u64,
+    /// Exclusive byte offset immediately after `data`.
+    end_offset: u64,
+    /// Unmodified terminal output bytes.
+    data: ProcessTerminalData,
+}
+
+/// Replay boundary captured when a process terminal subscription begins.
+record ProcessTerminalCaughtUp {
+    /// Exclusive output offset at the replay boundary.
+    offset: u64,
+}
+
+/// One sanitized line from a process log.
+record ProcessLogLine {
+    /// Monotonically increasing line number within the process log, starting at one.
+    line: u64,
+    /// Output stream from which the line was parsed.
+    source: ProcessLogSource,
+    /// Sanitized line content without its line terminator.
+    content: string,
+    /// Whether content beyond the configured line length was discarded.
+    truncated: bool,
+}
+
+/// A process retained in the workspace process registry.
+record Process {
+    /// Workspace-wide identifier assigned by the supervising guest daemon.
+    id: ProcessId,
+    /// Pod in which the process executes.
+    pod_id: PodId,
+    /// Human-readable process title.
+    title: string,
+    /// Caller from the validated request context that started the process.
+    started_by: Actor,
+    /// Current process lifecycle state.
+    status: ProcessState,
+    /// Current pseudo-terminal dimensions, or absent when the process uses pipes.
+    terminal?: ProcessTerminal,
+    /// Time at which the process was admitted.
+    created_at: Timestamp,
+}
+
+/// Current lifecycle state of a supervised process.
+#[json(tag = "status")]
+variant ProcessState {
+    /// The process has been admitted and is being started.
+    Starting,
+    /// The process is running inside its pod.
+    Running,
+    /// Termination has been requested and the process has not exited yet.
+    Stopping,
+    /// The process exited after it started.
+    Exited: ProcessExit,
+    /// The process could not be started or supervised.
+    Failed: ProcessFailure,
+}
+
+/// Exit result reported for a supervised process.
+record ProcessExit {
+    /// Exit code reported for a normal process exit, when available.
+    code?: i32,
+    /// Signal number that terminated the process, when available.
+    signal?: i32,
+    /// Time at which the process exited.
+    exited_at: Timestamp,
+}
+
+/// Failure reported while starting or supervising a process.
+record ProcessFailure {
+    /// Human-readable failure diagnostic.
+    message: string,
+    /// Time at which supervision failed.
+    failed_at: Timestamp,
+}
+
+/// Execution profile applied by the guest daemon when launching a process.
+#[json(tag = "type")]
+variant ProcessExecutionProfile {
+    /// Executes as the pod's configured image user with its ordinary process restrictions.
+    User,
+    /// Executes as a privileged pod infrastructure service.
+    SystemService,
+}
+
+/// Dimensions for a process attached to a pseudo-terminal.
+record ProcessTerminal {
+    /// Number of terminal rows.
+    rows: u16,
+    /// Number of terminal columns.
+    cols: u16,
+}
+
+/// Signal used to request termination of a supervised process.
+#[json(tag = "type")]
+variant ProcessSignal {
+    /// Requests an orderly process termination.
+    Terminate,
+    /// Requests immediate process termination.
+    Kill,
+    /// Reports that the controlling terminal or session has ended.
+    Hangup,
+    /// Requests interactive interruption.
+    Interrupt,
+}
+
+/// Source of one process log line.
+#[json(tag = "type")]
+variant ProcessLogSource {
+    /// Standard output of a process without a pseudo-terminal.
+    Stdout,
+    /// Standard error of a process without a pseudo-terminal.
+    Stderr,
+    /// Combined output of a process attached to a pseudo-terminal.
+    Terminal,
+}
+
+/// Complete workspace process registry state.
+record ProcessList {
+    /// Processes retained by the workspace guest daemon across all of its pods.
+    processes: [Process],
+}
+
+/// Mutation applied to the workspace process registry.
+#[json(tag = "type")]
+variant ProcessListMutation {
+    /// Adds a process or replaces the existing entry.
+    Upsert: Process,
+    /// Removes a retained process entry.
+    Remove: ProcessId,
+}

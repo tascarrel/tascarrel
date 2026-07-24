@@ -1,0 +1,349 @@
+//! Workspace configuration-file contracts and host-owned configuration change API.
+//!
+//! [`WorkspaceConfig`] describes the raw `config.toml` shape shared by Tascarrel components, while
+//! [`WorkspaceSettings`] describes portable user preferences from `settings.json`. Fields with
+//! product defaults remain optional so one configuration domain can apply and validate those
+//! defaults after decoding. Configuration-file fields use `kebab-case` on the wire to match TOML,
+//! while settings and subscription types follow the ordinary Tascarrel API encoding.
+//!
+//! The host daemon owns discovery and parsing of workspace configuration files. Its subscription
+//! emits the selected workspace's current configuration, settings, and recursive input modification
+//! times when opened and whenever they change.
+
+import common::Timestamp
+import chats::ChatModelSelection
+import network::PortMapping
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Atomically replaces the portable settings for one host-owned workspace.
+record UpdateWorkspaceSettingsAction {
+    /// Workspace whose `settings.json` file to replace.
+    workspace_name: WorkspaceName,
+    /// Configuration instance on which the edited settings were based.
+    config_instance_id: ConfigInstanceId,
+    /// Complete portable settings document to write.
+    settings: WorkspaceSettings,
+}
+
+/// Result of updating workspace settings.
+///
+/// The resulting state is observed through [`ConfigChangedSubscription`].
+record UpdateWorkspaceSettingsOutput {}
+
+// Subscriptions
+
+/// Subscribes to configuration changes for one workspace owned by the host daemon.
+record ConfigChangedSubscription {
+    /// Workspace whose configuration to receive.
+    workspace_name: WorkspaceName,
+}
+
+/// Current configuration, settings, identity, and input modification times for the selected
+/// workspace.
+record ConfigChangedEvent {
+    /// Random identity assigned whenever hostd reads this workspace's configuration inputs.
+    config_instance_id: ConfigInstanceId,
+    /// Most recently parsed contents of `config.toml`, when a valid value has been observed.
+    config?: WorkspaceConfig,
+    /// Error from the most recent attempt to read `config.toml`, when that attempt failed.
+    last_config_error?: ConfigError,
+    /// Most recently parsed contents of `settings.json`, when the file exists and a valid value has
+    /// been observed.
+    settings?: WorkspaceSettings,
+    /// Error from the most recent attempt to read `settings.json`, when that attempt failed.
+    last_settings_error?: ConfigError,
+    /// Greatest modification time of the `agents` directory or any descendant, when it exists.
+    agents_modified_at?: Timestamp,
+    /// Greatest modification time of the `image` directory or any of its descendants.
+    image_modified_at: Timestamp,
+    /// Greatest modification time of the workspace configuration directory or any descendant.
+    modified_at: Timestamp,
+}
+
+// Domain Types
+
+/// Identifies one host read of a workspace's configuration inputs.
+///
+/// Clients include this value when updating settings so hostd can reject edits based on stale
+/// configuration state.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ConfigInstanceId")]
+opaque ConfigInstanceId
+
+/// Failure encountered while reading or decoding a workspace configuration input.
+record ConfigError {
+    /// Human-readable failure diagnostic without configuration values.
+    message: string,
+}
+
+/// Portable user preferences from one workspace's `settings.json` file.
+record WorkspaceSettings {
+    /// Chat interface preferences.
+    chat?: WorkspaceChatSettings,
+}
+
+/// Portable preferences for the workspace chat interface.
+record WorkspaceChatSettings {
+    /// Per-harness model preferences.
+    harnesses?: WorkspaceChatHarnessSettings,
+}
+
+/// Model preferences for the coding harnesses known to Tascarrel.
+record WorkspaceChatHarnessSettings {
+    /// OpenAI Codex model preferences.
+    codex?: WorkspaceChatModelPreferences,
+    /// Anthropic Claude Code model preferences.
+    claude_code?: WorkspaceChatModelPreferences,
+}
+
+/// Presentation and default-selection preferences for one coding harness.
+record WorkspaceChatModelPreferences {
+    /// Model and non-default options selected for newly created chats.
+    default_model?: ChatModelSelection,
+    /// Model identifiers placed first, in the specified order.
+    ///
+    /// Discovered models omitted from this list retain their harness-defined relative order.
+    model_order?: [string],
+    /// Model identifiers hidden from ordinary selection controls.
+    ///
+    /// A hidden model remains selectable when it is already used by an existing chat or draft.
+    hidden_models?: [string],
+    /// Model identifiers shown before non-favourites in ordinary selection controls.
+    favorite_models?: [string],
+}
+
+/// Raw TOML shape of one workspace `config.toml` file.
+#[json(rename_all = "kebab-case")]
+record WorkspaceConfig {
+    /// Virtual-machine resource overrides.
+    vm?: WorkspaceVmConfig,
+    /// Turnkey development features made available throughout the workspace.
+    features?: WorkspaceFeaturesConfig,
+    /// Nix integration made available throughout the workspace.
+    nix?: WorkspaceNixConfig,
+    /// Editor integrations made available in workspace pods.
+    editors?: WorkspaceEditorsConfig,
+    /// Workspace-wide chat behavior.
+    chat?: WorkspaceChatConfig,
+    /// Default environment entries applied to processes in every pod.
+    env?: [string: string],
+    /// Host-owned secret providers keyed by their workspace-local names.
+    secrets?: WorkspaceSecretsConfig,
+    /// Steps used to prepare the reusable workspace seed.
+    setup?: WorkspaceSetupConfig,
+    /// Steps run whenever a pod starts.
+    init?: WorkspaceInitConfig,
+    /// Persistent workspace-level caches mounted into every pod.
+    caches?: [WorkspaceCacheConfig],
+    /// Host-enforced Git publication policy used by repositories without an override.
+    git?: WorkspaceGitConfig,
+    /// Repositories keyed by their destination path below `/workspace`.
+    repos?: [string: WorkspaceRepositoryConfig],
+    /// Shared host-enforced network policy.
+    network?: WorkspaceNetworkConfig,
+}
+
+/// Workspace-wide chat behavior independent of a coding harness.
+#[json(rename_all = "kebab-case")]
+record WorkspaceChatConfig {
+    /// Message-composition commands keyed by their slash-command names.
+    commands?: [string: WorkspaceSlashCommandConfig],
+}
+
+/// One slash command that inserts configured text into a chat composer.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSlashCommandConfig {
+    /// Message text composed by the slash command.
+    text: string,
+}
+
+/// Host-owned secret-provider configuration.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSecretsConfig {
+    /// Provider instances keyed by names used in secret references.
+    providers?: [string: WorkspaceSecretProviderConfig],
+}
+
+/// One host-owned secret-provider instance.
+#[json(rename_all = "kebab-case", tagged = internally, tag = "kind")]
+variant WorkspaceSecretProviderConfig {
+    /// A SOPS-encrypted JSON document managed with the host's `sops` executable.
+    Sops: WorkspaceSopsSecretProviderConfig,
+}
+
+/// Configuration for one SOPS secret provider.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSopsSecretProviderConfig {
+    /// Relative path to the encrypted JSON document, defaulting to `secrets.json`.
+    file?: string,
+}
+
+/// Optional resource overrides for the workspace virtual machine.
+#[json(rename_all = "kebab-case")]
+record WorkspaceVmConfig {
+    /// Virtual CPU count, or the host daemon's default when absent.
+    cores?: u16,
+    /// Binary memory size such as `"16G"`.
+    memory?: string,
+    /// Sparse persistent state-disk capacity such as `"1T"`.
+    disk?: string,
+}
+
+/// Turnkey development features made available throughout the workspace.
+#[json(rename_all = "kebab-case")]
+record WorkspaceFeaturesConfig {
+    /// Whether a confined Docker daemon and client are available in every pod.
+    docker?: bool,
+    /// Whether a rootless Podman client is available in every pod.
+    podman?: bool,
+    /// Whether the workspace VM's KVM device is available in every pod.
+    virtualization?: bool,
+    /// Whether clients may dynamically forward host USB devices into the workspace.
+    usb?: bool,
+}
+
+/// Nix integration made available throughout the workspace.
+#[json(rename_all = "kebab-case")]
+record WorkspaceNixConfig {
+    /// Whether the workspace-wide Nix daemon is exposed to pods.
+    ///
+    /// The Nix store is exposed as read-only in any case.
+    daemon?: bool,
+}
+
+/// Editor integrations made available in workspace pods.
+#[json(rename_all = "kebab-case")]
+record WorkspaceEditorsConfig {
+    /// Browser-hosted Code editor configuration.
+    code?: WorkspaceCodeEditorConfig,
+}
+
+/// Browser-hosted Code editor configuration.
+#[json(rename_all = "kebab-case")]
+record WorkspaceCodeEditorConfig {
+    /// Additional Marketplace extension identifiers installed before code-server starts. Tascarrel
+    /// also installs the extensions required by its default Code settings.
+    extensions?: [string],
+}
+
+/// Ordered steps used to prepare the reusable workspace seed.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSetupConfig {
+    /// Steps executed in declaration order while preparing the workspace seed.
+    steps?: [WorkspaceSetupStepConfig],
+}
+
+/// One readiness-blocking workspace setup step.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSetupStepConfig {
+    /// Shell script executed for this setup step.
+    script: string,
+}
+
+/// Ordered steps run whenever a pod starts.
+#[json(rename_all = "kebab-case")]
+record WorkspaceInitConfig {
+    /// Steps started in declaration order whenever a pod starts.
+    steps?: [WorkspaceInitStepConfig],
+}
+
+/// One per-pod initialization step.
+#[json(rename_all = "kebab-case")]
+record WorkspaceInitStepConfig {
+    /// Shell script executed for this initialization step.
+    script: string,
+    /// Whether pod startup waits for this step to finish.
+    wait?: bool,
+}
+
+/// One persistent workspace-level cache mounted into every pod.
+#[json(rename_all = "kebab-case")]
+record WorkspaceCacheConfig {
+    /// Stable name of the backing subvolume.
+    name: string,
+    /// Absolute pod path or `~`-relative image-user path.
+    path: string,
+}
+
+/// One Git repository materialized at its map key below `/workspace`.
+#[json(rename_all = "kebab-case")]
+record WorkspaceRepositoryConfig {
+    /// Upstream repository source used by the host daemon.
+    source: string,
+    /// Complete Git publication policy replacing the workspace policy for this repository.
+    git?: WorkspaceGitConfig,
+}
+
+/// Git publication policy for one workspace or repository.
+#[json(rename_all = "kebab-case")]
+record WorkspaceGitConfig {
+    /// Action for branch and tag updates not matched by a rule.
+    /// Defaults to `"require-approval"`.
+    default_policy?: string,
+    /// Ordered branch-name rules evaluated before the default policy.
+    branches?: [WorkspaceGitRuleConfig],
+    /// Ordered tag-name rules evaluated before the default policy.
+    tags?: [WorkspaceGitRuleConfig],
+}
+
+/// One ordered Git branch or tag publication rule.
+#[json(rename_all = "kebab-case")]
+record WorkspaceGitRuleConfig {
+    /// Case-sensitive glob matched against the short branch or tag name.
+    pattern: string,
+    /// Publication action: `"allow"`, `"deny"`, or `"require-approval"`.
+    policy: string,
+}
+
+/// Shared host-enforced workspace network policy.
+#[json(rename_all = "kebab-case")]
+record WorkspaceNetworkConfig {
+    /// Host-loopback TCP ports exposed through same-port shorthands or Docker-style mappings.
+    host_ports?: [WorkspaceHostPort],
+    /// Default egress action, either `"allow"` or `"deny"`.
+    default?: string,
+    /// Whether destinations on local, private, and host-interface addresses may be reached.
+    ///
+    /// Defaults to `false`.
+    allow_local?: bool,
+    /// Destination IP addresses admitted when the default action is `"deny"`.
+    allow_addresses?: [string],
+    /// Destination IP addresses rejected regardless of the default action.
+    deny_addresses?: [string],
+    /// HTTP host patterns admitted by the hostname policy.
+    allow_hosts?: [string],
+    /// HTTP host patterns rejected by the hostname policy.
+    deny_hosts?: [string],
+    /// Destination TCP ports available to pods.
+    allow_ports?: [u16],
+    /// HTTP rules that inject host-resolved secrets into matching requests.
+    secret_injection?: [WorkspaceSecretInjectionConfig],
+    /// Destination ports whose traffic is interpreted as HTTP.
+    http_ports?: [u16],
+    /// Destination ports whose traffic is interpreted as HTTPS.
+    https_ports?: [u16],
+}
+
+/// One static pod-to-host port mapping.
+#[json(tagged = implicitly)]
+variant WorkspaceHostPort {
+    /// Numeric shorthand mapping the same host and pod port.
+    SamePort: u16,
+    /// Docker-style `<host-port>:<pod-port>` mapping.
+    Mapping: PortMapping,
+}
+
+/// One host-resolved HTTP secret-injection rule.
+#[json(rename_all = "kebab-case")]
+record WorkspaceSecretInjectionConfig {
+    /// HTTP host pattern whose matching requests receive the secret.
+    host: string,
+    /// Header inspected for the placeholder, or every eligible header when absent.
+    header?: string,
+    /// Request value replaced by the secret before forwarding.
+    placeholder?: string,
+    /// Provider-qualified secret reference such as `project.API_TOKEN`.
+    secret: string,
+}

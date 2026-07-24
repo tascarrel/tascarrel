@@ -1,0 +1,123 @@
+//! Guest-owned Code sessions backed by supervised pod processes and host HTTP routes.
+//!
+//! A workspace guest coordinates code-server processes and a profile shared by all of its pods.
+//! Each session asks hostd for an internal HTTP route, while the route itself remains owned and
+//! observable through hostd's network service.
+
+import network::{HostnamePrefix, HttpRouteId}
+import pods::PodId
+import processes::ProcessId
+import store::{Stamp, StoreEvent}
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Ensures that one Code session exists for a workspace pod folder.
+/// Repeating this action for the same workspace, pod, and folder returns the existing active
+/// session. An exited or failed session is restarted in place.
+record EnsureCodeSessionAction {
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod in which code-server runs.
+    pod_id: PodId,
+    /// Human-readable title used for the process and HTTP route.
+    title: string,
+    /// Absolute folder opened by code-server, or `/workspace` when absent.
+    folder?: string,
+}
+
+/// Identifier of the ensured Code session.
+record EnsureCodeSessionOutput {
+    /// Stable identifier assigned to the Code session.
+    code_session_id: CodeSessionId,
+}
+
+/// Deletes one Code session and releases its process and HTTP route.
+record DeleteCodeSessionAction {
+    /// Code session to delete.
+    code_session_id: CodeSessionId,
+}
+
+/// Result of deleting one Code session.
+record DeleteCodeSessionOutput {}
+
+// Subscriptions
+
+/// Subscribes to the guest-owned Code sessions for one workspace.
+record CodeSessionListChangedSubscription {
+    /// Workspace whose Code sessions are observed.
+    workspace: WorkspaceName,
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by a workspace's Code session list.
+record CodeSessionListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached Code session list.
+    change: StoreEvent<CodeSessionList, CodeSessionListMutation>,
+}
+
+// Domain Types
+
+/// Identifies one guest-owned Code session.
+#[json(type = "string")]
+#[rust(type = "crate::ids::CodeSessionId")]
+opaque CodeSessionId
+
+/// One code-server process and its host-issued HTTP route.
+record CodeSession {
+    /// Stable identifier assigned to the Code session.
+    id: CodeSessionId,
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod in which code-server runs.
+    pod_id: PodId,
+    /// Absolute folder opened by code-server.
+    folder: string,
+    /// Human-readable title used for the process and HTTP route.
+    title: string,
+    /// TCP port on which code-server listens inside the pod.
+    pod_port: u16,
+    /// Supervised process running code-server.
+    process_id: ProcessId,
+    /// Host-owned route forwarding HTTP to code-server.
+    http_route_id: HttpRouteId,
+    /// DNS label used to address code-server through the Tascarrel frontend port.
+    hostname_prefix: HostnamePrefix,
+    /// Current aggregate session lifecycle state.
+    status: CodeSessionStatus,
+}
+
+/// Current lifecycle state of one Code session.
+#[json(tag = "status")]
+variant CodeSessionStatus {
+    /// The process or HTTP endpoint is still starting.
+    Starting,
+    /// Code-server accepted its health probe and is ready for a browser.
+    Running,
+    /// The supervised code-server process exited.
+    Exited,
+    /// The process or HTTP endpoint failed.
+    Failed: CodeSessionFailure,
+}
+
+/// Failure preventing one Code session from serving the editor.
+record CodeSessionFailure {
+    /// Human-readable failure diagnostic.
+    message: string,
+}
+
+/// Complete Code session list for one workspace.
+record CodeSessionList {
+    /// Code sessions owned by guestd for the workspace.
+    code_sessions: [CodeSession],
+}
+
+/// Mutation applied to a workspace's Code session list.
+#[json(tag = "type")]
+variant CodeSessionListMutation {
+    /// Adds a Code session or replaces the existing entry.
+    Upsert: CodeSession,
+    /// Removes a Code session from the list.
+    Remove: CodeSessionId,
+}

@@ -1,0 +1,1135 @@
+//! Durable coding-harness chat API implemented by a workspace guest daemon.
+//!
+//! Each chat belongs to a pod in the guest daemon's workspace. Its history remains durable across
+//! harness bindings and VM incarnations. Creating or attaching a chat installs the harness version
+//! pinned by Tascarrel when necessary, then runs the harness inside the selected pod. A detached chat
+//! retains its history without a running harness process.
+//!
+//! Harness installations and credentials belong to the workspace rather than an individual pod.
+//! The harness-list subscription exposes pinned versions, installation state, model discovery, and
+//! secret-free credential state. Credential state distinguishes whether credentials exist from
+//! whether their provider has validated them.
+//!
+//! The chat list and each opened chat use the generic tascarrel-store wire model. Their [`Stamp`]
+//! cursors identify an authoritative store generation and version. A subscription replaces its
+//! consumer state with a snapshot whenever its retained cursor cannot be resumed. Harness-list
+//! events instead replace the complete workspace-wide harness list.
+
+import common::{JsonValue, Money, Timestamp}
+import pods::PodId
+import store::{Stamp, StoreEvent}
+
+// RPC
+
+/// Returns the current active chats belonging to one pod.
+record GetPodChatsAction {
+    /// Pod whose active chats are returned.
+    pod_id: PodId,
+}
+
+/// Current active chats belonging to the selected pod.
+record GetPodChatsOutput {
+    /// Active chat summaries ordered for presentation.
+    chats: [ChatSummary],
+}
+
+/// Creates a durable chat for one pod.
+record CreateChatAction {
+    /// Pod in which the chat's harness runs.
+    pod_id: PodId,
+    /// Coding harness to associate durably with the chat.
+    harness: ChatHarnessKind,
+    /// Explicit initial user-facing title.
+    ///
+    /// When omitted, the chat is created immediately with a prompt-derived fallback title and the
+    /// engine may replace it asynchronously with a generated title.
+    title?: string,
+    /// Initial model selection, or the harness default when omitted.
+    model?: ChatModelSelection,
+    /// First prompt to queue while the chat's initial binding is attached.
+    ///
+    /// Providing a prompt always schedules attachment, regardless of `auto_attach`.
+    initial_prompt?: ChatPrompt,
+    /// Whether to schedule a harness binding attachment after creating the chat.
+    ///
+    /// An omitted value is treated as `true`. Set this to `false` to create the chat detached when
+    /// no initial prompt is provided.
+    auto_attach?: bool,
+}
+
+/// Result of creating a chat.
+record CreateChatOutput {
+    /// Identifier assigned to the new chat.
+    chat_id: ChatId,
+}
+
+/// Creates one pod and its first durable chat.
+/// The action returns after both resources are observable. Pod preparation, harness attachment,
+/// and prompt execution continue asynchronously and are reported through their subscriptions.
+record CreatePodChatAction {
+    /// Coding harness to associate durably with the chat.
+    harness: ChatHarnessKind,
+    /// Explicit initial user-facing title shared by the pod and chat.
+    /// When omitted, both resources start with a prompt-derived fallback title and may receive an
+    /// asynchronously generated title.
+    title?: string,
+    /// Initial model selection, or the harness default when omitted.
+    model?: ChatModelSelection,
+    /// First prompt queued for delivery after the pod and harness become available.
+    initial_prompt: ChatPrompt,
+}
+
+/// Identifiers assigned to the created pod and chat.
+record CreatePodChatOutput {
+    /// Identifier assigned to the new pod.
+    pod_id: PodId,
+    /// Identifier assigned to the new chat.
+    chat_id: ChatId,
+}
+
+/// Schedules attachment of a harness binding to an existing detached chat.
+///
+/// The pinned harness is installed first when necessary. An already attaching or attached chat
+/// succeeds without starting another binding.
+record AttachChatBindingAction {
+    /// Chat to attach.
+    chat_id: ChatId,
+}
+
+/// Successful result of requesting chat binding attachment.
+record AttachChatBindingOutput {}
+
+/// Schedules detachment of a chat's harness binding.
+///
+/// An already detached or detaching chat succeeds without doing anything. The current binding
+/// changes to `Detaching` while it stops and is then removed through the subscriptions.
+record DetachChatBindingAction {
+    /// Chat to detach.
+    chat_id: ChatId,
+}
+
+/// Successful result of requesting chat binding detachment.
+record DetachChatBindingOutput {}
+
+/// Archives a chat and removes it from the active chat collection.
+///
+/// Archival stops any running harness binding. Archived chats cannot currently be restored or
+/// accessed through the chats API.
+record ArchiveChatAction {
+    /// Chat to archive.
+    chat_id: ChatId,
+}
+
+/// Successful result of archiving a chat.
+record ArchiveChatOutput {}
+
+/// Clears the attention flag for a chat that the user has viewed.
+record AcknowledgeChatAttentionAction {
+    /// Chat whose attention flag should be cleared.
+    chat_id: ChatId,
+}
+
+/// Successful result of acknowledging a chat's attention flag.
+record AcknowledgeChatAttentionOutput {}
+
+/// Installs the pinned version of one coding harness in the workspace.
+///
+/// An already installed harness succeeds without starting another installation. Installation state
+/// and failure details are reported through the harness-list subscription.
+record InstallChatHarnessAction {
+    /// Harness to install.
+    harness: ChatHarnessKind,
+}
+
+/// Result of requesting coding-harness installation.
+record InstallChatHarnessOutput {}
+
+/// Starts provider-owned authentication for a coding harness.
+///
+/// The pinned harness is installed first when necessary.
+///
+/// Codex authentication uses the Codex app-server device-code flow. Claude Code accepts a
+/// token created independently by running `claude setup-token`; the token is consumed by this
+/// action and is never returned by the API.
+record StartChatHarnessAuthAction {
+    /// Provider-specific authentication request.
+    request: ChatHarnessAuthRequest,
+}
+
+/// Result of requesting coding-harness authentication.
+record StartChatHarnessAuthOutput {}
+
+/// Validates the existing credentials for one coding harness with its provider.
+///
+/// The pinned harness is installed first when necessary. The check runs as the dedicated
+/// unprivileged harness user. Its result is secret-free and also becomes observable through the
+/// harness-list subscription.
+record ValidateChatHarnessCredentialsAction {
+    /// Harness whose existing credentials should be validated.
+    harness: ChatHarnessKind,
+}
+
+/// Result of requesting credential validation.
+record ValidateChatHarnessCredentialsOutput {}
+
+/// Cancels authentication currently in progress for one harness.
+record CancelChatHarnessAuthAction {
+    /// Harness whose current authentication attempt should be cancelled.
+    harness: ChatHarnessKind,
+}
+
+/// Result of requesting authentication cancellation.
+record CancelChatHarnessAuthOutput {}
+
+/// Removes credentials owned by Tascarrel for one coding harness.
+record LogoutChatHarnessAction {
+    /// Harness to sign out.
+    harness: ChatHarnessKind,
+}
+
+/// Result of removing the coding-harness credentials.
+record LogoutChatHarnessOutput {}
+
+/// Submits user input to a chat for immediate or deferred delivery.
+record SendChatPromptAction {
+    /// Chat receiving the prompt.
+    chat_id: ChatId,
+    /// User input and optional model selection.
+    prompt: ChatPrompt,
+    /// When the prompt should be delivered relative to an active turn.
+    mode: ChatPromptMode,
+}
+
+/// Result of submitting a chat prompt.
+record SendChatPromptOutput {}
+
+/// Interrupts the active turn, if any, and sends all queued prompts as one prompt.
+record FlushChatPromptQueueAction {
+    /// Chat whose pending prompt queue should be sent immediately.
+    chat_id: ChatId,
+}
+
+/// Result of requesting a chat prompt-queue flush.
+record FlushChatPromptQueueOutput {}
+
+/// Removes one prompt waiting for a chat to become idle.
+record RemoveChatQueuedPromptAction {
+    /// Chat containing the queued prompt.
+    chat_id: ChatId,
+    /// Queued prompt to remove.
+    queued_prompt_id: ChatQueuedPromptId,
+}
+
+/// Successful result of removing a queued chat prompt.
+record RemoveChatQueuedPromptOutput {}
+
+/// Interrupts a chat's active turn.
+record InterruptChatAction {
+    /// Chat whose active turn should be interrupted.
+    chat_id: ChatId,
+}
+
+/// Successful result of interrupting a chat's active turn.
+record InterruptChatOutput {}
+
+/// Requests compaction of the model context associated with a chat.
+record CompactChatContextAction {
+    /// Chat whose harness context should be compacted.
+    chat_id: ChatId,
+}
+
+/// Successful result of requesting context compaction.
+///
+/// Progress and completion are reported through the chat timeline.
+record CompactChatContextOutput {}
+
+/// Resolves a structured user-input request owned by the current binding.
+record ResolveChatRequestAction {
+    /// Chat containing the request.
+    chat_id: ChatId,
+    /// Request being resolved.
+    request_id: ChatRequestId,
+    /// Answers keyed by question identifier.
+    answers: [ChatQuestionAnswer],
+}
+
+/// Successful result of resolving a structured user-input request.
+record ResolveChatRequestOutput {}
+
+// Subscriptions
+
+/// Subscribes to the workspace-wide active chat list.
+#[rust(derive(Default))]
+record ChatListChangedSubscription {
+    /// Stamp of the last chat event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by the workspace-wide active chat list.
+record ChatListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached chat list.
+    change: StoreEvent<ChatList, ChatListMutation>,
+}
+
+/// Subscribes to the durable and runtime state of one chat.
+record ChatSubscription {
+    /// Chat whose changes should be delivered.
+    chat_id: ChatId,
+    /// Stamp of the last chat event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted when one chat changes.
+record ChatEvent {
+    /// Snapshot or mutation used to advance the consumer's cached chat.
+    change: StoreEvent<Chat, ChatMutation>,
+}
+
+/// Subscribes to workspace-wide harness installation, credentials, login state, capabilities, and
+/// models.
+#[rust(derive(Default))]
+record ChatHarnessListSubscription {}
+
+/// Complete replacement event emitted by the workspace-wide coding-harness list.
+record ChatHarnessListEvent {
+    /// Harnesses ordered by their stable kind.
+    harnesses: [ChatHarness],
+}
+
+// Domain Types
+
+/// A stable durable chat identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatId")]
+opaque ChatId
+
+/// Identifies one runtime binding attempt for a chat.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatBindingId")]
+opaque ChatBindingId
+
+/// A stable chat turn identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatTurnId")]
+opaque ChatTurnId
+
+/// A stable chat item identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatItemId")]
+opaque ChatItemId
+
+/// A stable chat structured-request identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatRequestId")]
+opaque ChatRequestId
+
+/// A stable chat question identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatQuestionId")]
+opaque ChatQuestionId
+
+/// A stable chat activity identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatActivityId")]
+opaque ChatActivityId
+
+/// A stable chat prompt-attachment identifier.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatAttachmentId")]
+opaque ChatAttachmentId
+
+/// Identifies one runtime queued chat prompt.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ChatQueuedPromptId")]
+opaque ChatQueuedPromptId
+
+/// Complete workspace-wide active chat list.
+record ChatList {
+    /// Chats ordered for presentation by the application.
+    chats: [ChatSummary],
+}
+
+/// Mutation applied to the workspace-wide active chat list.
+#[json(tag = "type")]
+variant ChatListMutation {
+    /// Adds a chat or replaces its summary and runtime binding state.
+    Upsert: ChatSummary,
+    /// Removes a chat from the active chat list.
+    Remove: ChatId,
+}
+
+/// Complete durable and runtime state of one chat.
+record Chat {
+    /// Chat metadata.
+    summary: ChatSummary,
+    /// Turns in chronological order.
+    turns: [ChatTurn],
+    /// Unified chat timeline in authoritative presentation order.
+    ///
+    /// Updating an existing entry does not change its position.
+    timeline: [ChatTimelineEntry],
+    /// Unique files and images accepted on prompts, ordered by their stable identifier.
+    attachments: [ChatPromptAttachment],
+    /// Runtime prompts waiting to be delivered when the chat becomes idle.
+    ///
+    /// This is empty after the engine restarts because queued prompts are not durable chat state.
+    queued_prompts: [ChatQueuedPrompt],
+}
+
+/// Mutation applied to one chat's durable and runtime state.
+#[json(tag = "type")]
+variant ChatMutation {
+    /// Chat metadata or runtime binding state changed.
+    UpdateSummary: ChatSummary,
+    /// A turn was created or changed.
+    UpsertTurn: ChatTurn,
+    /// A timeline entry was created or its complete representation was replaced.
+    UpsertTimelineEntry: ChatTimelineEntry,
+    /// Streaming text was appended to a started conversation item.
+    AppendItemContent: ChatItemContentAppended,
+    /// A started conversation item completed successfully.
+    ///
+    /// Clients set the item state to `Completed`. Failed items are instead replaced with a `Failed`
+    /// representation through `UpsertTimelineEntry`.
+    CompleteTimelineItem: ChatItemCompleted,
+    /// The complete pending prompt queue changed.
+    ReplacePromptQueue: ChatPromptQueue,
+    /// An attachment was added or its complete metadata was replaced.
+    UpsertAttachment: ChatPromptAttachment,
+}
+
+/// Lightweight chat metadata.
+record ChatSummary {
+    /// Stable chat identifier.
+    chat_id: ChatId,
+    /// Pod in which the chat's harness runs.
+    pod_id: PodId,
+    /// Current runtime harness binding, or none when the chat is detached.
+    binding?: ChatBinding,
+    /// Most recent binding failure, if any.
+    ///
+    /// The binding identifier correlates this failure with the attachment request that produced it.
+    /// Starting another attachment attempt clears the previous failure. A clean detach leaves it
+    /// unset.
+    last_binding_error?: ChatBindingError,
+    /// Coarse runtime status suitable for chat lists and other summary-only views.
+    agent_status: ChatAgentStatus,
+    /// Whether a turn ended without a queued follow-up since the chat was last acknowledged.
+    attention_required: bool,
+    /// Coding harness durably associated with the chat.
+    harness: ChatHarnessKind,
+    /// Latest effective model selection, or the harness default when unknown.
+    model?: ChatModelSelection,
+    /// User-facing title.
+    title: string,
+    /// Time at which the chat was created.
+    created_at: Timestamp,
+    /// Time of the most recent durable change.
+    updated_at: Timestamp,
+}
+
+/// Coarse runtime status of the agent associated with a chat.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatAgentStatus {
+    /// No turn is currently running and the agent does not require user input.
+    Idle,
+    /// The agent is actively processing a turn.
+    Working,
+    /// The current turn is waiting for the user to answer a request.
+    UserInputRequired,
+}
+
+/// Runtime harness binding currently associated with a chat.
+record ChatBinding {
+    /// Identifier assigned when this attachment attempt was scheduled.
+    binding_id: ChatBindingId,
+    /// Current lifecycle status of this binding.
+    status: ChatBindingStatus,
+}
+
+/// Lifecycle status of a current harness binding.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatBindingStatus {
+    /// A harness binding is being created in the background.
+    Attaching,
+    /// A harness binding currently exists for the chat.
+    Attached,
+    /// The chat's harness binding is stopping in the background.
+    Detaching,
+}
+
+/// Most recent failure associated with a harness binding.
+record ChatBindingError {
+    /// Binding attempt that failed.
+    binding_id: ChatBindingId,
+    /// Stable engine-defined error code.
+    code: string,
+    /// Human-readable failure message safe to show to the user.
+    message: string,
+    /// Time at which the binding failed.
+    occurred_at: Timestamp,
+}
+
+/// A text fragment appended to a conversation item.
+record ChatItemContentAppended {
+    /// Item receiving the content.
+    item_id: ChatItemId,
+    /// Text fragment appended to the item's sole text content value.
+    delta: string,
+}
+
+/// Completion of a previously started conversation item.
+record ChatItemCompleted {
+    /// Item that completed.
+    item_id: ChatItemId,
+    /// Time at which completion was observed.
+    completed_at: Timestamp,
+}
+
+/// Coding harness durably associated with a chat.
+#[json(tagged = externally)]
+variant ChatHarnessKind {
+    /// The OpenAI Codex coding harness.
+    Codex,
+    /// The Anthropic Claude Code coding harness.
+    ClaudeCode,
+}
+
+/// A coding harness available within the workspace.
+record ChatHarness {
+    /// Stable harness kind used in subsequent actions.
+    kind: ChatHarnessKind,
+    /// Human-readable harness name.
+    display_name: string,
+    /// Harness version pinned by this Tascarrel build.
+    pinned_version: string,
+    /// Installation state of the pinned harness version in this workspace.
+    installation: ChatHarnessInstallationState,
+    /// Whether workspace-owned credentials exist and what is known about their validity.
+    credentials: ChatHarnessCredentialState,
+    /// Whether Tascarrel is currently validating the credentials with their provider.
+    ///
+    /// The `credentials` field retains the last known state while validation is in progress.
+    validating_credentials: bool,
+    /// Current provider-owned login attempt, independently of existing credentials.
+    login: ChatHarnessLoginState,
+    /// Operations supported by this harness.
+    capabilities: ChatHarnessCapabilities,
+    /// Models and model-specific options currently offered by this harness.
+    ///
+    /// This is empty until the installed harness has successfully completed model discovery.
+    models: [ChatModel],
+}
+
+/// Workspace installation state of a harness version pinned by Tascarrel.
+#[json(tag = "status")]
+variant ChatHarnessInstallationState {
+    /// The pinned harness version is not installed.
+    NotInstalled,
+    /// The pinned harness version is being downloaded and verified.
+    Installing,
+    /// The pinned harness version is installed and verified.
+    Installed: ChatHarnessInstallation,
+    /// The most recent installation attempt failed.
+    Failed: ChatHarnessInstallationFailure,
+}
+
+/// Verified installation of a pinned coding harness.
+record ChatHarnessInstallation {
+    /// Time at which installation and verification completed.
+    installed_at: Timestamp,
+}
+
+/// Secret-free failure from a coding-harness installation attempt.
+record ChatHarnessInstallationFailure {
+    /// Stable Tascarrel-defined failure category.
+    code: string,
+    /// Human-readable installation diagnostic.
+    message: string,
+    /// Time at which the installation failed.
+    occurred_at: Timestamp,
+}
+
+/// Existence and last known provider validity of credentials stored in this workspace.
+#[json(tag = "state")]
+variant ChatHarnessCredentialState {
+    /// No workspace-owned credentials exist.
+    Missing,
+    /// Workspace-owned credentials exist but have not been checked with their provider.
+    Present,
+    /// The provider accepted the credentials.
+    Valid: ChatHarnessValidCredentials,
+    /// The provider rejected the credentials or the check otherwise established they are unusable.
+    Invalid: ChatHarnessAuthFailure,
+}
+
+/// Provider-accepted credentials and secret-free account metadata.
+record ChatHarnessValidCredentials {
+    /// Authentication mechanism reported by the provider.
+    method: string,
+    /// Account email when the provider makes it available.
+    email?: string,
+    /// Subscription or account plan when the provider makes it available.
+    plan?: string,
+    /// Time at which the provider accepted the credentials.
+    checked_at: Timestamp,
+}
+
+/// Current provider-owned login attempt for one harness.
+#[json(tag = "state")]
+variant ChatHarnessLoginState {
+    /// No provider login is running and the latest attempt did not fail.
+    Idle,
+    /// Provider-owned authentication is waiting for the user or provider.
+    Pending: ChatHarnessAuthChallenge,
+    /// The most recent provider login attempt failed.
+    Failed: ChatHarnessAuthFailure,
+}
+
+/// User-visible challenge returned by a provider-owned authentication flow.
+record ChatHarnessAuthChallenge {
+    /// Opaque provider login identifier used only for cancellation and event correlation.
+    login_id: string,
+    /// HTTPS page the user should open to authenticate.
+    authorization_url: string,
+    /// One-time device code to enter on the authorization page, when required.
+    user_code?: string,
+    /// Time after which the provider will no longer accept this challenge, when known.
+    expires_at?: Timestamp,
+}
+
+/// Secret-free failure from a provider login or credential check.
+record ChatHarnessAuthFailure {
+    /// Stable Tascarrel-defined failure category.
+    code: string,
+    /// Human-readable diagnostic that does not contain credentials.
+    message: string,
+    /// Time at which the failure was observed.
+    occurred_at: Timestamp,
+}
+
+/// Provider-specific request for coding-harness authentication.
+#[json(tag = "kind")]
+variant ChatHarnessAuthRequest {
+    /// Start Codex's device-code flow.
+    CodexDeviceCode,
+    /// Install an inference token previously created with `claude setup-token`.
+    ClaudeSetupToken: ClaudeSetupTokenAuthRequest,
+}
+
+/// A Claude Code inference token created outside Tascarrel by `claude setup-token`.
+record ClaudeSetupTokenAuthRequest {
+    /// Secret token to install. It is accepted as write-only input and is never returned.
+    token: string,
+}
+
+/// Operations whose availability differs between chat harnesses.
+record ChatHarnessCapabilities {
+    /// Whether a native session can be reopened from durable resumption data.
+    resume_session: bool,
+    /// Whether an active turn can be interrupted.
+    interrupt_turn: bool,
+    /// Whether additional user instructions can be sent to an active turn.
+    steer_turn: bool,
+    /// Whether the harness can ask structured questions and receive structured answers.
+    structured_user_input: bool,
+    /// Whether the harness can compact the model context of an existing chat.
+    compact_context: bool,
+    /// How model changes are handled after a session has started.
+    model_switching: ChatModelSwitching,
+}
+
+/// Describes how a harness handles model changes on an existing chat.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatModelSwitching {
+    /// Model changes are not supported after the initial selection.
+    Unsupported,
+    /// The model can be changed on the running native session.
+    InSession,
+}
+
+/// A model offered by a chat's harness.
+record ChatModel {
+    /// Provider-native model identifier used in requests.
+    id: string,
+    /// Human-readable model name.
+    display_name: string,
+    /// Optional compact label for constrained user interfaces.
+    short_name?: string,
+    /// Whether the model came from user configuration rather than native discovery.
+    is_custom: bool,
+    /// Model-specific settings advertised by the harness.
+    options: [ChatModelOptionDescriptor],
+    /// Token pricing supplied by the binding provider, when known.
+    pricing?: ChatModelPricing,
+}
+
+/// Versioned token rates for one model.
+///
+/// The rate is copied into turn usage before that usage becomes durable. Historical turn costs
+/// therefore retain the exact pricing inputs used even after a provider updates its catalog.
+record ChatModelPricing {
+    /// Stable version of the provider's pricing catalog.
+    catalog_version: string,
+    /// Number of tokens represented by each monetary amount in this pricing structure.
+    token_count: u64,
+    /// Price for input tokens that were neither read from nor written to a cache.
+    input: Money,
+    /// Price for input tokens read from a provider cache, when priced separately.
+    cache_read_input?: Money,
+    /// Price for input tokens written to a provider cache, when priced separately.
+    cache_write_input?: Money,
+    /// Price for output tokens, including reasoning output tokens.
+    output: Money,
+}
+
+/// A selected model and its non-default provider-defined options.
+record ChatModelSelection {
+    /// Provider-native model identifier.
+    model: string,
+    /// Provider-defined option values to apply with the model.
+    options: [ChatModelOptionSelection],
+}
+
+/// One selected value for a provider-defined model option.
+record ChatModelOptionSelection {
+    /// Option identifier matching a `ChatModelOptionDescriptor`.
+    id: string,
+    /// Selected option value.
+    value: ChatModelOptionValue,
+}
+
+/// Values supported by model options in the common chat protocol.
+#[json(tag = "kind")]
+variant ChatModelOptionValue {
+    /// A selected identifier from a list of choices.
+    String: string,
+    /// An enabled or disabled toggle.
+    Boolean: bool,
+}
+
+/// Describes one model-specific control that a client may present.
+#[json(tag = "kind")]
+variant ChatModelOptionDescriptor {
+    /// A control allowing one value to be selected from a fixed list.
+    Select: ChatModelSelectOptionDescriptor,
+    /// A control allowing a feature to be enabled or disabled.
+    Boolean: ChatModelBooleanOptionDescriptor,
+}
+
+/// A model option allowing one value to be selected from a fixed list.
+record ChatModelSelectOptionDescriptor {
+    /// Stable provider-defined option identifier.
+    id: string,
+    /// Human-readable option label.
+    label: string,
+    /// Optional explanation of the option's effect.
+    description?: string,
+    /// Values accepted by the option.
+    choices: [ChatModelOptionChoice],
+}
+
+/// A model option allowing a feature to be enabled or disabled.
+record ChatModelBooleanOptionDescriptor {
+    /// Stable provider-defined option identifier.
+    id: string,
+    /// Human-readable option label.
+    label: string,
+    /// Optional explanation of the option's effect.
+    description?: string,
+}
+
+/// One value advertised for a select model option.
+record ChatModelOptionChoice {
+    /// Provider-native value sent back in a model selection.
+    id: string,
+    /// Human-readable choice label.
+    label: string,
+    /// Optional explanation of this value.
+    description?: string,
+    /// Whether the harness considers this the default value.
+    is_default: bool,
+}
+
+/// User input sent to a chat.
+record ChatPrompt {
+    /// User-authored text, or none for an attachment-only prompt.
+    text?: string,
+    /// Files or images attached to the prompt.
+    attachments: [ChatPromptAttachment],
+    /// Model selection for this prompt, or the chat's current model when omitted.
+    model?: ChatModelSelection,
+}
+
+/// Controls delivery of a submitted chat prompt.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatPromptMode {
+    /// Send immediately, steering the active turn when one is running.
+    Immediate,
+    /// Send immediately when idle, or enqueue until the active turn ends.
+    WhenIdle,
+    /// Interrupt the active turn, if any, and then send immediately.
+    InterruptAndSend,
+}
+
+/// One prompt waiting for its chat to become idle.
+record ChatQueuedPrompt {
+    /// Runtime identifier used to remove this queued prompt.
+    queued_prompt_id: ChatQueuedPromptId,
+    /// Original prompt in queue order.
+    prompt: ChatPrompt,
+}
+
+/// Complete runtime prompt queue for one chat.
+///
+/// Queued prompts survive binding retries within the running engine but are not restored after the
+/// engine restarts.
+record ChatPromptQueue {
+    /// Prompts in delivery order.
+    prompts: [ChatQueuedPrompt],
+}
+
+/// A file or image supplied with a chat prompt.
+record ChatPromptAttachment {
+    /// Stable attachment identifier.
+    attachment_id: ChatAttachmentId,
+    /// User-facing file name.
+    name: string,
+    /// Canonical MIME media type recorded by the attachment store.
+    media_type: string,
+    /// Content size in bytes.
+    size: u64,
+    /// SHA-256 digest encoded as lowercase hexadecimal.
+    digest: string,
+}
+
+/// State of one chat turn.
+record ChatTurn {
+    /// Stable turn identifier.
+    turn_id: ChatTurnId,
+    /// Harness binding that executed the turn.
+    ///
+    /// A turn left in `Running` state is considered failed once this is no longer the chat's current
+    /// binding.
+    binding_id: ChatBindingId,
+    /// Current turn state.
+    state: ChatTurnState,
+    /// Time at which the turn began, when observed.
+    started_at?: Timestamp,
+    /// Time at which the turn ended, when observed.
+    completed_at?: Timestamp,
+    /// Failure safe to expose to query clients.
+    error?: ChatFailure,
+    /// Latest usage snapshot for the turn, when the harness exposes usage.
+    usage?: ChatTurnUsage,
+}
+
+/// Lifecycle state of a chat turn.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatTurnState {
+    /// The turn is processing.
+    Running,
+    /// The turn completed successfully.
+    Completed,
+    /// The turn was interrupted.
+    Interrupted,
+    /// The turn failed.
+    Failed,
+}
+
+/// Latest resource-usage observation for one chat turn.
+///
+/// Snapshots contain absolute turn-local counters. Clients replace an older snapshot with a newer
+/// one and must not add snapshots together.
+record ChatTurnUsage {
+    /// Whether more usage updates may still arrive for the turn.
+    state: ChatUsageState,
+    /// Time at which Tascarrel observed this snapshot.
+    observed_at: Timestamp,
+    /// Provider-neutral usage counters.
+    snapshot: ChatUsageSnapshot,
+    /// Cost calculated by Tascarrel from a versioned pricing catalog, when available.
+    calculated_cost?: ChatCalculatedCost,
+}
+
+/// Stability of a turn-usage snapshot.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatUsageState {
+    /// The turn is active and this snapshot may be replaced.
+    Provisional,
+    /// The turn ended normally and this is its last observed snapshot.
+    Settled,
+}
+
+/// Provider-neutral usage counters for one chat turn.
+record ChatUsageSnapshot {
+    /// Portion of the harness execution represented by these counters.
+    coverage: ChatUsageCoverage,
+    /// Aggregate counters for the covered execution.
+    tokens: ChatTokenUsage,
+    /// Optional per-model breakdown. Its counters partition the aggregate when supplied.
+    models: [ChatModelUsage],
+    /// Cost estimated by the provider, when the provider reports one.
+    provider_estimated_cost?: Money,
+}
+
+/// Scope covered by a usage snapshot.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatUsageCoverage {
+    /// Only the primary agent or model invocation is represented.
+    PrimaryAgent,
+    /// The complete execution tree, including delegated work, is represented.
+    ExecutionTree,
+}
+
+/// Normalized token counters.
+///
+/// Input and output are inclusive totals. Cache-read and cache-write input tokens are subsets of
+/// `input_tokens`; reasoning output tokens are a subset of `output_tokens`. An absent optional
+/// counter means the provider did not expose it, while zero means it exposed the class and reported
+/// no usage.
+record ChatTokenUsage {
+    /// Total input tokens, including cache reads and writes.
+    input_tokens: u64,
+    /// Total output tokens, including reasoning output.
+    output_tokens: u64,
+    /// Input tokens read from a provider cache, when exposed.
+    cache_read_input_tokens?: u64,
+    /// Input tokens written to a provider cache, when exposed.
+    cache_write_input_tokens?: u64,
+    /// Cache-write input broken down by provider TTL, when exposed.
+    cache_writes_by_ttl: [ChatCacheWriteUsage],
+    /// Output tokens used for model reasoning, when exposed.
+    reasoning_output_tokens?: u64,
+}
+
+/// Cache-write tokens assigned to one cache time-to-live class.
+record ChatCacheWriteUsage {
+    /// Cache time-to-live in seconds.
+    ttl_seconds: u64,
+    /// Input tokens written to the cache class.
+    input_tokens: u64,
+}
+
+/// Usage attributed to one effective model selection.
+record ChatModelUsage {
+    /// Model selection to which the usage is attributed.
+    model: ChatModelSelection,
+    /// Token counters attributed to the model selection.
+    tokens: ChatTokenUsage,
+    /// Immutable pricing snapshot applied to this model usage, when known.
+    pricing?: ChatModelPricing,
+    /// Cost estimated by the provider for this model usage, when reported.
+    provider_estimated_cost?: Money,
+}
+
+/// Cost calculated locally from normalized usage.
+record ChatCalculatedCost {
+    /// Total rounded to the nearest currency minor unit.
+    amount: Money,
+    /// Stable identifier for the pricing inputs used in this calculation.
+    pricing_catalog_version: string,
+}
+
+/// One entry in a chat's authoritative timeline.
+#[json(tag = "entry")]
+variant ChatTimelineEntry {
+    /// A conversation item produced by the user or harness.
+    Item: ChatItem,
+    /// A structured user-input request, including requests from earlier bindings.
+    Request: ChatRequest,
+    /// Diagnostic or lifecycle activity.
+    Activity: ChatActivity,
+}
+
+/// Conversation item in a chat timeline.
+record ChatItem {
+    /// Stable item identifier.
+    item_id: ChatItemId,
+    /// Harness binding that produced the item.
+    ///
+    /// An item left in `Started` state is considered failed once this is no longer the chat's
+    /// current binding.
+    binding_id: ChatBindingId,
+    /// Turn that owns the item.
+    turn_id: ChatTurnId,
+    /// Canonical item category.
+    kind: ChatItemKind,
+    /// Current item state.
+    state: ChatItemState,
+    /// Time at which the item reached a terminal state, when observed.
+    completed_at?: Timestamp,
+    /// Current item content.
+    ///
+    /// A started item that accepts streamed text contains exactly one `Text` value.
+    content: [ChatContent],
+}
+
+/// Conversation item category.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatItemKind {
+    /// User-authored message.
+    UserMessage,
+    /// Assistant-authored message.
+    AssistantMessage,
+    /// Model reasoning.
+    Reasoning,
+    /// Proposed plan.
+    Plan,
+    /// Command execution.
+    CommandExecution,
+    /// File change.
+    FileChange,
+    /// Tool call.
+    ToolCall,
+    /// Web search.
+    WebSearch,
+    /// Work delegated to another agent.
+    Subagent,
+    /// The harness compacted the model context used for subsequent turns.
+    ContextCompaction,
+    /// Error rendered as conversation content.
+    Error,
+    /// Provider content not understood by this state version.
+    Unknown,
+}
+
+/// Lifecycle state of a conversation item.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatItemState {
+    /// The item has started and may receive updates.
+    Started,
+    /// The item completed successfully.
+    Completed,
+    /// The item failed.
+    Failed,
+}
+
+/// Content-addressed reference to separately stored large or binary content.
+record ChatBlobReference {
+    /// Digest algorithm and encoded digest.
+    digest: string,
+    /// Content size in bytes.
+    size: u64,
+    /// MIME media type.
+    media_type: string,
+}
+
+/// Plain text item content.
+record TextContent {
+    /// Plain text value.
+    value: string,
+}
+
+/// Structured JSON item content.
+record StructuredContent {
+    /// Structured JSON value.
+    value: JsonValue,
+}
+
+/// Content attached to a conversation item.
+#[json(tag = "kind")]
+variant ChatContent {
+    /// Plain text.
+    Text: TextContent,
+    /// Structured JSON.
+    Structured: StructuredContent,
+    /// Path-free metadata for a file or image attached to this conversation item.
+    Attachment: ChatPromptAttachment,
+    /// Separately stored large or binary content.
+    Blob: ChatBlobReference,
+}
+
+/// Structured user-input request in a chat timeline.
+record ChatRequest {
+    /// Stable request identifier.
+    request_id: ChatRequestId,
+    /// Harness binding that owns the request callback.
+    ///
+    /// An unresolved request is current only while this matches the chat's current binding and that
+    /// binding has `Attached` status.
+    binding_id: ChatBindingId,
+    /// Related turn, when known.
+    turn_id?: ChatTurnId,
+    /// Related item, when known.
+    item_id?: ChatItemId,
+    /// Whether the request was resolved while its owning binding was active.
+    resolved: bool,
+    /// Questions presented by the request.
+    questions: [ChatQuestion],
+}
+
+/// Structured user-input question.
+record ChatQuestion {
+    /// Stable question identifier.
+    question_id: ChatQuestionId,
+    /// Short heading.
+    header: string,
+    /// Full prompt.
+    prompt: string,
+    /// Suggested answers.
+    options: [ChatQuestionOption],
+    /// Whether multiple answers may be selected.
+    multiple: bool,
+}
+
+/// Suggested answer to a structured question.
+record ChatQuestionOption {
+    /// User-visible label.
+    label: string,
+    /// Optional explanation.
+    description?: string,
+}
+
+/// Answers supplied for one structured question.
+record ChatQuestionAnswer {
+    /// Question being answered.
+    question_id: ChatQuestionId,
+    /// Selected or free-form answers.
+    answers: [string],
+}
+
+/// Diagnostic or lifecycle activity in a chat timeline.
+record ChatActivity {
+    /// Stable activity identifier.
+    activity_id: ChatActivityId,
+    /// Harness binding that produced the activity.
+    binding_id: ChatBindingId,
+    /// Time at which the activity occurred.
+    occurred_at: Timestamp,
+    /// Activity category.
+    kind: ChatActivityKind,
+    /// Human-readable summary.
+    message: string,
+    /// Optional structured diagnostic detail.
+    detail?: JsonValue,
+}
+
+/// Activity category.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatActivityKind {
+    /// Informational lifecycle activity.
+    Information,
+    /// Non-fatal warning.
+    Warning,
+    /// Error activity.
+    Error,
+}
+
+/// Failure description safe to expose through the chats API.
+record ChatFailure {
+    /// Stable state-defined failure code.
+    code: string,
+    /// Human-readable message.
+    message: string,
+}

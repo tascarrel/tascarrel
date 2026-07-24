@@ -1,0 +1,282 @@
+//! Host-owned repository inventory and publication approval API.
+//!
+//! Subscriptions expose revisioned repository cache, approval, and push state.
+//! Reconnecting consumers can provide the last revision and receive nothing
+//! until the corresponding state changes.
+
+import common::Timestamp
+import pods::PodId
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Prepares configured caches and captures their current local versions.
+record PrepareRepositorySnapshotAction {
+    /// Workspace whose host-owned repository caches are prepared.
+    workspace: WorkspaceName,
+}
+
+/// Cache versions available for materializing a workspace seed.
+record PrepareRepositorySnapshotOutput {
+    /// Current cache identity and version for each configured path.
+    repositories: [RepositoryCacheVersion],
+}
+
+/// Refreshes one or every configured repository from its upstream.
+record RefreshRepositorySnapshotAction {
+    /// Workspace whose host-owned repository caches are refreshed.
+    workspace: WorkspaceName,
+    /// Configured repository path to refresh, or every path when omitted.
+    path?: string,
+}
+
+/// Cache versions observed after the requested upstream refreshes.
+record RefreshRepositorySnapshotOutput {
+    /// Current cache identity and version for each selected path.
+    repositories: [RepositoryCacheVersion],
+}
+
+/// Publishes, rejects, or postpones one repository approval.
+record ResolveRepositoryApprovalAction {
+    /// Workspace which owns the pending request.
+    workspace: WorkspaceName,
+    /// Pending request to approve or reject.
+    approval_id: RepositoryApprovalId,
+    /// Decision applied to the exact proposed ref updates.
+    decision: RepositoryApprovalDecision,
+}
+
+/// Acknowledges that the decision was durably accepted.
+record ResolveRepositoryApprovalOutput { }
+
+// Subscriptions
+
+/// Subscribes to configured repositories and their host cache state for one workspace.
+record RepositoryListChangedSubscription {
+    /// Workspace whose configured repositories are observed.
+    workspace: WorkspaceName,
+    /// Last complete inventory revision observed by the consumer, when resuming.
+    cursor?: RepositoryRevision,
+}
+
+/// Complete repository inventory emitted when its revision changes.
+record RepositoryListChangedEvent {
+    /// Revision derived from the complete emitted inventory.
+    revision: RepositoryRevision,
+    /// Current configured repositories and cache state.
+    value: RepositoryList,
+}
+
+/// Subscribes to pending repository publication approvals for one workspace.
+record RepositoryApprovalRequestListChangedSubscription {
+    /// Workspace whose pending publication approvals are observed.
+    workspace: WorkspaceName,
+    /// Restricts results to approvals initiated by one pod when supplied.
+    pod_id?: PodId,
+    /// Last complete approval-list revision observed by the consumer, when resuming.
+    cursor?: RepositoryRevision,
+}
+
+/// Complete pending approval list emitted when its revision changes.
+record RepositoryApprovalRequestListChangedEvent {
+    /// Revision derived from the complete emitted approval list.
+    revision: RepositoryRevision,
+    /// Current pending repository publication approvals.
+    value: RepositoryApprovalRequestList,
+}
+
+/// Subscribes to the durable status of one push initiated by a pod.
+record RepositoryPushStatusChangedSubscription {
+    /// Workspace which handled the push.
+    workspace: WorkspaceName,
+    /// Pod which initiated the push.
+    pod_id: PodId,
+    /// Push operation whose status is observed.
+    push_id: RepositoryPushId,
+    /// Last status revision observed by the consumer, when resuming.
+    cursor?: RepositoryRevision,
+}
+
+/// Current push status emitted when its revision changes.
+record RepositoryPushStatusChangedEvent {
+    /// Revision derived from the complete emitted status.
+    revision: RepositoryRevision,
+    /// Current policy, approval, or publication status.
+    value: RepositoryPushStatus,
+}
+
+// Domain Types
+
+/// Identifies one workspace-isolated host repository cache.
+#[json(type = "string")]
+#[rust(type = "crate::ids::RepositoryCacheId")]
+opaque RepositoryCacheId
+
+/// Identifies one repository publication approval request.
+#[json(type = "string")]
+#[rust(type = "crate::ids::RepositoryApprovalId")]
+opaque RepositoryApprovalId
+
+/// Identifies one pod push while its policy result is transferred.
+#[json(type = "string")]
+#[rust(type = "crate::ids::RepositoryPushId")]
+opaque RepositoryPushId
+
+/// SHA-256 revision derived from one complete repository state snapshot.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper RepositoryRevision: string
+
+/// Exact host cache version available for one configured repository path.
+record RepositoryCacheVersion {
+    /// Configured destination path below `/workspace`.
+    path: string,
+    /// Stable identity of the host cache backing the configured path.
+    cache_id: RepositoryCacheId,
+    /// Monotonic version of tracked upstream branches, tags, and symbolic `HEAD`.
+    version: u64,
+    /// Time at which tracked refs changed and created this version.
+    updated_at: Timestamp,
+}
+
+/// Decision available for one pending repository publication.
+variant RepositoryApprovalDecision {
+    /// Publishes the exact proposed ref updates with their captured leases.
+    Approve,
+    /// Discards the proposed ref updates without contacting the upstream.
+    Reject,
+    /// Suppresses the approval overlay without resolving the request.
+    Postpone,
+}
+
+/// Terminal result of resolving one repository publication approval.
+variant RepositoryApprovalResolution {
+    /// The proposed updates were published upstream.
+    Approved,
+    /// The proposed updates were discarded.
+    Rejected,
+}
+
+/// Durable policy, approval, and publication status for one atomic push.
+variant RepositoryPushStatus {
+    /// Every proposed update was published upstream.
+    Published,
+    /// Every proposed update was retained in one pending approval.
+    ApprovalRequired: RepositoryApprovalId,
+    /// At least one proposed update was rejected by configured policy.
+    Denied: string,
+    /// The pending approval was rejected by a user.
+    Rejected,
+    /// Upstream publication or terminal push processing failed.
+    Failed: string,
+}
+
+/// Complete pending repository publication approval inventory.
+record RepositoryApprovalRequestList {
+    /// Pending requests ordered by creation time and identifier.
+    requests: [RepositoryApprovalRequest],
+}
+
+/// One exact set of repository ref updates awaiting user approval.
+record RepositoryApprovalRequest {
+    /// Stable request identifier.
+    id: RepositoryApprovalId,
+    /// Pod which initiated the publication request.
+    pod_id: PodId,
+    /// Configured repository path below `/workspace`.
+    path: string,
+    /// Display-safe upstream source with credentials and query values removed.
+    source: string,
+    /// Time at which hostd retained the proposed updates.
+    created_at: Timestamp,
+    /// Current background-publication state of this approval.
+    status: RepositoryApprovalStatus,
+    /// Whether a user postponed the automatic approval overlay.
+    postponed: bool,
+    /// Exact branch and tag changes covered by one decision.
+    updates: [RepositoryApprovalUpdate],
+}
+
+/// Current resolution state of one repository publication approval.
+variant RepositoryApprovalStatus {
+    /// The approval is waiting for a user decision or retry.
+    Pending,
+    /// Hostd is publishing the approved updates in the background.
+    Publishing,
+    /// The most recent background publication attempt failed and can be retried.
+    Failed: string,
+}
+
+/// One branch or tag update covered by an approval request.
+record RepositoryApprovalUpdate {
+    /// Full upstream branch or tag reference.
+    reference: string,
+    /// Upstream object protected by the publication lease, when the ref exists.
+    previous_object?: string,
+    /// Exact retained object proposed for publication.
+    proposed_object: string,
+    /// Whether publication may rewrite existing history or replace an existing tag.
+    rewrites: bool,
+}
+
+/// Complete configured repository inventory for one workspace.
+record RepositoryList {
+    /// Configured repositories ordered by their destination path.
+    repositories: [Repository],
+}
+
+/// One repository configured for a workspace.
+record Repository {
+    /// Destination path below `/workspace`.
+    path: string,
+    /// Display-safe upstream source with URL credentials and query values removed.
+    source: string,
+    /// Current state of the workspace's host object cache.
+    cache: RepositoryCacheState,
+}
+
+/// Current state of one configured repository cache.
+#[json(tag = "status")]
+variant RepositoryCacheState {
+    /// No object store has been created for this repository yet.
+    Missing,
+    /// The object store is usable and has current local statistics.
+    Ready: RepositoryCacheStatistics,
+    /// The object store exists but could not be inspected safely.
+    Failed: RepositoryCacheFailure,
+}
+
+/// Bounded statistics for one workspace Git object cache.
+record RepositoryCacheStatistics {
+    /// Stable identity of this workspace-isolated cache.
+    cache_id: RepositoryCacheId,
+    /// Monotonic tracked-ref version currently retained by the cache.
+    version: u64,
+    /// Time at which tracked refs changed and created the current version.
+    version_updated_at?: Timestamp,
+    /// Last time an upstream refresh completed successfully.
+    refreshed_at?: Timestamp,
+    /// Most recent bounded upstream refresh failure, when one occurred after the last success.
+    refresh_error?: string,
+    /// Cached upstream branches.
+    branches: u64,
+    /// Cached upstream tags, including annotated tag objects.
+    tags: u64,
+    /// Immutable captured refs retained across workspace pods.
+    captures: u64,
+    /// Loose Git objects.
+    loose_objects: u64,
+    /// Git objects retained in pack files.
+    packed_objects: u64,
+    /// Pack files retained by Git.
+    packs: u64,
+    /// Approximate bytes occupied by Git objects, packs, and garbage.
+    size_bytes: u64,
+    /// Bytes Git currently classifies as garbage.
+    garbage_bytes: u64,
+}
+
+/// Safe bounded diagnostic for a cache that cannot be inspected.
+record RepositoryCacheFailure {
+    /// Human-readable failure without credential-bearing remote details.
+    message: string,
+}

@@ -1,0 +1,169 @@
+//! Pod lifecycle and inventory API implemented by a workspace guest daemon.
+//!
+//! Actions create and destroy pods within the guest daemon's workspace. The pod list subscription
+//! exposes the workspace's pods and uses the generic tascarrel-store wire model for resumption.
+//! Processes running inside a pod, including infrastructure and initialization processes, are
+//! managed through the process supervision API.
+
+import common::Timestamp
+import images::ImageId
+import processes::ProcessId
+import store::Stamp
+import store::StoreEvent
+
+// RPC
+
+/// Admits asynchronous creation of one pod in the workspace.
+///
+/// The action returns after the pod is observable in the creating state. Image generation and
+/// persistent storage creation continue in the background and are reported through the pod list
+/// subscription.
+record CreatePodAction {
+    /// Human-readable pod title, or absent to generate one.
+    title?: string,
+}
+
+/// Identifier assigned to the created pod.
+record CreatePodOutput {
+    /// Identifier of the newly created pod.
+    pod_id: PodId,
+}
+
+/// Starts the execution environment of one stopped pod.
+record StartPodAction {
+    /// Pod to start.
+    pod_id: PodId,
+}
+
+/// Result of starting one pod.
+record StartPodOutput {}
+
+/// Stops one pod while retaining its persistent resources.
+record StopPodAction {
+    /// Pod to stop.
+    pod_id: PodId,
+}
+
+/// Result of stopping one pod.
+record StopPodOutput {}
+
+/// Destroys one pod and its persistent resources.
+record DestroyPodAction {
+    /// Pod to destroy.
+    pod_id: PodId,
+}
+
+/// Result of destroying one pod.
+record DestroyPodOutput {}
+
+/// Changes the human-readable title of one pod.
+record SetPodTitleAction {
+    /// Pod whose title is changed.
+    pod_id: PodId,
+    /// New human-readable title.
+    title: string,
+}
+
+/// Result of changing one pod title.
+record SetPodTitleOutput {}
+
+// Subscriptions
+
+
+/// Subscribes to the workspace-wide pod list.
+record PodListChangedSubscription {
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by the workspace-wide pod list.
+record PodListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached pod list.
+    change: StoreEvent<PodList, PodListMutation>,
+}
+
+// Domain Types
+
+
+/// Identifies one pod within a workspace.
+#[json(type = "string")]
+#[rust(type = "crate::ids::PodId")]
+opaque PodId
+
+/// One pod managed by the workspace guest daemon.
+record Pod {
+    /// Workspace-wide identifier assigned by the guest daemon.
+    id: PodId,
+    /// Human-readable pod title.
+    title: string,
+    /// Current pod lifecycle state.
+    status: PodState,
+    /// Time at which the pod was created.
+    created_at: Timestamp,
+}
+
+/// Current lifecycle state of a pod.
+#[json(tag = "status")]
+variant PodState {
+    /// The pod's persistent resources are being created.
+    Creating,
+    /// A workspace image is being generated before persistent pod resources can be created.
+    Building: PodImageBuild,
+    /// The pod's execution environment is being started.
+    Starting,
+    /// The pod is waiting for readiness-blocking initialization processes.
+    Initializing: PodInitialization,
+    /// The pod is available for process execution.
+    Running,
+    /// The pod's execution environment is being stopped.
+    Stopping,
+    /// The pod retains its persistent resources without a running execution environment.
+    Stopped,
+    /// The pod's persistent resources are being destroyed.
+    Destroying,
+    /// The pod could not complete a lifecycle transition.
+    Failed: PodFailure,
+}
+
+/// Failure encountered while changing a pod's lifecycle state.
+record PodFailure {
+    /// Human-readable failure diagnostic.
+    message: string,
+    /// Time at which the lifecycle transition failed.
+    failed_at: Timestamp,
+}
+
+/// Image generation currently blocking creation of one pod.
+record PodImageBuild {
+    /// Image whose BuildKit and setup logs describe the blocking generation.
+    image_id: ImageId,
+}
+
+/// Supervised processes participating in one pod initialization.
+record PodInitialization {
+    /// Supervised initialization processes launched for this startup.
+    processes: [PodInitializationProcess],
+}
+
+/// One supervised process participating in pod initialization.
+record PodInitializationProcess {
+    /// Process whose state and logs describe this initialization step.
+    process_id: ProcessId,
+    /// Whether pod readiness waits for this process to exit successfully.
+    wait: bool,
+}
+
+/// Complete workspace pod list.
+record PodList {
+    /// Pods managed by the workspace guest daemon.
+    pods: [Pod],
+}
+
+/// Mutation applied to the workspace pod list.
+#[json(tag = "type")]
+variant PodListMutation {
+    /// Adds a pod or replaces the existing entry.
+    Upsert: Pod,
+    /// Removes a pod from the list.
+    Remove: PodId,
+}

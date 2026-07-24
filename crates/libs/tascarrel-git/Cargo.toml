@@ -1,0 +1,21 @@
+[package]
+name = "tascarrel-git"
+description = "Managed Git object stores and publication mechanics for Tascarrel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reportify.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

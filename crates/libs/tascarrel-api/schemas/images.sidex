@@ -1,0 +1,163 @@
+//! Workspace image build and inventory API implemented by a workspace guest daemon.
+//!
+//! Image generation is an asynchronous singleton operation. The build action creates a new image
+//! and returns its identifier after its initial state is observable. The image list subscription
+//! exposes every image and its state using the generic tascarrel-store wire model for resumption.
+//! The target workspace is selected by the guest daemon address and is therefore absent from the
+//! action and subscription. Each image records the exact host input tar used for generation. Its
+//! SHA-256 is authoritative provenance, while its reported modification time is a change-detection
+//! hint.
+//!
+//! Generation logs combine BuildKit and setup output into one ordered, bounded line stream per
+//! image. A subscriber supplies the last line it observed and receives retained later lines
+//! followed by live output in non-empty ordered batches. A jump in line numbers indicates that
+//! intervening lines were evicted.
+
+import common::Timestamp
+import store::{Stamp, StoreEvent}
+
+// RPC
+
+/// Starts building an image from the workspace's latest published image inputs.
+///
+/// At most one image may be generating in a workspace. The action returns after the new image has
+/// been created in the generating state; completion is reported through the image list
+/// subscription.
+record BuildImageAction {}
+
+/// Identifier assigned to the new image.
+record BuildImageOutput {
+    /// Identifier of the newly created image.
+    image_id: ImageId,
+}
+
+/// Reconciles one image's workspace seed with current repository configuration.
+/// Host caches are refreshed before the image-owned seed is updated; setup steps and hooks are not rerun.
+record UpdateImageWorkspaceSeedAction {
+    /// Image whose canonical workspace seed is updated.
+    image_id: ImageId,
+}
+
+/// Result of updating an image workspace seed.
+record UpdateImageWorkspaceSeedOutput {
+    /// Whether reconciliation published a different workspace seed.
+    updated: bool,
+}
+
+// Subscriptions
+
+/// Subscribes to the workspace-wide image list and image states.
+record ImageListChangedSubscription {
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by the workspace-wide image list.
+record ImageListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached image list.
+    change: StoreEvent<ImageList, ImageListMutation>,
+}
+
+/// Subscribes to BuildKit and setup log lines for one image.
+record ImageLogSubscription {
+    /// Image whose generation log to receive.
+    image_id: ImageId,
+    /// Last line already observed by the consumer, or absent to receive all retained lines.
+    last_line?: u64,
+}
+
+/// One non-empty batch of retained or live image generation log lines.
+record ImageLogEvent {
+    /// Ordered lines from the image generation log.
+    lines: [ImageLogLine],
+}
+
+// Domain Types
+
+/// Stable identifier uniquely assigned to one image within a workspace.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ImageId")]
+opaque ImageId
+
+/// One image generation log line.
+record ImageLogLine {
+    /// Monotonically increasing line number within the image log, starting at one.
+    line: u64,
+    /// Generation stage that produced the line.
+    source: ImageLogSource,
+    /// Text content without its line terminator.
+    content: string,
+    /// Whether content beyond the configured line length was discarded.
+    truncated: bool,
+}
+
+/// SHA-256 digest encoded as 64 lowercase hexadecimal characters.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper ImageInputSha256: string
+
+/// Complete workspace image inventory.
+record ImageList {
+    /// Images ordered by creation time and identifier.
+    images: [Image],
+}
+
+/// Mutation applied to the workspace image list.
+#[json(tag = "type")]
+variant ImageListMutation {
+    /// Adds an image or replaces the existing entry.
+    Upsert: Image,
+}
+
+/// One image in the workspace image list.
+record Image {
+    /// Workspace-wide identifier assigned when the image was created.
+    id: ImageId,
+    /// Host image-definition input used for generation.
+    input: ImageInput,
+    /// Current image state.
+    state: ImageState,
+    /// Time at which the image was created.
+    created_at: Timestamp,
+}
+
+/// Current generation and availability state of one image.
+#[json(tag = "status")]
+variant ImageState {
+    /// The workspace inputs are being refreshed or built.
+    Generating,
+    /// Generation succeeded and its immutable directory awaits availability reconciliation.
+    Generated,
+    /// The immutable generation is present and usable for creating pods.
+    Available,
+    /// Generation succeeded, but its database entry refers to a missing immutable directory.
+    Orphaned,
+    /// The workspace image definition or build execution failed.
+    Failed: ImageGenerationFailure,
+}
+
+/// Provenance of the host image-definition input used for one image.
+record ImageInput {
+    /// SHA-256 of the deterministic tar encoding of the workspace image configuration directory.
+    sha256: ImageInputSha256,
+    /// Greatest modification time reported by the host for an archived directory or file.
+    ///
+    /// This value is a change-detection hint and does not replace comparison of `sha256` values.
+    modified_at: Timestamp,
+}
+
+/// Failure caused by an image definition or its generation.
+record ImageGenerationFailure {
+    /// Human-readable build diagnostic.
+    message: string,
+    /// Time at which generation failed.
+    failed_at: Timestamp,
+}
+
+/// Source of one image generation log line.
+#[json(tag = "type")]
+variant ImageLogSource {
+    /// Output produced while BuildKit constructs the image root filesystem.
+    BuildKit,
+    /// Output produced while setup steps and hooks prepare the image.
+    Setup,
+}

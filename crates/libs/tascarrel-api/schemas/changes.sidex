@@ -1,0 +1,357 @@
+//! Pod repository status and change inspection API implemented by the workspace guest daemon.
+//!
+//! The guest daemon uses filesystem notifications to invalidate per-repository Git status caches.
+//! One workspace-wide subscription exposes lightweight status for every configured repository in
+//! every pod. The files API uses the same internal per-path status overlay to decorate directory
+//! entries.
+//!
+//! Upstream state refers to the current branch's locally available tracking ref. Inspecting status
+//! never contacts a remote. Detailed commit lists use exact object IDs, while a working change-set
+//! request reads the repository's current state. Detailed RPCs return complete commit lists and
+//! unified diffs directly. Results that cannot fit within the configured control-plane budget
+//! return a typed domain outcome instead of a partial value.
+
+import common::Timestamp
+import files::{FilePath, GitChangeKind}
+import pods::PodId
+import store::{Stamp, StoreEvent}
+
+// RPC
+
+/// Gets commits unique to both sides of an exact local/upstream comparison.
+record GetDivergentCommitsAction {
+    /// Pod and configured repository to inspect.
+    target: RepositoryTarget,
+    /// Exact local and upstream commits reported by repository status.
+    comparison: RepositoryDivergence,
+}
+
+/// Result of getting commits for one exact divergence comparison.
+record GetDivergentCommitsOutput {
+    /// Complete divergent commits or a domain condition preventing the query.
+    result: DivergentCommitsResult,
+}
+
+/// Gets changed-file metadata and a unified diff for a repository tree or file.
+///
+/// Working changes are compared from `HEAD`, or the empty tree for an unborn repository, through
+/// the current index and worktree, including untracked files. Commit changes use pull-request
+/// semantics and compare the best common ancestor with the selected head.
+record GetChangeSetAction {
+    /// Pod and configured repository to inspect.
+    target: RepositoryTarget,
+    /// Working state or exact commits defining the change set.
+    comparison: ChangeSetComparison,
+    /// Repository-relative file or directory to restrict, or the complete tree when absent.
+    path?: RepositoryPath,
+}
+
+/// Result of getting one complete repository change set.
+record GetChangeSetOutput {
+    /// Complete change set or a domain condition preventing a coherent result.
+    result: ChangeSetResult,
+}
+
+// Subscriptions
+
+/// Subscribes to status for every configured repository in every workspace pod.
+record RepositoryStatusListChangedSubscription {
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by the workspace-wide repository status list.
+record RepositoryStatusListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached repository status list.
+    change: StoreEvent<RepositoryStatusList, RepositoryStatusListMutation>,
+}
+
+// Domain Types
+
+/// Exact hexadecimal Git object identifier.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper GitObjectId: string
+
+/// Full Git reference name.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper GitReference: string
+
+/// Canonical UTF-8 path of at most 4,096 encoded bytes relative to the selected Git worktree.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper RepositoryPath: string
+
+/// Six-digit octal Git file mode.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper GitFileMode: string
+
+/// Complete unparsed UTF-8 Git unified diff for one change set.
+///
+/// Content that cannot be represented as UTF-8 is treated as binary and contributes no text hunks.
+wrapper UnifiedDiff: string
+
+/// One configured repository within a pod workspace.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+record RepositoryTarget {
+    /// Pod containing the repository worktree.
+    pod_id: PodId,
+    /// Configured repository root relative to `/workspace`.
+    path: FilePath,
+}
+
+/// Exact commits defining local and upstream sides of a divergence query.
+record RepositoryDivergence {
+    /// Current local `HEAD` commit.
+    head: GitObjectId,
+    /// Current commit of the local branch's upstream tracking ref.
+    upstream: GitObjectId,
+}
+
+/// Domain result of getting exact divergent commits.
+#[json(tag = "status")]
+variant DivergentCommitsResult {
+    /// Complete ahead and behind commit lists were produced successfully.
+    Commits: DivergentCommits,
+    /// An exact commit is no longer available in the pod repository.
+    RevisionUnavailable: UnavailableGitRevision,
+    /// The complete result exceeds the configured control-plane budget.
+    TooLarge: ResultTooLarge,
+}
+
+/// Complete commits unique to both sides of one exact comparison.
+record DivergentCommits {
+    /// Commits reachable from local `HEAD` but not its upstream, with ancestors first.
+    ahead: [GitCommit],
+    /// Commits reachable from the upstream but not local `HEAD`, with ancestors first.
+    behind: [GitCommit],
+}
+
+/// Working state or exact commits defining one change set.
+#[json(tag = "type")]
+variant ChangeSetComparison {
+    /// Changes from `HEAD` through the current index and worktree.
+    Working,
+    /// Pull-request-style changes between two exact commits.
+    Commits: CommitTreeComparison,
+}
+
+/// Exact commits requested for one pull-request-style change set.
+record CommitTreeComparison {
+    /// Commit used to calculate the merge base.
+    base: GitObjectId,
+    /// Commit whose changes since the merge base are reported.
+    head: GitObjectId,
+}
+
+/// Domain result of getting one complete repository change set.
+#[json(tag = "status")]
+variant ChangeSetResult {
+    /// Complete change set was produced successfully.
+    ChangeSet: FileChangeSet,
+    /// An exact commit is no longer available in the pod repository.
+    RevisionUnavailable: UnavailableGitRevision,
+    /// Exact commits have no common ancestor for pull-request-style comparison.
+    UnrelatedHistories: UnrelatedRepositoryHistories,
+    /// The complete result exceeds the configured control-plane budget.
+    TooLarge: ResultTooLarge,
+}
+
+/// One coherent set of changed files and its unified diff.
+record FileChangeSet {
+    /// Comparison and Git revisions used to produce this change set.
+    comparison: ResolvedChangeSetComparison,
+    /// Summary of the path-filtered change set.
+    summary: FileChangeSetSummary,
+    /// Changed files in stable path order.
+    files: [FileChange],
+    /// Complete unparsed unified diff with file headers and text hunks.
+    diff: UnifiedDiff,
+}
+
+/// Comparison and Git revisions used to produce one change set.
+#[json(tag = "type")]
+variant ResolvedChangeSetComparison {
+    /// Live working-tree comparison and the commit used as its base.
+    Working: ResolvedWorkingTreeComparison,
+    /// Exact commit comparison represented by the change set.
+    Commits: ResolvedCommitTreeComparison,
+}
+
+/// Git commit used as the base of one live working-tree comparison.
+record ResolvedWorkingTreeComparison {
+    /// `HEAD` commit used as the base, or absent for an unborn repository.
+    head?: GitObjectId,
+}
+
+/// Exact commits and merge base represented by one change set.
+record ResolvedCommitTreeComparison {
+    /// Requested base commit.
+    base: GitObjectId,
+    /// Requested head commit.
+    head: GitObjectId,
+    /// Best common ancestor used as the start of the file comparison.
+    merge_base: GitObjectId,
+}
+
+/// Exact Git revision that is no longer available locally.
+record UnavailableGitRevision {
+    /// Unavailable commit object identifier.
+    revision: GitObjectId,
+}
+
+/// Exact commits for which no pull-request-style merge base exists.
+record UnrelatedRepositoryHistories {
+    /// Requested base commit.
+    base: GitObjectId,
+    /// Requested head commit.
+    head: GitObjectId,
+}
+
+/// Configured control-plane budget exceeded by an otherwise valid RPC result.
+record ResultTooLarge {
+    /// Maximum encoded result size accepted for this operation.
+    maximum_bytes: u64,
+}
+
+/// Metadata for one Git commit.
+record GitCommit {
+    /// Exact commit object identifier.
+    id: GitObjectId,
+    /// Parent commit identifiers in recorded order.
+    parents: [GitObjectId],
+    /// Author identity and timestamp recorded by the commit.
+    author: GitSignature,
+    /// Committer identity and timestamp recorded by the commit.
+    committer: GitSignature,
+    /// First line of the commit message.
+    subject: string,
+    /// Remaining commit message after the subject, or the empty string when absent.
+    body: string,
+}
+
+/// Lightweight metadata for a repository tip commit.
+record GitCommitSummary {
+    /// Exact commit object identifier.
+    id: GitObjectId,
+    /// Author identity and timestamp recorded by the commit.
+    author: GitSignature,
+    /// First line of the commit message.
+    subject: string,
+}
+
+/// Identity and time recorded in a Git commit signature.
+record GitSignature {
+    /// Display name recorded by Git.
+    name: string,
+    /// Email address recorded by Git.
+    email: string,
+    /// Timestamp recorded by Git, normalized to an absolute instant.
+    timestamp: Timestamp,
+}
+
+/// Summary of one complete path-filtered file change set.
+record FileChangeSetSummary {
+    /// Number of changed files in the change set.
+    file_count: u64,
+    /// Aggregate text line additions and deletions.
+    lines: LineChangeSummary,
+}
+
+/// Text line additions and deletions in a file or complete change set.
+record LineChangeSummary {
+    /// Number of added text lines.
+    additions: u64,
+    /// Number of deleted text lines.
+    deletions: u64,
+}
+
+/// One changed file in a repository change set.
+record FileChange {
+    /// Path before the change, when one existed.
+    old_path?: RepositoryPath,
+    /// Path after the change, when one exists.
+    new_path?: RepositoryPath,
+    /// Git classification of the file change.
+    kind: GitChangeKind,
+    /// Git mode before the change, when a path existed.
+    old_mode?: GitFileMode,
+    /// Git mode after the change, when a path exists.
+    new_mode?: GitFileMode,
+    /// Whether Git classified the file contents as binary.
+    binary: bool,
+    /// Text line additions and deletions, excluding binary content.
+    lines: LineChangeSummary,
+}
+
+/// Complete configured repository status inventory for all workspace pods.
+record RepositoryStatusList {
+    /// Repository statuses ordered by pod identifier and configured path.
+    repositories: [RepositoryStatusEntry],
+}
+
+/// Mutation applied to the workspace-wide repository status list.
+#[json(tag = "type")]
+variant RepositoryStatusListMutation {
+    /// Adds a repository or replaces its current status.
+    Upsert: RepositoryStatusEntry,
+    /// Removes a repository that is no longer present in the workspace.
+    Remove: RepositoryTarget,
+}
+
+/// Current status of one configured repository in one pod.
+record RepositoryStatusEntry {
+    /// Pod and configured repository represented by this entry.
+    target: RepositoryTarget,
+    /// Current repository status or inspection failure.
+    state: RepositoryStatusState,
+}
+
+/// Current inspection state of one configured repository.
+#[json(tag = "status")]
+variant RepositoryStatusState {
+    /// Repository was inspected successfully.
+    Ready: RepositoryStatus,
+    /// Repository could not currently be inspected.
+    Failed: RepositoryInspectionFailure,
+}
+
+/// Current lightweight Git status for one configured repository.
+record RepositoryStatus {
+    /// Checked-out branch shorthand, or absent for detached or unborn `HEAD`.
+    branch?: string,
+    /// Current `HEAD` commit summary, or absent for an unborn repository.
+    head?: GitCommitSummary,
+    /// Current branch's locally available upstream state, when configured.
+    upstream?: RepositoryUpstreamStatus,
+    /// Summary of current uncommitted repository changes.
+    working: RepositoryWorkingStatus,
+}
+
+/// Current locally available state of one branch's upstream tracking ref.
+record RepositoryUpstreamStatus {
+    /// Full upstream tracking reference.
+    reference: GitReference,
+    /// Commit currently referenced by the upstream tracking reference.
+    commit: GitCommitSummary,
+    /// Commits reachable from local `HEAD` but not the upstream.
+    ahead: u64,
+    /// Commits reachable from the upstream but not local `HEAD`.
+    behind: u64,
+}
+
+/// Summary of changes outside the checked-out commit.
+record RepositoryWorkingStatus {
+    /// Whether the index or worktree contains tracked, untracked, or conflicted changes.
+    ///
+    /// This value is true exactly when `file_count` is nonzero.
+    dirty: bool,
+    /// Number of unique paths differing from `HEAD`, including untracked files and conflicts.
+    file_count: u64,
+    /// Number of changed paths with unresolved merge stages, not exceeding `file_count`.
+    conflict_count: u64,
+}
+
+/// Failure encountered while inspecting one configured repository.
+record RepositoryInspectionFailure {
+    /// Human-readable failure diagnostic.
+    message: string,
+}

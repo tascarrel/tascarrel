@@ -1,0 +1,530 @@
+//! Host-owned network routing and TCP forwarding API.
+//!
+//! An HTTP route assigns an opaque, lowercase DNS label to one TCP port in a workspace pod.
+//! Clients prepend the label to their current Tascarrel hostname. When Tascarrel itself is reached
+//! through another HTTP route, prepending another label forms a route stack. Each host daemon
+//! resolves and removes the rightmost label it issued before forwarding the request, allowing a
+//! Tascarrel instance running inside a pod to route requests into its own pods.
+//!
+//! Hostname prefixes do not encode workspace names, pod identifiers, or ports. Routes remain
+//! observable while their workspace guest or pod is unavailable; requests fail while the target
+//! cannot be reached.
+//!
+//! A dynamic port forward binds a host-loopback TCP port and directs accepted connections to one
+//! TCP port in a workspace pod. HTTP routes and dynamic port-forward definitions are both owned by
+//! hostd and remain observable while their workspace guest or pod is temporarily unavailable.
+//!
+//! A pod-to-host forward maps `host.tascarrel.internal` at one pod-scoped virtual port to one TCP
+//! port on the host loopback interface. The mapping applies only to the selected pod and does not
+//! expose the host service on a physical host interface.
+//!
+//! DNS requests and TCP flows are exposed as separate, bounded, in-memory streams for each
+//! workspace. Each stream assigns positions independently within the workspace and running host
+//! instance. A retained cursor resumes with every later retained entry. An absent cursor starts
+//! with the complete retained history. A cursor for another host instance, older than retained
+//! history, or later than the current position rebases to the oldest retained entry. Subscriptions
+//! emit non-empty ordered batches of consecutive entries. Each batch carries the cursor of its
+//! final entry, so a jump between batches indicates that intervening entries were evicted.
+
+import common::Timestamp
+import host::HostInstanceId
+import pods::PodId
+import store::{Stamp, StoreEvent}
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Returns the current HTTP routes belonging to one pod.
+record GetPodHttpRoutesAction {
+    /// Workspace containing the pod.
+    workspace: WorkspaceName,
+    /// Pod whose HTTP routes are returned.
+    pod_id: PodId,
+}
+
+/// Current HTTP routes belonging to the selected pod.
+record GetPodHttpRoutesOutput {
+    /// Host-issued HTTP routes targeting the selected pod.
+    http_routes: [HttpRoute],
+}
+
+/// Returns the current dynamic port forwards belonging to one pod.
+record GetPodPortForwardsAction {
+    /// Workspace containing the pod.
+    workspace: WorkspaceName,
+    /// Pod whose dynamic port forwards are returned.
+    pod_id: PodId,
+}
+
+/// Current dynamic port forwards belonging to the selected pod.
+record GetPodPortForwardsOutput {
+    /// Dynamic host-loopback forwards targeting the selected pod.
+    port_forwards: [PortForward],
+}
+
+/// Creates or returns the HTTP route for one pod port.
+///
+/// Repeating this action with the same workspace, pod, and port updates the route metadata and
+/// returns the existing route.
+record CreateHttpRouteAction {
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod receiving routed HTTP requests.
+    pod_id: PodId,
+    /// TCP port receiving HTTP requests inside the pod.
+    pod_port: u16,
+    /// Human-readable title for the routed service.
+    title: string,
+    /// Whether the route is an implementation detail hidden from the Web preview surface.
+    internal: bool,
+}
+
+/// HTTP route assigned to the requested pod port.
+record CreateHttpRouteOutput {
+    /// Stable identifier assigned to the route.
+    http_route_id: HttpRouteId,
+    /// DNS label to prepend to the client's current Tascarrel hostname.
+    hostname_prefix: HostnamePrefix,
+}
+
+/// Changes whether one HTTP route may host the Tascarrel frontend.
+/// Trust is exclusive across the host daemon. Trusting one route revokes trust from any previously
+/// trusted route.
+record SetHttpRouteTrustedTascarrelFrontendAction {
+    /// HTTP route whose frontend trust is changed.
+    http_route_id: HttpRouteId,
+    /// Whether browsers at the route's exact origin may access the Tascarrel API.
+    trusted_tascarrel_frontend: bool,
+}
+
+/// Result of changing one HTTP route's Tascarrel frontend trust.
+record SetHttpRouteTrustedTascarrelFrontendOutput {}
+
+/// Deletes one host-issued HTTP route.
+record DeleteHttpRouteAction {
+    /// HTTP route to delete.
+    http_route_id: HttpRouteId,
+}
+
+/// Result of deleting one HTTP route.
+record DeleteHttpRouteOutput {}
+
+/// Creates a dynamic host-loopback TCP forward to one pod port.
+record CreatePortForwardAction {
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod receiving forwarded connections.
+    pod_id: PodId,
+    /// TCP port inside the pod receiving forwarded connections.
+    pod_port: u16,
+    /// Human-readable title for the forwarded service, when available.
+    title?: string,
+}
+
+/// Identifier assigned to the newly created port forward.
+record CreatePortForwardOutput {
+    /// Identifier of the newly created port forward.
+    port_forward_id: PortForwardId,
+    /// Dynamically assigned TCP port bound on host loopback.
+    host_port: u16,
+}
+
+/// Deletes one dynamic port forward owned by hostd.
+record DeletePortForwardAction {
+    /// Port forward to delete.
+    port_forward_id: PortForwardId,
+}
+
+/// Result of deleting one dynamic port forward.
+record DeletePortForwardOutput {}
+
+/// Creates or updates one pod-scoped forward to a host-loopback TCP port.
+/// Repeating this action with the same workspace, pod, and pod port updates the host target and
+/// metadata while preserving the forward identifier.
+record CreatePodHostForwardAction {
+    /// Workspace containing the pod that may use the forward.
+    workspace: WorkspaceName,
+    /// Pod allowed to connect through the forward.
+    pod_id: PodId,
+    /// Docker-style `<host-port>:<pod-port>` mapping.
+    mapping: PortMapping,
+    /// Human-readable title for the host service, when available.
+    title?: string,
+}
+
+/// Identifier assigned to the pod-to-host forward.
+record CreatePodHostForwardOutput {
+    /// Stable identifier of the created or updated forward.
+    pod_host_forward_id: PodHostForwardId,
+}
+
+/// Deletes one pod-to-host forward owned by hostd.
+record DeletePodHostForwardAction {
+    /// Pod-to-host forward to delete.
+    pod_host_forward_id: PodHostForwardId,
+}
+
+/// Result of deleting one pod-to-host forward.
+record DeletePodHostForwardOutput {}
+
+// Subscriptions
+
+/// Subscribes to the host-issued HTTP routes for one workspace.
+record HttpRouteListChangedSubscription {
+    /// Workspace whose HTTP routes are observed.
+    workspace: WorkspaceName,
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by a workspace's HTTP route list.
+record HttpRouteListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached HTTP route list.
+    change: StoreEvent<HttpRouteList, HttpRouteListMutation>,
+}
+
+/// Subscribes to the host-owned dynamic port forwards for one workspace.
+record PortForwardListChangedSubscription {
+    /// Workspace whose dynamic port forwards are observed.
+    workspace: WorkspaceName,
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by a workspace's dynamic port-forward list.
+record PortForwardListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached port-forward list.
+    change: StoreEvent<PortForwardList, PortForwardListMutation>,
+}
+
+/// Subscribes to pod-to-host forwards for one workspace.
+record PodHostForwardListChangedSubscription {
+    /// Workspace whose pod-to-host forwards are observed.
+    workspace: WorkspaceName,
+    /// Stamp of the last store event applied by the consumer, when resuming.
+    cursor?: Stamp,
+}
+
+/// Resumable event emitted by a workspace's pod-to-host forward list.
+record PodHostForwardListChangedEvent {
+    /// Snapshot or mutation used to advance the consumer's cached pod-to-host forward list.
+    change: StoreEvent<PodHostForwardList, PodHostForwardListMutation>,
+}
+
+/// Subscribes to retained and live DNS requests attributed to one workspace.
+record DnsRequestsSubscription {
+    /// Workspace whose DNS requests are observed.
+    workspace: WorkspaceName,
+    /// Cursor of the last DNS request observed by the consumer, or absent for retained history.
+    cursor?: DnsRequestCursor,
+}
+
+/// One non-empty ordered batch from a workspace's DNS request stream.
+record DnsRequestsEvent {
+    /// Cursor of the final request in this batch.
+    cursor: DnsRequestCursor,
+    /// Consecutive DNS requests in ascending position order.
+    requests: [DnsRequest],
+}
+
+/// Subscribes to retained and live TCP flow lifecycle events attributed to one workspace.
+record TcpFlowsSubscription {
+    /// Workspace whose TCP flow lifecycle events are observed.
+    workspace: WorkspaceName,
+    /// Cursor of the last TCP flow event observed by the consumer, or absent for retained history.
+    cursor?: TcpFlowCursor,
+}
+
+/// One non-empty ordered batch from a workspace's TCP flow lifecycle stream.
+record TcpFlowsEvent {
+    /// Cursor of the final flow event in this batch.
+    cursor: TcpFlowCursor,
+    /// Consecutive TCP flow lifecycle events in ascending position order.
+    events: [TcpFlowEvent],
+}
+
+// Domain Types
+
+/// Identifies one host-issued HTTP route.
+#[json(type = "string")]
+#[rust(type = "crate::ids::HttpRouteId")]
+opaque HttpRouteId
+
+/// Identifies one dynamic port forward owned by the host daemon.
+#[json(type = "string")]
+#[rust(type = "crate::ids::PortForwardId")]
+opaque PortForwardId
+
+/// Identifies one pod-scoped forward to a host-loopback port.
+#[json(type = "string")]
+#[rust(type = "crate::ids::PodHostForwardId")]
+opaque PodHostForwardId
+
+/// Identifies one TCP flow handled by the host network service.
+#[json(type = "string")]
+#[rust(type = "crate::ids::TcpFlowId")]
+opaque TcpFlowId
+
+/// TCP port mapping written as `<host-port>:<pod-port>` or one same-port shorthand.
+/// Ports are decimal integers from 1 through 65535. A single port maps that port on both sides.
+/// The pod port is reached at `host.tascarrel.internal`; the host port is reached on the host
+/// loopback interface.
+wrapper PortMapping: string
+
+/// Position in one workspace's DNS request stream.
+record DnsRequestCursor {
+    /// Host daemon instance that assigned the position.
+    host_instance_id: HostInstanceId,
+    /// Monotonic position within the workspace's DNS request stream, starting at one.
+    position: u64,
+}
+
+/// Position in one workspace's TCP flow lifecycle stream.
+record TcpFlowCursor {
+    /// Host daemon instance that assigned the position.
+    host_instance_id: HostInstanceId,
+    /// Monotonic position within the workspace's TCP flow lifecycle stream, starting at one.
+    position: u64,
+}
+
+/// Opaque lowercase DNS label issued by the host network service.
+///
+/// The value contains only lowercase ASCII letters, digits, and hyphens, begins and ends with an
+/// ASCII letter or digit, fits in one DNS label, and does not include a trailing dot.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper HostnamePrefix: string
+
+/// One host-issued HTTP route to a workspace pod port.
+record HttpRoute {
+    /// Stable identifier assigned to the route.
+    id: HttpRouteId,
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod receiving routed HTTP requests.
+    pod_id: PodId,
+    /// TCP port receiving HTTP requests inside the pod.
+    pod_port: u16,
+    /// Human-readable title for the routed service.
+    title: string,
+    /// Whether the route is an implementation detail hidden from the Web preview surface.
+    internal: bool,
+    /// Whether browsers at this route's exact origin may access the Tascarrel API.
+    trusted_tascarrel_frontend: bool,
+    /// DNS label prepended to the client's current Tascarrel hostname.
+    hostname_prefix: HostnamePrefix,
+}
+
+/// Complete HTTP route list for one workspace.
+record HttpRouteList {
+    /// Host-issued HTTP routes targeting pods in the workspace.
+    http_routes: [HttpRoute],
+}
+
+/// Mutation applied to a workspace's HTTP route list.
+#[json(tag = "type")]
+variant HttpRouteListMutation {
+    /// Adds an HTTP route or replaces the existing entry.
+    Upsert: HttpRoute,
+    /// Removes an HTTP route from the list.
+    Remove: HttpRouteId,
+}
+
+/// One dynamic host-loopback TCP forward owned by hostd.
+record PortForward {
+    /// Stable identifier assigned when the port forward was created.
+    id: PortForwardId,
+    /// Workspace containing the target pod.
+    workspace: WorkspaceName,
+    /// Pod receiving forwarded connections.
+    pod_id: PodId,
+    /// TCP port inside the pod receiving forwarded connections.
+    pod_port: u16,
+    /// Dynamically assigned TCP port bound on the host loopback interface.
+    host_port: u16,
+    /// Human-readable title for the forwarded service, when available.
+    title?: string,
+}
+
+/// Complete dynamic port-forward list for one workspace.
+record PortForwardList {
+    /// Dynamic port forwards owned by hostd for the workspace.
+    port_forwards: [PortForward],
+}
+
+/// Mutation applied to a workspace's dynamic port-forward list.
+#[json(tag = "type")]
+variant PortForwardListMutation {
+    /// Adds a port forward or replaces the existing entry.
+    Upsert: PortForward,
+    /// Removes a port forward from the list.
+    Remove: PortForwardId,
+}
+
+/// One pod-scoped mapping from `host.tascarrel.internal` to the host loopback interface.
+record PodHostForward {
+    /// Stable identifier assigned when the forward was created.
+    id: PodHostForwardId,
+    /// Workspace containing the pod that may use the forward.
+    workspace: WorkspaceName,
+    /// Pod allowed to connect through the forward.
+    pod_id: PodId,
+    /// Docker-style `<host-port>:<pod-port>` mapping.
+    mapping: PortMapping,
+    /// Human-readable title for the host service, when available.
+    title?: string,
+}
+
+/// Complete pod-to-host forward list for one workspace.
+record PodHostForwardList {
+    /// Pod-scoped forwards owned by hostd for the workspace.
+    pod_host_forwards: [PodHostForward],
+}
+
+/// Mutation applied to a workspace's pod-to-host forward list.
+#[json(tag = "type")]
+variant PodHostForwardListMutation {
+    /// Adds a pod-to-host forward or replaces the existing entry.
+    Upsert: PodHostForward,
+    /// Removes a pod-to-host forward from the list.
+    Remove: PodHostForwardId,
+}
+
+/// Guest workload or service to which a network request is attributed.
+#[json(tag = "type")]
+variant NetworkRequestSource {
+    /// A process running in one workspace pod.
+    Pod: PodId,
+    /// The isolated workspace image build environment.
+    ImageBuild,
+    /// A trusted workspace guest service outside a pod or image build.
+    WorkspaceService,
+}
+
+/// One DNS request completed by the host network service.
+record DnsRequest {
+    /// Time at which the host network service received the request.
+    occurred_at: Timestamp,
+    /// Guest workload or service that issued the request.
+    source: NetworkRequestSource,
+    /// Transport used between the requesting process and the guest DNS frontend.
+    transport: DnsRequestTransport,
+    /// Canonical absolute DNS name that was queried.
+    name: string,
+    /// Numeric DNS resource-record type from the request question.
+    record_type: u16,
+    /// Numeric DNS class from the request question.
+    record_class: u16,
+    /// Terminal result of processing the request.
+    outcome: DnsRequestOutcome,
+    /// Milliseconds from host admission through the terminal outcome.
+    duration_ms: u64,
+}
+
+/// Transport used for a request to the guest DNS frontend.
+#[json(tag = "type")]
+variant DnsRequestTransport {
+    /// DNS carried in one UDP datagram.
+    Udp,
+    /// DNS carried in a length-delimited TCP message.
+    Tcp,
+}
+
+/// Terminal result of one DNS request.
+#[json(tag = "status")]
+variant DnsRequestOutcome {
+    /// The resolver returned a DNS response, including negative response codes.
+    Response: DnsResponseSummary,
+    /// Resolution exceeded its bounded deadline.
+    TimedOut,
+    /// No host resolver was available to process the request.
+    ResolverUnavailable,
+    /// Host DNS request capacity was exhausted.
+    Overloaded,
+    /// The semantic DNS request was invalid or unsupported.
+    Invalid,
+    /// Resolution failed without a DNS response for another reason.
+    Failed,
+}
+
+/// Bounded, display-safe summary of one DNS response.
+record DnsResponseSummary {
+    /// Numeric DNS response code, including extended response codes when present.
+    response_code: u16,
+    /// Number of records in the DNS answer section.
+    answer_count: u16,
+    /// A and AAAA addresses observed in the answer, subject to a configured limit.
+    resolved_addresses: [string],
+    /// Whether additional resolved addresses were omitted from the summary.
+    addresses_truncated: bool,
+}
+
+/// One lifecycle event for a TCP flow handled by the host network service.
+#[json(tag = "type")]
+variant TcpFlowEvent {
+    /// The host network service started handling a new TCP flow.
+    Started: TcpFlowStarted,
+    /// The host network service finished handling a TCP flow.
+    Ended: TcpFlowEnded,
+}
+
+/// Metadata recorded when the host network service starts handling a TCP flow.
+record TcpFlowStarted {
+    /// Identifier used to correlate this event with its eventual end event.
+    tcp_flow_id: TcpFlowId,
+    /// Time at which the host network service started handling the flow.
+    occurred_at: Timestamp,
+    /// Guest workload or service that opened the flow.
+    source: NetworkRequestSource,
+    /// Guest source socket address reported by the authenticated guest network service.
+    source_address: string,
+    /// Destination socket address requested by the guest.
+    requested_destination: string,
+    /// Destination socket address selected by host routing or name resolution, when available.
+    effective_destination?: string,
+    /// Most recently resolved hostname associated with the requested destination address, when available.
+    hostname?: string,
+    /// Host handling selected for the flow.
+    mode: TcpFlowMode,
+}
+
+/// Terminal event recorded when the host network service finishes handling a TCP flow. Consumers
+/// may receive this event without its corresponding start event when the start event is no longer
+/// retained.
+record TcpFlowEnded {
+    /// Identifier correlating this event with the corresponding start event, when retained.
+    tcp_flow_id: TcpFlowId,
+    /// Time at which the host network service finished handling the flow.
+    occurred_at: Timestamp,
+    /// Terminal outcome of the flow.
+    outcome: TcpFlowOutcome,
+    /// Milliseconds between the start and end events.
+    duration_ms: u64,
+}
+
+/// Host handling applied to one TCP flow.
+#[json(tag = "type")]
+variant TcpFlowMode {
+    /// A raw TCP connection relayed without application-level inspection.
+    Raw,
+    /// An HTTP connection inspected and routed by its normalized host.
+    Http,
+    /// A TLS connection inspected and routed by its normalized server name and HTTP host.
+    Https,
+}
+
+/// Terminal admission or connection outcome for one TCP flow.
+#[json(tag = "status")]
+variant TcpFlowOutcome {
+    /// The flow was established and later closed.
+    Closed,
+    /// Network policy denied the requested flow.
+    Denied,
+    /// Connection establishment exceeded its bounded deadline.
+    TimedOut,
+    /// The destination or required host network facility was unavailable.
+    Unavailable,
+    /// Host TCP flow capacity was exhausted.
+    Overloaded,
+    /// Connection establishment failed for another reason.
+    Failed,
+}

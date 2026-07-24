@@ -1,0 +1,22 @@
+[package]
+name = "tascarrel-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Resumable, mutation-driven state synchronization for Tascarrel"
+
+[dependencies]
+futures-core.workspace = true
+futures-util.workspace = true
+reportify.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,98 @@
+import * as types from "./generated/index.ts";
+
+export type HostActions = {
+  "config_UpdateSettings": { input: types.config.UpdateWorkspaceSettingsAction; output: types.config.UpdateWorkspaceSettingsOutput };
+  "secrets_Reveal": { input: types.secrets.RevealSecretAction; output: types.secrets.RevealSecretOutput };
+  "secrets_Set": { input: types.secrets.SetSecretAction; output: types.secrets.SetSecretOutput };
+  "secrets_Delete": { input: types.secrets.DeleteSecretAction; output: types.secrets.DeleteSecretOutput };
+  "network_GetPodHttpRoutes": { input: types.network.GetPodHttpRoutesAction; output: types.network.GetPodHttpRoutesOutput };
+  "network_GetPodPortForwards": { input: types.network.GetPodPortForwardsAction; output: types.network.GetPodPortForwardsOutput };
+  "network_CreateHttpRoute": { input: types.network.CreateHttpRouteAction; output: types.network.CreateHttpRouteOutput };
+  "network_SetHttpRouteTrustedTascarrelFrontend": { input: types.network.SetHttpRouteTrustedTascarrelFrontendAction; output: types.network.SetHttpRouteTrustedTascarrelFrontendOutput };
+  "network_DeleteHttpRoute": { input: types.network.DeleteHttpRouteAction; output: types.network.DeleteHttpRouteOutput };
+  "network_CreatePortForward": { input: types.network.CreatePortForwardAction; output: types.network.CreatePortForwardOutput };
+  "network_DeletePortForward": { input: types.network.DeletePortForwardAction; output: types.network.DeletePortForwardOutput };
+  "network_CreatePodHostForward": { input: types.network.CreatePodHostForwardAction; output: types.network.CreatePodHostForwardOutput };
+  "network_DeletePodHostForward": { input: types.network.DeletePodHostForwardAction; output: types.network.DeletePodHostForwardOutput };
+  "repositories_RefreshSnapshot": { input: types.repositories.RefreshRepositorySnapshotAction; output: types.repositories.RefreshRepositorySnapshotOutput };
+  "repositories_ResolveApproval": { input: types.repositories.ResolveRepositoryApprovalAction; output: types.repositories.ResolveRepositoryApprovalOutput };
+  "workspaces_Create": { input: types.workspaces.CreateWorkspaceAction; output: types.workspaces.CreateWorkspaceOutput };
+  "workspaces_Start": { input: types.workspaces.StartWorkspaceAction; output: types.workspaces.StartWorkspaceOutput };
+  "workspaces_Stop": { input: types.workspaces.StopWorkspaceAction; output: types.workspaces.StopWorkspaceOutput };
+  "workspaces_Destroy": { input: types.workspaces.DestroyWorkspaceAction; output: types.workspaces.DestroyWorkspaceOutput };
+  "workspaces_AttachUsbDevice": { input: types.workspaces.AttachUsbDeviceAction; output: types.workspaces.AttachUsbDeviceOutput };
+  "workspaces_DetachUsbDevice": { input: types.workspaces.DetachUsbDeviceAction; output: types.workspaces.DetachUsbDeviceOutput };
+};
+
+export type GuestActions = {
+  "guest_QueryInformation": { input: types.guest.QueryGuestInformationAction; output: types.guest.QueryGuestInformationOutput };
+  "files_ReadDirectory": { input: types.files.ReadDirectoryAction; output: types.files.ReadDirectoryOutput };
+  "changes_GetDivergentCommits": { input: types.changes.GetDivergentCommitsAction; output: types.changes.GetDivergentCommitsOutput };
+  "changes_GetChangeSet": { input: types.changes.GetChangeSetAction; output: types.changes.GetChangeSetOutput };
+  "code_EnsureSession": { input: types.code.EnsureCodeSessionAction; output: types.code.EnsureCodeSessionOutput };
+  "code_DeleteSession": { input: types.code.DeleteCodeSessionAction; output: types.code.DeleteCodeSessionOutput };
+  "chats_GetPodChats": { input: types.chats.GetPodChatsAction; output: types.chats.GetPodChatsOutput };
+  "images_Build": { input: types.images.BuildImageAction; output: types.images.BuildImageOutput };
+  "images_UpdateWorkspaceSeed": { input: types.images.UpdateImageWorkspaceSeedAction; output: types.images.UpdateImageWorkspaceSeedOutput };
+  "pods_Create": { input: types.pods.CreatePodAction; output: types.pods.CreatePodOutput };
+  "pods_Start": { input: types.pods.StartPodAction; output: types.pods.StartPodOutput };
+  "pods_Stop": { input: types.pods.StopPodAction; output: types.pods.StopPodOutput };
+  "pods_Destroy": { input: types.pods.DestroyPodAction; output: types.pods.DestroyPodOutput };
+  "pods_SetTitle": { input: types.pods.SetPodTitleAction; output: types.pods.SetPodTitleOutput };
+  "processes_GetPodProcesses": { input: types.processes.GetPodProcessesAction; output: types.processes.GetPodProcessesOutput };
+  "processes_Spawn": { input: types.processes.SpawnProcessAction; output: types.processes.SpawnProcessOutput };
+  "processes_SpawnTerminal": { input: types.processes.SpawnProcessTerminalAction; output: types.processes.SpawnProcessTerminalOutput };
+  "processes_Kill": { input: types.processes.KillProcessAction; output: types.processes.KillProcessOutput };
+  "processes_WriteTerminal": { input: types.processes.WriteProcessTerminalAction; output: types.processes.WriteProcessTerminalOutput };
+  "processes_ResizeTerminal": { input: types.processes.ResizeProcessTerminalAction; output: types.processes.ResizeProcessTerminalOutput };
+  "processes_Remove": { input: types.processes.RemoveProcessAction; output: types.processes.RemoveProcessOutput };
+  "processes_SnapshotTerminal": { input: types.processes.SnapshotProcessTerminalAction; output: types.processes.SnapshotProcessTerminalOutput };
+  "chats_Create": { input: types.chats.CreateChatAction; output: types.chats.CreateChatOutput };
+  "chats_CreatePodChat": { input: types.chats.CreatePodChatAction; output: types.chats.CreatePodChatOutput };
+  "chats_AttachBinding": { input: types.chats.AttachChatBindingAction; output: types.chats.AttachChatBindingOutput };
+  "chats_DetachBinding": { input: types.chats.DetachChatBindingAction; output: types.chats.DetachChatBindingOutput };
+  "chats_Archive": { input: types.chats.ArchiveChatAction; output: types.chats.ArchiveChatOutput };
+  "chats_AcknowledgeAttention": { input: types.chats.AcknowledgeChatAttentionAction; output: types.chats.AcknowledgeChatAttentionOutput };
+  "chats_InstallHarness": { input: types.chats.InstallChatHarnessAction; output: types.chats.InstallChatHarnessOutput };
+  "chats_StartHarnessAuth": { input: types.chats.StartChatHarnessAuthAction; output: types.chats.StartChatHarnessAuthOutput };
+  "chats_ValidateHarnessCredentials": { input: types.chats.ValidateChatHarnessCredentialsAction; output: types.chats.ValidateChatHarnessCredentialsOutput };
+  "chats_CancelHarnessAuth": { input: types.chats.CancelChatHarnessAuthAction; output: types.chats.CancelChatHarnessAuthOutput };
+  "chats_LogoutHarness": { input: types.chats.LogoutChatHarnessAction; output: types.chats.LogoutChatHarnessOutput };
+  "chats_SendPrompt": { input: types.chats.SendChatPromptAction; output: types.chats.SendChatPromptOutput };
+  "chats_FlushPromptQueue": { input: types.chats.FlushChatPromptQueueAction; output: types.chats.FlushChatPromptQueueOutput };
+  "chats_RemoveQueuedPrompt": { input: types.chats.RemoveChatQueuedPromptAction; output: types.chats.RemoveChatQueuedPromptOutput };
+  "chats_Interrupt": { input: types.chats.InterruptChatAction; output: types.chats.InterruptChatOutput };
+  "chats_CompactContext": { input: types.chats.CompactChatContextAction; output: types.chats.CompactChatContextOutput };
+  "chats_ResolveRequest": { input: types.chats.ResolveChatRequestAction; output: types.chats.ResolveChatRequestOutput };
+};
+
+export type HostSubscriptions = {
+  "config_Changed": { input: types.config.ConfigChangedSubscription; output: types.config.ConfigChangedEvent };
+  "secrets_Changed": { input: types.secrets.SecretsChangedSubscription; output: types.secrets.SecretsChangedEvent };
+  "network_HttpRoutesChanged": { input: types.network.HttpRouteListChangedSubscription; output: types.network.HttpRouteListChangedEvent };
+  "network_PortForwardsChanged": { input: types.network.PortForwardListChangedSubscription; output: types.network.PortForwardListChangedEvent };
+  "network_PodHostForwardsChanged": { input: types.network.PodHostForwardListChangedSubscription; output: types.network.PodHostForwardListChangedEvent };
+  "network_DnsRequests": { input: types.network.DnsRequestsSubscription; output: types.network.DnsRequestsEvent };
+  "network_TcpFlows": { input: types.network.TcpFlowsSubscription; output: types.network.TcpFlowsEvent };
+  "repositories_ApprovalRequestsChanged": { input: types.repositories.RepositoryApprovalRequestListChangedSubscription; output: types.repositories.RepositoryApprovalRequestListChangedEvent };
+  "repositories_PushStatusChanged": { input: types.repositories.RepositoryPushStatusChangedSubscription; output: types.repositories.RepositoryPushStatusChangedEvent };
+  "repositories_Changed": { input: types.repositories.RepositoryListChangedSubscription; output: types.repositories.RepositoryListChangedEvent };
+  "workspaces_Changed": { input: types.workspaces.WorkspaceListChangedSubscription; output: types.workspaces.WorkspaceListChangedEvent };
+  "workspaces_VmLog": { input: types.workspaces.WorkspaceVmLogSubscription; output: types.workspaces.WorkspaceVmLogEvent };
+  "workspaces_UsbDevicesChanged": { input: types.workspaces.UsbDevicesChangedSubscription; output: types.workspaces.UsbDevicesChangedEvent };
+};
+
+export type GuestSubscriptions = {
+  "guest_Metrics": { input: types.guest.GuestMetricsSubscription; output: types.guest.GuestMetricsEvent };
+  "changes_Changed": { input: types.changes.RepositoryStatusListChangedSubscription; output: types.changes.RepositoryStatusListChangedEvent };
+  "code_Changed": { input: types.code.CodeSessionListChangedSubscription; output: types.code.CodeSessionListChangedEvent };
+  "images_Changed": { input: types.images.ImageListChangedSubscription; output: types.images.ImageListChangedEvent };
+  "images_Log": { input: types.images.ImageLogSubscription; output: types.images.ImageLogEvent };
+  "pods_Changed": { input: types.pods.PodListChangedSubscription; output: types.pods.PodListChangedEvent };
+  "processes_Changed": { input: types.processes.ProcessListChangedSubscription; output: types.processes.ProcessListChangedEvent };
+  "processes_Log": { input: types.processes.ProcessLogSubscription; output: types.processes.ProcessLogEvent };
+  "processes_Terminal": { input: types.processes.ProcessTerminalSubscription; output: types.processes.ProcessTerminalEvent };
+  "chats_Changed": { input: types.chats.ChatListChangedSubscription; output: types.chats.ChatListChangedEvent };
+  "chats_Chat": { input: types.chats.ChatSubscription; output: types.chats.ChatEvent };
+  "chats_HarnessList": { input: types.chats.ChatHarnessListSubscription; output: types.chats.ChatHarnessListEvent };
+};

@@ -1,0 +1,31 @@
+[package]
+name = "tascarrel-api"
+description = "Sidex-defined HTTP and WebSocket API shared by Tascarrel hostd and its web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+name = "tascarrel_api"
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+ecow = { version = "0.3", features = ["serde"] }
+jiff.workspace = true
+rand.workspace = true
+reportify.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sidex = { git = "https://github.com/silitics/sidex.git", rev = "53f5e11480ebf471ba37a97fa2a683be1e2bf235" }
+sidex-serde = { git = "https://github.com/silitics/sidex.git", rev = "53f5e11480ebf471ba37a97fa2a683be1e2bf235" }
+thiserror.workspace = true
+
+[build-dependencies]
+sidex-build-rs = { git = "https://github.com/silitics/sidex.git", rev = "53f5e11480ebf471ba37a97fa2a683be1e2bf235" }
+
+[lints]
+workspace = true

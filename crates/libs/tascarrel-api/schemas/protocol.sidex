@@ -1,0 +1,354 @@
+//! Tascarrel control plane protocol shared by clients and daemons.
+//!
+//! The protocol supports RPC invocations and event subscriptions across Tascarrel control plane
+//! links.
+//!
+//! # Topology
+//!
+//! Tascarrel links form the following topology:
+//!
+//! `client ↔ hostd ↔ guestd(workspace) ↔ podd(pod)`
+//!
+//! Hostd owns [`Address::Host`], each guestd owns the [`Address::Workspace`] for its workspace, and
+//! each podd owns its [`Address::Pod`]. An operation follows adjacent links to its owner. Responses
+//! and events return through the connections recorded while the operation was opened.
+//!
+//! # Operation Model
+//!
+//! An opening message starts an RPC invocation or subscription. It carries the target and may carry
+//! causal metadata in a [`RequestContext`]. Its sender allocates an operation identifier scoped to
+//! that connection and opening direction. A proxy allocates an identifier for the downstream
+//! connection and records the mapping between both sides. Later messages follow that state using
+//! the identifier local to their connection.
+//!
+//! An identifier must be unique among active operations of its kind opened in the same direction.
+//! It may be reused after the operation terminates. Closing a connection terminates its active
+//! operations and discards their identifier mappings. A later connection from the same logical
+//! daemon has a new identifier scope and serves newly opened operations.
+//!
+//! Sending an opening message implicitly admits the operation. A hop unable to admit it sends a
+//! failure message.
+//!
+//! # Link Policies
+//!
+//! Every link has an actor policy derived from the authenticated peer and its place in the
+//! topology. The policy validates only the origin and caller declarations the peer may use. The
+//! service implementing an operation separately authorizes its target, name, and decoded input.
+//! Follow-up messages arrive through the connection recorded for the operation.
+//!
+//! A client-to-host policy accepts the authenticated client identity. A host-to-guest policy
+//! accepts host and client identities introduced by hostd. Guest-to-host and pod-to-guest policies
+//! accept only the authenticated daemon identity for that workspace or pod. A guest-to-pod policy
+//! also accepts host and client identities carried by guestd.
+//!
+//! # Request Contexts
+//!
+//! Each link policy defines [`RequestContext`] as required or optional for an opening message. For
+//! an optional context, the receiving daemon assigns the peer's authenticated actor as origin and
+//! caller and creates a trace identifier when the field is absent. A supplied context becomes
+//! trusted after validation against the link policy.
+//!
+//! A daemon forwarding an operation preserves its validated context. A daemon creating a root
+//! operation uses its own authenticated actor as origin and caller, creates a trace identifier, and
+//! leaves `caused_by` absent. A daemon creating a nested operation preserves the causing operation's
+//! origin and trace, uses its own actor as caller, and records the causing operation. These are the
+//! accepted forms of a required context.
+//!
+//! A `caused_by` value is portable causal metadata within a trace and travels with the context for
+//! attribution. Connection operation tables use their link-local [`InvocationId`] and
+//! [`SubscriptionId`] values.
+//!
+//! Actor identities introduced by a daemon are confined to its authenticated scope. Hostd may
+//! introduce itself and the client sessions it assigned. Guestd introduces the workspace actor
+//! matching its workspace, and its workspace and pod targets belong to that workspace. Podd
+//! introduces the pod actor matching its pod, and its pod target identifies that exact pod.
+//! Explicitly allowed upward operations may target an owning workspace daemon or hostd. A daemon
+//! carries actors from another scope by preserving or deriving from context already validated for
+//! the forwarded or causing operation.
+//!
+//! # Backpressure
+//!
+//! Each daemon bounds active RPCs and subscriptions per peer and target. An operation exceeding a
+//! limit fails with an overload error. Terminal messages, cancellation, event credit, and link
+//! control remain deliverable when event buffers are full.
+//!
+//! Subscription events use consumer-granted credit. Proxies forward credit according to their
+//! available buffer capacity. This keeps event queues bounded across all hops.
+//!
+//! # Resumption
+//!
+//! Each subscription defines its resumption contract. Resumable subscriptions carry domain
+//! cursors in their typed inputs and events.
+
+import common::JsonValue
+import pods::PodId
+import workspaces::WorkspaceName
+
+/// Identifies one client session attached to the host daemon.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ClientId")]
+opaque ClientId
+
+/// Identifies one distributed trace.
+#[json(type = "string")]
+#[rust(type = "crate::ids::TraceId")]
+opaque TraceId
+
+/// Identifies one RPC invocation on one connection and in one opening direction.
+#[json(type = "string")]
+#[rust(type = "crate::ids::InvocationId")]
+opaque InvocationId
+
+/// Identifies one subscription on one connection and in one opening direction.
+#[json(type = "string")]
+#[rust(type = "crate::ids::SubscriptionId")]
+opaque SubscriptionId
+
+/// A Tascarrel daemon that implements operations.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+#[json(tag = "type")]
+variant Address {
+    /// The host daemon.
+    Host,
+    /// The guest daemon for one workspace.
+    Workspace: WorkspaceAddress,
+    /// The pod daemon for one pod.
+    Pod: PodAddress,
+}
+
+/// The address of one workspace guest daemon.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+record WorkspaceAddress {
+    /// Workspace served by the guest daemon.
+    workspace: WorkspaceName,
+}
+
+/// The address of one pod daemon.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+record PodAddress {
+    /// Workspace containing the pod.
+    workspace: WorkspaceName,
+    /// Pod served by the pod daemon.
+    pod_id: PodId,
+}
+
+/// A logical actor that may originate an operation.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+#[json(tag = "type")]
+variant Actor {
+    /// A client session attached to the host daemon.
+    Client: ClientActor,
+    /// The host daemon.
+    Host,
+    /// The guest daemon for one workspace.
+    Workspace: WorkspaceAddress,
+    /// The pod daemon for one pod.
+    Pod: PodAddress,
+}
+
+/// A client session acting through the host daemon.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+record ClientActor {
+    /// Client session assigned by the host daemon.
+    client_id: ClientId,
+}
+
+/// Validated origin and causal context attached when an operation is opened.
+record RequestContext {
+    /// The actor at which the causal chain entered the trusted Tascarrel topology.
+    origin: Actor,
+    /// The actor that logically initiated this operation.
+    caller: Actor,
+    /// Trace shared by causally related operations.
+    trace_id: TraceId,
+    /// Opaque causal reference to the operation that caused this operation, when applicable.
+    caused_by?: string,
+}
+
+/// A non-domain failure that terminates an RPC invocation or subscription.
+#[json(tag = "type")]
+variant OperationError {
+    /// The opening message or a later lifecycle message violated the operation contract.
+    InvalidRequest: OperationErrorDetails,
+    /// The link policy denies the requested operation.
+    Forbidden: OperationErrorDetails,
+    /// The daemon that owns the operation is currently unavailable.
+    Unavailable: OperationErrorDetails,
+    /// The daemon's operation capacity is exhausted.
+    Overloaded: OperationErrorDetails,
+    /// The operation exceeded its permitted lifetime.
+    TimedOut: OperationErrorDetails,
+    /// The operation terminated because of an unexpected daemon failure.
+    Internal: OperationErrorDetails,
+}
+
+/// Human-readable details for a non-domain operation failure.
+record OperationErrorDetails {
+    /// Diagnostic message describing the failure.
+    message: string,
+    /// Rendered diagnostic report for the failure, when available.
+    report?: string,
+}
+
+/// A control plane frame exchanged over one adjacent Tascarrel link.
+/// The variants carry link-control, RPC, and subscription messages.
+#[json(tag = "protocol")]
+variant Message {
+    /// Carries hop-local link control.
+    Control: ControlMessage,
+    /// Carries one RPC lifecycle message.
+    Rpc: RpcMessage,
+    /// Carries one subscription lifecycle message.
+    Subscription: SubscriptionMessage,
+}
+
+/// Hop-local link control.
+#[json(tag = "type")]
+variant ControlMessage {
+    /// Application-level link heartbeat.
+    Ping: PingMessage,
+    /// Application-level heartbeat response.
+    Pong: PongMessage,
+}
+
+/// Application-level heartbeat request.
+record PingMessage {
+    /// Optional opaque data to echo in the response.
+    data?: JsonValue,
+}
+
+/// Application-level heartbeat response.
+record PongMessage {
+    /// Opaque data supplied by the corresponding heartbeat request.
+    data?: JsonValue,
+}
+
+/// One message in the RPC protocol.
+#[json(tag = "type")]
+variant RpcMessage {
+    /// Opens an RPC invocation.
+    Invoke: RpcInvocation,
+    /// Requests cancellation of an active invocation.
+    Cancel: RpcCancellation,
+    /// Confirms that an invocation terminated because it was cancelled.
+    Canceled: RpcCanceled,
+    /// Completes an invocation successfully.
+    Completed: RpcCompleted,
+    /// Terminates an invocation with a non-domain failure.
+    Failed: RpcFailed,
+}
+
+/// Opens one RPC invocation.
+record RpcInvocation {
+    /// Invocation being opened on this connection.
+    id: InvocationId,
+    /// Daemon that implements the requested procedure.
+    target: Address,
+    /// Origin and causal metadata supplied or assigned at a trust boundary.
+    context?: RequestContext,
+    /// Stable name of the procedure to invoke.
+    procedure: string,
+    /// Typed procedure input.
+    input: JsonValue,
+    /// Optional maximum invocation lifetime requested by the caller.
+    timeout_ms?: u64,
+}
+
+/// Requests cancellation of one RPC invocation.
+record RpcCancellation {
+    /// Invocation to cancel.
+    id: InvocationId,
+}
+
+/// Confirms cancellation of one RPC invocation.
+record RpcCanceled {
+    /// Invocation that was cancelled.
+    id: InvocationId,
+}
+
+/// Reports successful completion of one RPC invocation.
+record RpcCompleted {
+    /// Invocation that completed.
+    id: InvocationId,
+    /// Typed procedure output. Domain failures are represented by the procedure's output type.
+    output: JsonValue,
+}
+
+/// Reports a non-domain failure of one RPC invocation.
+record RpcFailed {
+    /// Invocation that failed.
+    id: InvocationId,
+    /// Failure that terminated the invocation.
+    error: OperationError,
+}
+
+/// One message in the subscription protocol.
+#[json(tag = "type")]
+variant SubscriptionMessage {
+    /// Opens a subscription.
+    Subscribe: SubscriptionStart,
+    /// Grants the producer permission to emit additional events.
+    GrantCredit: SubscriptionCredit,
+    /// Delivers one ordered event and consumes one unit of event credit.
+    Event: SubscriptionEvent,
+    /// Requests that an active subscription stop.
+    Unsubscribe: SubscriptionStop,
+    /// Reports normal termination of a subscription.
+    Completed: SubscriptionCompleted,
+    /// Terminates a subscription with a non-domain failure.
+    Failed: SubscriptionFailed,
+}
+
+/// Opens one typed event subscription.
+/// Each subscription defines its input type. A resumable subscription includes its cursor in that
+/// input.
+record SubscriptionStart {
+    /// Subscription being opened on this connection.
+    id: SubscriptionId,
+    /// Daemon that owns the requested subscription.
+    target: Address,
+    /// Origin and causal metadata supplied or assigned at a trust boundary.
+    context?: RequestContext,
+    /// Stable name of the subscription to open.
+    subscription: string,
+    /// Typed subscription input, including a cursor when that subscription supports resumption.
+    input: JsonValue,
+}
+
+/// Event capacity granted by the consumer.
+/// Hops may defer forwarding credit to satisfy their local per-target buffer limits. The total
+/// credit forwarded by a hop stays within the credit granted by the consumer.
+record SubscriptionCredit {
+    /// Subscription receiving event credit.
+    id: SubscriptionId,
+    /// Additional events the producer may emit.
+    events: u32,
+}
+
+/// Delivers one event from an active subscription.
+record SubscriptionEvent {
+    /// Subscription that produced the event.
+    id: SubscriptionId,
+    /// Typed event value. Resumable subscriptions expose any cursor through this type.
+    event: JsonValue,
+}
+
+/// Requests termination of one active subscription.
+record SubscriptionStop {
+    /// Subscription to stop.
+    id: SubscriptionId,
+}
+
+/// Reports normal termination of one subscription.
+record SubscriptionCompleted {
+    /// Subscription that terminated.
+    id: SubscriptionId,
+}
+
+/// Reports a non-domain failure of one subscription.
+record SubscriptionFailed {
+    /// Subscription that failed.
+    id: SubscriptionId,
+    /// Failure that terminated the subscription.
+    error: OperationError,
+}

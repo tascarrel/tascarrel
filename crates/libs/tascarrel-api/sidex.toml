@@ -1,0 +1,16 @@
+[bundle]
+name = "tascarrel_api"
+version = "1"
+description = "Typed action, event, and terminal protocols for Tascarrel."
+authors = ["Tascarrel Contributors"]
+
+[backend.rust]
+derive = ["Clone", "Debug", "PartialEq"]
+plugins = ["serde"]
+
+[backend.rust.plugin.serde]
+sidex_serde_path = "::sidex_serde"
+
+[backend.rust.types.table]
+"::core::builtins::string" = "crate::ArcStr"
+"::core::builtins::Sequence" = "crate::ArcVec"

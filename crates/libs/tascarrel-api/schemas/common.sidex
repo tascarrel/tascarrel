@@ -1,0 +1,21 @@
+//! Types shared across Tascarrel API schemas.
+
+/// An arbitrary structured JSON value.
+#[json(type = "any")]
+#[rust(type = "::serde_json::Value")]
+opaque JsonValue
+
+/// An absolute instant serialized as an RFC 3339 timestamp.
+#[json(type = "string")]
+#[rust(type = "::jiff::Timestamp")]
+opaque Timestamp
+
+/// Monetary amount represented in the currency's minor unit.
+///
+/// For example, USD 2.25 is represented as currency `USD` and amount `225`.
+record Money {
+    /// ISO 4217 currency code, such as `USD`.
+    currency: string,
+    /// Amount in the currency's minor unit.
+    amount: u64,
+}

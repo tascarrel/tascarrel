@@ -1,0 +1,91 @@
+//! Pod workspace file inspection API implemented by the workspace guest daemon.
+//!
+//! Paths are normalized UTF-8 paths relative to `/workspace`; the empty path identifies the
+//! workspace root. Directory reads are point-in-time traversals and are deliberately not cached.
+//! Symbolic links are returned as entries but are never followed while resolving a request.
+//!
+//! File bodies are read through a guest data-plane request and are not embedded in Sidex
+//! control-plane messages.
+
+import pods::PodId
+
+// RPC
+
+/// Reads the immediate children of one directory in a pod workspace.
+record ReadDirectoryAction {
+    /// Pod whose workspace is inspected.
+    pod_id: PodId,
+    /// Directory to read, using the empty path for the workspace root.
+    path: FilePath,
+}
+
+/// Point-in-time directory contents.
+record ReadDirectoryOutput {
+    /// Immediate children ordered by name.
+    entries: [FileEntry],
+}
+
+// Subscriptions
+
+// Domain Types
+
+/// Normalized UTF-8 path relative to a pod's `/workspace` directory.
+///
+/// The empty path identifies the root. Paths are at most 4,096 encoded bytes. Absolute paths,
+/// empty components, trailing separators, and `.` or `..` components are invalid.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper FilePath: string
+
+/// One immediate child returned by a directory read.
+record FileEntry {
+    /// Final path component used for display and ordering.
+    name: string,
+    /// Filesystem kind observed without following symbolic links.
+    kind: FileKind,
+    /// Byte length for a regular file, or absent for other filesystem kinds.
+    size?: u64,
+    /// Git status for a directly changed file, or absent for directories and unchanged paths.
+    git_status?: FileGitStatus,
+}
+
+/// Filesystem kind observed for one directory entry.
+variant FileKind {
+    /// Regular file.
+    File,
+    /// Directory.
+    Directory,
+    /// Symbolic link.
+    Symlink,
+    /// Socket, device, FIFO, or another special filesystem object.
+    Other,
+}
+
+/// Git index and worktree state annotating one directly changed file.
+record FileGitStatus {
+    /// Previous path reported for a renamed or copied file.
+    previous_path?: FilePath,
+    /// Change between `HEAD` and the index, when present.
+    index?: GitChangeKind,
+    /// Change between the index and worktree, when present.
+    worktree?: GitChangeKind,
+}
+
+/// Git change classification used to annotate file tree entries.
+variant GitChangeKind {
+    /// Path was added.
+    Added,
+    /// Path contents changed.
+    Modified,
+    /// Path was deleted.
+    Deleted,
+    /// Path moved from another location.
+    Renamed,
+    /// Path was copied from another location.
+    Copied,
+    /// Filesystem or Git object type changed.
+    TypeChanged,
+    /// Path has unresolved merge stages.
+    Unmerged,
+    /// Path is not tracked by Git.
+    Untracked,
+}

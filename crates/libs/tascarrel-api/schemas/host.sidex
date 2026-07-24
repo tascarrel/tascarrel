@@ -1,0 +1,13 @@
+//! Host daemon identity types shared by host-owned APIs.
+//!
+//! A host instance identifies one running host daemon process. Host-owned resumable streams include
+//! it in their cursors so consumers can distinguish positions assigned before and after a host
+//! restart.
+
+// Domain Types
+
+/// Identifies one running host daemon instance.
+/// A new identifier is generated whenever hostd starts.
+#[json(type = "string")]
+#[rust(type = "crate::ids::HostInstanceId")]
+opaque HostInstanceId

@@ -1,0 +1,120 @@
+//! Guest system information and resource metrics API implemented by a workspace guest daemon.
+//!
+//! Guest information remains stable for the lifetime of the guest daemon. Core resource
+//! capacities use typed fields, while additional diagnostic and discovery properties use an
+//! extensible map. The metrics subscription exposes bounded, resumable samples collected for the
+//! complete guest. Disk metrics describe only the persistent state filesystem containing the guest
+//! daemon's configured state directory.
+
+import common::{JsonValue, Timestamp}
+
+// RPC
+
+/// Queries information that remains stable for the guest daemon's lifetime.
+///
+/// Every authenticated actor, including a pod, may query this information.
+record QueryGuestInformationAction {}
+
+/// Stable diagnostic and discovery information about the guest daemon and its environment.
+record QueryGuestInformationOutput {
+    /// Running workspace VM incarnation described by this output.
+    guest_instance_id: GuestInstanceId,
+    /// Number of logical processors available to the guest.
+    logical_processor_count: u32,
+    /// Total physical memory available to the guest operating system.
+    memory_total_bytes: u64,
+    /// Total capacity of the persistent guest state filesystem.
+    state_disk_total_bytes: u64,
+    /// Extensible guest properties keyed by documented, namespaced names.
+    ///
+    /// Keys use dot-separated `snake_case` segments, such as `paths.state_directory`. Consumers
+    /// ignore unknown keys. An unavailable value is represented by an absent key.
+    properties: [string: JsonValue],
+}
+
+// Subscriptions
+
+/// Subscribes to retained and live guest resource metric samples.
+///
+/// Every authenticated actor, including a pod, may subscribe. A retained cursor resumes with every
+/// later retained sample. An absent cursor starts with the complete retained history. A cursor for
+/// another guest instance, a cursor older than the retained history, or a cursor later than the
+/// current position rebases to the oldest retained sample. A jump in positions indicates that
+/// intervening samples were discarded.
+record GuestMetricsSubscription {
+    /// Cursor of the last metric sample observed by the consumer, when resuming.
+    cursor?: GuestMetricsCursor,
+}
+
+/// One non-empty batch of retained or live guest resource metric samples.
+record GuestMetricsEvent {
+    /// Ordered resource measurements, each carrying its resumable cursor.
+    samples: [GuestMetricsSample],
+}
+
+// Domain Types
+
+/// Identifies one running incarnation of a workspace VM.
+///
+/// A new identifier is generated whenever a new VM incarnation starts.
+#[json(type = "string")]
+#[rust(type = "crate::ids::GuestInstanceId")]
+opaque GuestInstanceId
+
+/// Identifies one position in the metric stream of a running guest instance.
+record GuestMetricsCursor {
+    /// Workspace VM incarnation that produced the sample.
+    guest_instance_id: GuestInstanceId,
+    /// Monotonically increasing sample position within the guest instance, starting at one.
+    position: u64,
+}
+
+/// Resource measurements collected for the complete guest at one instant.
+record GuestMetricsSample {
+    /// Cursor identifying this sample within its guest instance.
+    cursor: GuestMetricsCursor,
+    /// Time at which the sample was collected.
+    observed_at: Timestamp,
+    /// Number of seconds since the guest operating system started.
+    uptime_seconds: u64,
+    /// Guest CPU utilization and scheduler load.
+    cpu: CpuMetrics,
+    /// Guest memory availability and swap capacity and availability.
+    memory: MemoryMetrics,
+    /// Available capacity of the persistent guest state filesystem.
+    state_disk: DiskMetrics,
+}
+
+/// Guest CPU utilization and scheduler load.
+record CpuMetrics {
+    /// CPU time used across all logical processors as a percentage from zero through one hundred.
+    usage_percent: f32,
+    /// Guest scheduler load averaged over standard time windows.
+    load_average: LoadAverage,
+}
+
+/// Guest scheduler load averaged over standard time windows.
+record LoadAverage {
+    /// Load averaged over the preceding minute.
+    one_minute: f64,
+    /// Load averaged over the preceding five minutes.
+    five_minutes: f64,
+    /// Load averaged over the preceding fifteen minutes.
+    fifteen_minutes: f64,
+}
+
+/// Guest memory availability and swap capacity and availability in bytes.
+record MemoryMetrics {
+    /// Physical memory immediately available without swapping.
+    available_bytes: u64,
+    /// Total configured swap space.
+    swap_total_bytes: u64,
+    /// Currently unused swap space.
+    swap_free_bytes: u64,
+}
+
+/// Filesystem availability in bytes.
+record DiskMetrics {
+    /// Filesystem capacity available for allocation.
+    available_bytes: u64,
+}

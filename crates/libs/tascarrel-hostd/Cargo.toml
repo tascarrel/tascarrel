@@ -1,0 +1,63 @@
+[package]
+name = "tascarrel-host"
+description = "Trusted host daemon for Tascarrel virtual machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tascarrel_host"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+async-trait.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+bytes.workspace = true
+clap = { version = "4.5.40", features = ["derive", "env"] }
+fs2 = "0.4.3"
+futures-util = "0.3.31"
+globset.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+hickory-proto.workspace = true
+hickory-resolver.workspace = true
+jiff.workspace = true
+nix = { version = "0.30.1", features = ["net", "user"] }
+notify.workspace = true
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+reportify.workspace = true
+rustls = "0.23"
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_ignored.workspace = true
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = { workspace = true, features = ["system"] }
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-util = { workspace = true, features = ["io"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+toml = "0.9"
+uuid = { version = "1.16", features = ["v4"] }
+vte.workspace = true
+tascarrel-api = { path = "../tascarrel-api" }
+tascarrel-git.workspace = true
+tascarrel-protocol = { path = "../tascarrel-protocol" }
+tascarrel-mux = { path = "../tascarrel-mux" }
+tascarrel-store = { path = "../tascarrel-store" }
+tascarrel-vm = { path = "../tascarrel-vm" }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+[lints]
+workspace = true

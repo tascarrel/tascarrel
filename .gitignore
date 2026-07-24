@@ -1,0 +1,10 @@
+/target/
+/.tascarrel/
+/.tascarrel-new/
+/result
+/result-*
+/playground/
+*.qcow2
+*.sock
+.direnv/
+.envrc.local
