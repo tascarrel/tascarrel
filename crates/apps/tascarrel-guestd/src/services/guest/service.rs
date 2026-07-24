@@ -694,7 +694,7 @@ mod tests {
 
     /// Verifies the service publishes static information and samples from one
     /// shared source.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn service_exposes_information_and_collected_metrics() {
         let guest_instance_id = api::GuestInstanceId::generate();
         let mut config = GuestServiceConfig::new("/fixture/state");

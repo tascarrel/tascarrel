@@ -47,5 +47,8 @@ tascarrel-mux = { path = "../../libs/tascarrel-mux" }
 tascarrel-store = { path = "../../libs/tascarrel-store" }
 zstd = "0.13"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

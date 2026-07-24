@@ -34,7 +34,6 @@ mod tests {
     use std::fs;
     use std::fs::OpenOptions;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::thread;
 
     use tempfile::tempdir;
 
@@ -48,14 +47,12 @@ mod tests {
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let writer = OpenOptions::new().write(true).open(&executable).unwrap();
-        let release = thread::spawn(move || {
-            thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY * 2);
-            drop(writer);
-        });
 
         let mut command = Command::new(executable);
-        let status = spawn(&mut command).await.unwrap().wait().await.unwrap();
-        release.join().unwrap();
+        let mut spawn = Box::pin(spawn(&mut command));
+        assert!(futures_util::poll!(&mut spawn).is_pending());
+        drop(writer);
+        let status = spawn.await.unwrap().wait().await.unwrap();
 
         assert!(status.success());
     }
