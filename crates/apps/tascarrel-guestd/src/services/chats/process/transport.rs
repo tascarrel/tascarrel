@@ -263,7 +263,14 @@ impl HarnessProcessControl for SupervisedProcessControl {
             }
             loop {
                 if let Some(result) = completion.borrow().clone() {
-                    return result.map_err(process_error);
+                    if let Err(error) = result {
+                        tracing::debug!(
+                            process_id = %self.process_id.0,
+                            %error,
+                            "harness process exited unsuccessfully during requested shutdown"
+                        );
+                    }
+                    return Ok(());
                 }
                 completion.changed().await.map_err(|_| {
                     process_error(format!(
