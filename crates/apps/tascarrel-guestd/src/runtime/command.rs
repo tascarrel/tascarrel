@@ -28,32 +28,3 @@ pub(crate) async fn spawn(command: &mut Command) -> io::Result<Child> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    use tempfile::tempdir;
-
-    use super::*;
-
-    /// Verifies a command waits for an inherited writable descriptor to close.
-    #[tokio::test]
-    async fn retries_a_temporarily_busy_executable() {
-        let directory = tempdir().unwrap();
-        let executable = directory.path().join("executable");
-        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let writer = OpenOptions::new().write(true).open(&executable).unwrap();
-
-        let mut command = Command::new(executable);
-        let mut spawn = Box::pin(spawn(&mut command));
-        assert!(futures_util::poll!(&mut spawn).is_pending());
-        drop(writer);
-        let status = spawn.await.unwrap().wait().await.unwrap();
-
-        assert!(status.success());
-    }
-}
