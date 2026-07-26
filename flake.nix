@@ -35,7 +35,26 @@
       forAllSystems = lib.genAttrs supportedSystems;
       buildRevision = self.rev or self.dirtyRev;
       pkgsFor = system: import nixpkgs { inherit system; };
-      guestPkgsFor = system: import guest-nixpkgs { inherit system; };
+      # Nettle defaults to small-GOT -fpic, which overflows in AArch64 QEMU's static PIE.
+      guestNixpkgsOverlays = [
+        (final: previous: {
+          nettle =
+            if final.stdenv.hostPlatform.isAarch64 && final.stdenv.hostPlatform.isStatic then
+              previous.nettle.overrideAttrs (old: {
+                env = (old.env or { }) // {
+                  CCPIC = "-fPIC";
+                };
+              })
+            else
+              previous.nettle;
+        })
+      ];
+      guestPkgsFor =
+        system:
+        import guest-nixpkgs {
+          inherit system;
+          overlays = guestNixpkgsOverlays;
+        };
       nightlyToolchainFor =
         system:
         fenix.packages.${system}.latest.withComponents [
@@ -231,7 +250,12 @@
             tascarrelPoddPackage = poddPackageFor system;
           };
           modules = [
-            { nixpkgs.hostPlatform = system; }
+            {
+              nixpkgs = {
+                hostPlatform = system;
+                overlays = guestNixpkgsOverlays;
+              };
+            }
             ./nix/modules/tascarrel-guest.nix
             ./nix/image.nix
           ]
