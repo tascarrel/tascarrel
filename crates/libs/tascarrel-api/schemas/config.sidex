@@ -11,6 +11,8 @@
 //! times when opened and whenever they change.
 
 import common::Timestamp
+import chats::ChatModel
+import chats::ChatModelPricing
 import chats::ChatModelSelection
 import network::PortMapping
 import workspaces::WorkspaceName
@@ -31,6 +33,38 @@ record UpdateWorkspaceSettingsAction {
 ///
 /// The resulting state is observed through [`ConfigChangedSubscription`].
 record UpdateWorkspaceSettingsOutput {}
+
+/// Resolves the current Tasci catalog and one selected model for a workspace
+/// harness process.
+///
+/// This internal action is available only to the authenticated guest daemon
+/// belonging to the requested workspace.
+record ResolveTasciModelAction {
+    /// Workspace whose portable Tasci settings to resolve.
+    workspace_name: WorkspaceName,
+    /// Workspace-local model alias, or the configured default when omitted.
+    model?: string,
+}
+
+/// Secret-bearing runtime configuration and secret-free selectable catalog.
+record ResolveTasciModelOutput {
+    /// Workspace-local model alias selected for this session.
+    selected_model: string,
+    /// API base URL configured for the model's endpoint.
+    base_url: string,
+    /// Endpoint-native model identifier sent in completion requests.
+    provider_model: string,
+    /// Authorization header name, when configured.
+    authorization_header?: string,
+    /// Complete authorization header value, when configured.
+    ///
+    /// This value is passed only to the selected pod's private harness process.
+    authorization_value?: string,
+    /// Model alias selected when a new Tasci chat omits a model.
+    default_model: string,
+    /// Current secret-free Tasci models expressed as ordinary chat models.
+    models: [ChatModel],
+}
 
 // Subscriptions
 
@@ -88,6 +122,76 @@ record WorkspaceSettings {
 record WorkspaceChatSettings {
     /// Per-harness model preferences.
     harnesses?: WorkspaceChatHarnessSettings,
+    /// Tasci endpoint and model catalog.
+    tasci?: WorkspaceTasciSettings,
+}
+
+/// Endpoint and model catalog used by Tasci.
+record WorkspaceTasciSettings {
+    /// Model alias selected for new Tasci chats.
+    default_model?: string,
+    /// Inference endpoints keyed by stable workspace-local aliases.
+    endpoints?: [string: WorkspaceTasciEndpoint],
+    /// Selectable models keyed by stable workspace-local aliases.
+    models?: [string: WorkspaceTasciModel],
+}
+
+/// One inference endpoint available to Tasci.
+record WorkspaceTasciEndpoint {
+    /// Human-readable endpoint name, or the map key when absent.
+    display_name?: string,
+    /// Wire protocol implemented by the endpoint.
+    protocol: WorkspaceTasciProtocol,
+    /// API base URL to which protocol-specific paths are appended.
+    base_url: string,
+    /// Secret-backed HTTP authorization, when the endpoint requires it.
+    authorization?: WorkspaceTasciAuthorization,
+}
+
+/// Wire protocols that Tasci can use for model requests.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant WorkspaceTasciProtocol {
+    /// OpenAI-compatible Chat Completions.
+    OpenAiChatCompletions,
+}
+
+/// Secret-backed HTTP authorization for one inference endpoint.
+record WorkspaceTasciAuthorization {
+    /// HTTP request header carrying the credential.
+    header: string,
+    /// Text placed before the secret value, such as `"Bearer "`.
+    prefix?: string,
+    /// Host-owned secret referenced without copying its value into settings.
+    credential: WorkspaceSecretReference,
+}
+
+/// Reference to one value in a host-owned workspace secret provider.
+record WorkspaceSecretReference {
+    /// Workspace-local secret-provider name.
+    provider: string,
+    /// Name of the secret within the provider.
+    secret: string,
+}
+
+/// One selectable model routed through a configured Tasci endpoint.
+record WorkspaceTasciModel {
+    /// Endpoint alias used for requests.
+    endpoint: string,
+    /// Endpoint-native model identifier included in requests.
+    model: string,
+    /// Human-readable model name, or the map key when absent.
+    display_name?: string,
+    /// Maximum context size in tokens, when known.
+    context_window?: u64,
+    /// Maximum generated output in tokens, when known.
+    max_output_tokens?: u64,
+    /// Whether the endpoint and model support structured tool calls.
+    tool_calls?: bool,
+    /// Whether the endpoint and model support parallel structured tool calls.
+    parallel_tool_calls?: bool,
+    /// Versioned token pricing for this endpoint and model combination, when known.
+    pricing?: ChatModelPricing,
 }
 
 /// Model preferences for the coding harnesses known to Tascarrel.

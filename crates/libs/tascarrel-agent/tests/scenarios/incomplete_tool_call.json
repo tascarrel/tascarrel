@@ -1,0 +1,29 @@
+{
+  "name": "incomplete streamed tool calls are never executed",
+  "prompt": "Read the file.",
+  "initial_files": [
+    {
+      "path": "safe.txt",
+      "content": "unchanged\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"safe.txt\"}" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "error_contains": "incomplete tool call",
+    "files": [
+      {
+        "path": "safe.txt",
+        "content": "unchanged\n"
+      }
+    ]
+  }
+}

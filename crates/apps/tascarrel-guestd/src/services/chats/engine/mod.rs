@@ -516,6 +516,19 @@ impl ChatEngine {
             .map_err(state_api_error)
     }
 
+    /// Returns the durable harness and model used to prepare an attachment.
+    pub(crate) async fn chat_selection(
+        &self,
+        chat_id: &ChatId,
+    ) -> Result<Option<(ChatHarnessKind, Option<ChatModelSelection>)>, ChatEngineError> {
+        self.inner
+            .state
+            .harness_resumption(chat_id.clone())
+            .await
+            .map(|resumption| resumption.map(|resumption| (resumption.harness, resumption.model)))
+            .map_err(state_api_error)
+    }
+
     /// Subscribes to snapshots and ordered changes for one chat.
     pub fn subscribe_chat(
         &self,

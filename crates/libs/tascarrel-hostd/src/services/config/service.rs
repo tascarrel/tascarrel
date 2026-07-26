@@ -31,6 +31,7 @@ use tokio::time::Instant;
 use tokio::time::sleep_until;
 use tracing::warn;
 
+use super::settings;
 use super::snapshot;
 use super::watcher::WatchEvents;
 use super::watcher::WatchMessage;
@@ -311,6 +312,8 @@ impl ConfigServiceInner {
                 "settings.json must be corrected before it can be updated",
             ));
         }
+        settings::validate(&input.settings)
+            .map_err(|report| invalid_request(report.error().to_string()))?;
 
         let workspace_name = input.workspace_name;
         let workspace = workspace_path(&self.workspaces_directory, &workspace_name)?;
@@ -704,5 +707,52 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(stale.error(), ConfigServiceError::InvalidRequest));
+    }
+
+    /// Verifies an invalid Tasci catalog is rejected before settings.json is
+    /// created or the observed configuration instance changes.
+    #[tokio::test]
+    async fn update_settings_rejects_dangling_tasci_model_endpoint() {
+        let temporary = tempdir().unwrap();
+        let workspace = workspace(temporary.path(), "");
+        let service = ConfigService::open(ConfigServiceConfig::new(temporary.path())).unwrap();
+        let workspace_name = WorkspaceName::new("demo");
+        let initial = service.read(&workspace_name).await.unwrap();
+        let settings = serde_json::from_str(
+            r#"{
+                "chat": {
+                    "tasci": {
+                        "endpoints": {},
+                        "models": {
+                            "qwen": {
+                                "endpoint": "missing",
+                                "model": "qwen3.6-35b-a3b-q6"
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let error = service
+            .update_settings(api::UpdateWorkspaceSettingsAction {
+                workspace_name: workspace_name.clone(),
+                config_instance_id: initial.config_instance_id.clone(),
+                settings,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.error(), ConfigServiceError::InvalidRequest));
+        assert!(!workspace.join("settings.json").exists());
+        assert!(
+            service
+                .read(&workspace_name)
+                .await
+                .unwrap()
+                .settings
+                .is_none()
+        );
     }
 }

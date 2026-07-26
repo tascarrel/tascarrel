@@ -80,6 +80,10 @@ export function HarnessConnectionCard({
           <Download aria-hidden="true" className="size-3" />
           {installing ? "Installing…" : "Install harness"}
         </Button>
+      ) : harness.kind === "Tasci" ? (
+        <p className="mt-3 text-[11px] leading-4 text-subtle">
+          Endpoints, models, and tokens are managed in Tasci settings.
+        </p>
       ) : harness.login.state === "Pending" ? (
         <PendingChallenge
           state={harness.login}

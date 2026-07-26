@@ -6,6 +6,9 @@
 
 mod claude_code;
 mod codex;
+mod tasci;
 
 pub use claude_code::ClaudeCodeAdaptor;
 pub use codex::CodexAdaptor;
+pub use tasci::TasciAdaptor;
+pub use tasci::TasciConfigurationStore;

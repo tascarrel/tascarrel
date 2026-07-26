@@ -210,6 +210,10 @@ struct Args {
     #[arg(long, env = "TASCARREL_GUEST_PODCTL")]
     podctl: PathBuf,
 
+    /// Immutable Tasci harness injected into every pod.
+    #[arg(long, env = "TASCARREL_GUEST_TASCI")]
+    tasci: PathBuf,
+
     /// Immutable nested Docker daemon and client.
     #[arg(long, env = "TASCARREL_GUEST_DOCKERD")]
     dockerd: PathBuf,
@@ -645,6 +649,7 @@ async fn main() -> Result<()> {
         storage.chats(),
         harness_user.uid.as_raw(),
         harness_user.gid.as_raw(),
+        args.tasci.clone(),
     )
     .await
     .map_err(|error| anyhow!("{error}"))
@@ -872,6 +877,7 @@ async fn main() -> Result<()> {
         &args.nix_store,
         &args.podd,
         &args.podctl,
+        &args.tasci,
         &args.login_shell,
         &args.terminal_shell,
         &args.dockerd,

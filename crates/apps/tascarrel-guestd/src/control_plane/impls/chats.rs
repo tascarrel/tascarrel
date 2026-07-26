@@ -1,8 +1,10 @@
 //! Control-plane implementations for workspace chats and harnesses.
 
 use async_trait::async_trait;
+use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_api::types::chats as api;
+use tascarrel_api::types::config as config_api;
 use tascarrel_api::types::pods as pod_api;
 use tascarrel_api::types::protocol as wire;
 
@@ -73,6 +75,12 @@ impl ExecuteAction for api::CreateChatAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
+        prepare_tasci(
+            &context,
+            &self.harness,
+            self.model.as_ref().map(|model| model.model.as_ref()),
+        )
+        .await?;
         context
             .state()
             .chats()
@@ -96,6 +104,12 @@ impl ExecuteAction for api::CreatePodChatAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
+        prepare_tasci(
+            &context,
+            &self.harness,
+            self.model.as_ref().map(|model| model.model.as_ref()),
+        )
+        .await?;
         let engine = context.state().chats().engine();
         engine
             .validate_chat_selection(&self.harness, self.model.as_ref())
@@ -160,6 +174,21 @@ impl ExecuteAction for api::AttachChatBindingAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
+        let selection = context
+            .state()
+            .chats()
+            .engine()
+            .chat_selection(&self.chat_id)
+            .await
+            .map_err(chat_error)?;
+        if let Some((harness, model)) = selection {
+            prepare_tasci(
+                &context,
+                &harness,
+                model.as_ref().map(|model| model.model.as_ref()),
+            )
+            .await?;
+        }
         context
             .state()
             .chats()
@@ -217,6 +246,22 @@ impl ExecuteAction for api::SendChatPromptAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
+        let selection = context
+            .state()
+            .chats()
+            .engine()
+            .chat_selection(&self.chat_id)
+            .await
+            .map_err(chat_error)?;
+        if let Some((harness, model)) = selection {
+            let requested_model = self.prompt.model.as_ref().or(model.as_ref());
+            prepare_tasci(
+                &context,
+                &harness,
+                requested_model.map(|model| model.model.as_ref()),
+            )
+            .await?;
+        }
         context
             .state()
             .chats()
@@ -230,6 +275,32 @@ impl ExecuteAction for api::SendChatPromptAction {
             .await
             .map_err(chat_error)
     }
+}
+
+async fn prepare_tasci(
+    context: &InvocationCtx<'_>,
+    harness: &api::ChatHarnessKind,
+    model: Option<&str>,
+) -> Result<(), Report<wire::OperationError>> {
+    if harness != &api::ChatHarnessKind::Tasci {
+        return Ok(());
+    }
+    let workspace_name = context.target_workspace()?.clone();
+    let output = context
+        .host()
+        .execute(
+            context.nested_host_request_context()?,
+            config_api::ResolveTasciModelAction {
+                workspace_name,
+                model: model.map(Into::into),
+            },
+        )
+        .await
+        .map_err(|error| {
+            wire::OperationError::Unavailable(operation_error_details(error.to_string())).report()
+        })?;
+    context.state().chats().harnesses().configure_tasci(output);
+    Ok(())
 }
 
 #[async_trait]

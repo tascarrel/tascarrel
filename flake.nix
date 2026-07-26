@@ -33,7 +33,7 @@
       ];
 
       forAllSystems = lib.genAttrs supportedSystems;
-      buildRevision = self.rev or self.dirtyRev;
+      buildRevision = self.rev or self.dirtyRev or "development";
       pkgsFor = system: import nixpkgs { inherit system; };
       # Nettle defaults to small-GOT -fpic, which overflows in AArch64 QEMU's static PIE.
       guestNixpkgsOverlays = [
@@ -124,6 +124,14 @@
           cargoPackage = "tascarrel-podctl";
           binaryName = "podctl";
           description = "Tascarrel in-pod control client";
+        };
+
+      tasciExecPackageFor =
+        system:
+        guestWorkspacePackageFor system {
+          cargoPackage = "tasci-exec";
+          binaryName = "tasci-exec";
+          description = "Tasci coding-agent harness";
         };
 
       cliPackageFor =
@@ -248,6 +256,7 @@
             tascarrelGuestPackage = guestPackage;
             tascarrelPodctlPackage = podctlPackageFor system;
             tascarrelPoddPackage = poddPackageFor system;
+            tascarrelTasciPackage = tasciExecPackageFor system;
           };
           modules = [
             {
@@ -324,6 +333,7 @@
           tascarrel-guest = guestPackageFor system;
           tascarrel-podctl = podctlPackageFor system;
           tascarrel-podd = poddPackageFor system;
+          tasci-exec = tasciExecPackageFor system;
         }
         // lib.optionalAttrs (system == "x86_64-linux") {
           guest-payload-aarch64-linux = guestPayloadFor system "aarch64-linux";
@@ -378,6 +388,7 @@
             tascarrel-guest
             tascarrel-podctl
             tascarrel-podd
+            tasci-exec
             ;
 
           guest-module = (guestPkgsFor system).callPackage ./nix/tests/guest-module.nix {

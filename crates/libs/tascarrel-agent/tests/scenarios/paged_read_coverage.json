@@ -1,0 +1,115 @@
+{
+  "name": "edits are limited to text returned by paged reads",
+  "prompt": "Change the last line.",
+  "initial_files": [
+    {
+      "path": "lines.txt",
+      "content": "one\ntwo\nthree\nfour\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"lines.txt\",\"limit\":2}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-1", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "{\"files\":[{\"path\":\"lines.txt\",\"edits\":[{\"oldText\":\"four\",\"newText\":\"FOUR\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-2", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-2", "delta": "{\"path\":\"lines.txt\",\"offset\":3,\"limit\":2}" },
+        { "kind": "tool_call_completed", "id": "read-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-2", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-2", "delta": "{\"files\":[{\"path\":\"lines.txt\",\"edits\":[{\"oldText\":\"four\",\"newText\":\"FOUR\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Changed the last line." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 5,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "Use offset=3 to continue"
+      },
+      {
+        "name": "edit",
+        "is_error": true,
+        "content_contains": "outside the ranges returned by read"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "four"
+      },
+      {
+        "name": "edit",
+        "is_error": false,
+        "content_contains": "Applied 1 edit"
+      }
+    ],
+    "file_changes": [
+      {
+        "path": "lines.txt",
+        "operation": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "unified_diff_contains": "@@ -1,4 +1,4 @@"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "lines.txt",
+        "content": "one\ntwo\nthree\nFOUR\n"
+      }
+    ]
+  }
+}

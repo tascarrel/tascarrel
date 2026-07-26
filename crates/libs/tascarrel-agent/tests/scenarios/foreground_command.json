@@ -1,0 +1,40 @@
+{
+  "name": "foreground commands return output and non-zero exit status",
+  "prompt": "Run the validation command.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "bash-1", "name": "bash" },
+        { "kind": "tool_call_arguments_delta", "id": "bash-1", "delta": "{\"command\":\"printf 'validation failed\\\\n'; exit 7\"}" },
+        { "kind": "tool_call_completed", "id": "bash-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The validation failed." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "tool_results": [
+      {
+        "name": "bash",
+        "is_error": false,
+        "content_contains": "Command exited with code 7"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

@@ -655,6 +655,7 @@ pub struct PodPrograms {
     nix_store: PathBuf,
     podd: PathBuf,
     podctl: PathBuf,
+    tasci: PathBuf,
     shell: PathBuf,
     terminal_shell: PathBuf,
     dockerd: PathBuf,
@@ -680,6 +681,7 @@ impl PodPrograms {
         nix_store: impl Into<PathBuf>,
         podd: impl Into<PathBuf>,
         podctl: impl Into<PathBuf>,
+        tasci: impl Into<PathBuf>,
         shell: impl Into<PathBuf>,
         terminal_shell: impl Into<PathBuf>,
         dockerd: impl Into<PathBuf>,
@@ -693,6 +695,7 @@ impl PodPrograms {
             nix_store: nix_store.into(),
             podd: podd.into(),
             podctl: podctl.into(),
+            tasci: tasci.into(),
             shell: shell.into(),
             terminal_shell: terminal_shell.into(),
             dockerd: dockerd.into(),
@@ -723,6 +726,7 @@ impl PodPrograms {
         for (program, name) in [
             (&self.podd, "podd"),
             (&self.podctl, "podctl"),
+            (&self.tasci, "Tasci harness"),
             (&self.shell, "setup shell"),
             (&self.terminal_shell, "terminal shell"),
             (&self.dockerd, "dockerd"),
@@ -757,6 +761,7 @@ pub struct RuntimeConfig {
     nix_store: PathBuf,
     podd_program: PathBuf,
     podctl_program: PathBuf,
+    tasci_program: PathBuf,
     shell_program: PathBuf,
     terminal_shell_program: PathBuf,
     dockerd_program: PathBuf,
@@ -819,6 +824,7 @@ impl RuntimeConfig {
             nix_store: programs.nix_store,
             podd_program: programs.podd,
             podctl_program: programs.podctl,
+            tasci_program: programs.tasci,
             shell_program: programs.shell,
             terminal_shell_program: programs.terminal_shell,
             dockerd_program: programs.dockerd,
@@ -1010,6 +1016,7 @@ impl RuntimeConfig {
             nix_store: self.nix_store.clone(),
             podd: self.podd_program.clone(),
             podctl: self.podctl_program.clone(),
+            tasci: self.tasci_program.clone(),
             shell: self.shell_program.clone(),
             terminal_shell: self.terminal_shell_program.clone(),
             dockerd: self.dockerd_program.clone(),
@@ -2054,6 +2061,8 @@ impl<R: CommandRunner> PodRuntime<R> {
             canonical_store_executable(&self.config.podd_program, &self.config.nix_store)?;
         let podctl_program =
             canonical_store_executable(&self.config.podctl_program, &self.config.nix_store)?;
+        let tasci_program =
+            canonical_store_executable(&self.config.tasci_program, &self.config.nix_store)?;
         let shell_program =
             canonical_store_executable(&self.config.shell_program, &self.config.nix_store)?;
         let dockerd_program =
@@ -2070,6 +2079,7 @@ impl<R: CommandRunner> PodRuntime<R> {
             canonical_store_executable(&self.config.nix_program, &self.config.nix_store)?;
         let podd = path(&podd_program)?;
         let podctl = path(&podctl_program)?;
+        let tasci = path(&tasci_program)?;
         let shell = path(&shell_program)?;
         let dockerd = path(&dockerd_program)?;
         let docker_client = path(&docker_client_program)?;
@@ -2365,6 +2375,7 @@ impl<R: CommandRunner> PodRuntime<R> {
         ] {
             mounts.push(immutable_program_mount(destination, podctl.clone())?);
         }
+        mounts.push(immutable_program_mount("/usr/local/bin/tasci-exec", tasci)?);
         if self.config.policy.rootless_containers() {
             let mounts = configuration["mounts"]
                 .as_array_mut()
@@ -2910,6 +2921,7 @@ fn validate_share_destination(path: &Path, runtime_origin: bool) -> Result<(), R
         NEWGIDMAP_PROGRAM_DESTINATION,
         "/usr/local/bin/nix",
         "/usr/local/bin/podctl",
+        "/usr/local/bin/tasci-exec",
         "/usr/local/bin/git-remote-tascarrel",
         "/usr/local/bin/tascarrel-git-receive-pack",
     ];
@@ -3522,6 +3534,7 @@ mod tests {
             let nix_store = root.join("nix/store");
             let podd = nix_store.join("abcd-tascarrel-podd/bin/tascarrel-podd");
             let podctl = nix_store.join("bcde-tascarrel-podctl/bin/podctl");
+            let tasci = nix_store.join("cdef-tasci-exec/bin/tasci-exec");
             let shell = nix_store.join("efgh-bash/bin/bash");
             let dockerd = nix_store.join("ijkl-docker/bin/dockerd");
             let docker_client = nix_store.join("mnop-docker-client/bin/docker");
@@ -3536,6 +3549,7 @@ mod tests {
             for program in [
                 &podd,
                 &podctl,
+                &tasci,
                 &shell,
                 &dockerd,
                 &docker_client,
@@ -3576,6 +3590,7 @@ mod tests {
                     &nix_store,
                     &podd,
                     &podctl,
+                    &tasci,
                     &shell,
                     &shell,
                     &dockerd,
@@ -3654,6 +3669,7 @@ mod tests {
         let store = temporary.path().join("nix/store");
         let podd = store.join("hash/bin/podd");
         let podctl = store.join("podctl/bin/podctl");
+        let tasci = store.join("tasci/bin/tasci-exec");
         let shell = store.join("shell/bin/sh");
         let dockerd = store.join("docker/bin/dockerd");
         let docker_client = store.join("docker-client/bin/docker");
@@ -3665,6 +3681,7 @@ mod tests {
             &store,
             &podd,
             &podctl,
+            &tasci,
             &shell,
             &shell,
             &dockerd,
@@ -3697,6 +3714,7 @@ mod tests {
                     "/nix/store",
                     "/nix/store/x/podd",
                     "/nix/store/x/podctl",
+                    "/nix/store/x/tasci-exec",
                     "/nix/store/x/sh",
                     "/nix/store/x/zsh",
                     "/nix/store/x/dockerd",
@@ -3717,6 +3735,7 @@ mod tests {
                 "/nix/store",
                 "/usr/bin/podd",
                 "/nix/store/x/podctl",
+                "/nix/store/x/tasci-exec",
                 "/nix/store/x/sh",
                 "/nix/store/x/zsh",
                 "/nix/store/x/dockerd",

@@ -1,0 +1,113 @@
+{
+  "name": "stale edit is rejected until the model reads again",
+  "prompt": "Change alpha to beta.",
+  "initial_files": [
+    {
+      "path": "notes.txt",
+      "content": "alpha\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"notes.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "before_response": [
+        {
+          "kind": "write",
+          "path": "notes.txt",
+          "content": "alpha\nexternal\n"
+        }
+      ],
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-1", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "{\"files\":[{\"path\":\"notes.txt\",\"edits\":[{\"oldText\":\"alpha\",\"newText\":\"beta\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-2", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-2", "delta": "{\"path\":\"notes.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-2", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-2", "delta": "{\"files\":[{\"path\":\"notes.txt\",\"edits\":[{\"oldText\":\"alpha\",\"newText\":\"beta\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Updated the current file." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 5,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "alpha"
+      },
+      {
+        "name": "edit",
+        "is_error": true,
+        "content_contains": "changed after it was read"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "external"
+      },
+      {
+        "name": "edit",
+        "is_error": false,
+        "content_contains": "Applied 1 edit(s)"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "notes.txt",
+        "content": "beta\nexternal\n"
+      }
+    ]
+  }
+}

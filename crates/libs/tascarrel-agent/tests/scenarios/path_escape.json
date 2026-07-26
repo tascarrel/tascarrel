@@ -1,0 +1,40 @@
+{
+  "name": "file tools reject workspace path escapes",
+  "prompt": "Create a file outside the workspace.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-1", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-1", "delta": "{\"path\":\"../escape.txt\",\"content\":\"unsafe\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The path was rejected." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "tool_results": [
+      {
+        "name": "write",
+        "is_error": true,
+        "content_contains": "outside the file workspace"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

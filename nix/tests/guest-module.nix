@@ -39,6 +39,7 @@ pkgs.testers.runNixOSTest {
           test -x "$TASCARREL_GUEST_PODMAN"
           test -x "$TASCARREL_GUEST_NEWUIDMAP"
           test -x "$TASCARREL_GUEST_NEWGIDMAP"
+          test -x "$TASCARREL_GUEST_TASCI"
           test "$TASCARREL_GUEST_INSTANCE_ID" = ${guestInstanceId}
           test "$TASCARREL_GUEST_STATE_DIR" = /var/lib/tascarrel
           test "$TASCARREL_GUEST_POD_NIX_DAEMON_SOCKET_DIR" = /run/tascarrel/pod-nix-daemon
@@ -53,6 +54,10 @@ pkgs.testers.runNixOSTest {
           exec sleep infinity
         '';
       };
+      fakeTasci = pkgs.writeShellApplication {
+        name = "tasci-exec";
+        text = "exit 0";
+      };
     in
     {
       imports = [ guestModule ];
@@ -62,6 +67,7 @@ pkgs.testers.runNixOSTest {
         package = fakeGuest;
         podctlPackage = fakeGuest;
         poddPackage = fakeGuest;
+        tasciPackage = fakeTasci;
         networkIsolation = true;
         dataDevice = dataDevice;
         autoFormatDataDevice = true;

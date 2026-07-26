@@ -114,6 +114,11 @@ pub type TcpFlowsSubscription = ActivitySubscription<api::TcpFlowEvent>;
 pub struct NetworkServiceConfig {
     /// DNS suffix below which host-issued route labels are recognized.
     pub hostname_suffix: String,
+    /// Host reached by static `network.host_ports` mappings.
+    ///
+    /// Dynamic pod-scoped host forwards remain bound to this daemon's
+    /// loopback interface.
+    pub host_port_host: String,
     /// Maximum number of host-issued HTTP routes.
     pub max_http_routes: usize,
     /// Maximum number of active host-loopback TCP listeners.
@@ -149,6 +154,7 @@ impl Default for NetworkServiceConfig {
     fn default() -> Self {
         Self {
             hostname_suffix: DEFAULT_HOSTNAME_SUFFIX.to_owned(),
+            host_port_host: Ipv4Addr::LOCALHOST.to_string(),
             max_http_routes: DEFAULT_MAX_HTTP_ROUTES,
             max_port_forwards: DEFAULT_MAX_PORT_FORWARDS,
             max_pod_host_forwards: DEFAULT_MAX_POD_HOST_FORWARDS,
@@ -181,7 +187,8 @@ impl NetworkServiceConfig {
         {
             return Err(NetworkServiceError::InvalidConfiguration.report());
         }
-        validate_hostname_suffix(&self.hostname_suffix)
+        validate_hostname_suffix(&self.hostname_suffix)?;
+        validate_host_port_host(&self.host_port_host)
     }
 }
 
@@ -2053,6 +2060,15 @@ fn validate_hostname_suffix(suffix: &str) -> Result<(), Report<NetworkServiceErr
     Ok(())
 }
 
+fn validate_host_port_host(host: &str) -> Result<(), Report<NetworkServiceError>> {
+    if host.parse::<IpAddr>().is_ok() || validate_hostname_suffix(host).is_ok() {
+        return Ok(());
+    }
+    Err(invalid_configuration(
+        "static host-port target must be an IP address or lowercase DNS hostname",
+    ))
+}
+
 fn reduce_http_routes(list: &mut api::HttpRouteList, mutation: &api::HttpRouteListMutation) {
     match mutation {
         api::HttpRouteListMutation::Upsert(route) => {
@@ -2817,6 +2833,18 @@ mod tests {
             "tascarrel_.localhost",
         ] {
             assert!(validate_hostname_suffix(invalid).is_err());
+        }
+    }
+
+    /// Verifies static host-port targets accept outer DNS names and IP
+    /// addresses without accepting an embedded port or URL.
+    #[test]
+    fn host_port_host_validation_accepts_only_bare_hosts() {
+        for valid in ["host.tascarrel.internal", "127.0.0.1", "::1"] {
+            assert!(validate_host_port_host(valid).is_ok());
+        }
+        for invalid in ["", "http://outer", "outer:18080", "Outer.internal"] {
+            assert!(validate_host_port_host(invalid).is_err());
         }
     }
 }

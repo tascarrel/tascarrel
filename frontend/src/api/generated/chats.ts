@@ -615,7 +615,7 @@ import * as __schema_workspaces from "./workspaces";
 /**
  * Coding harness durably associated with a chat.
  */
- export type ChatHarnessKind = ("Codex" | "ClaudeCode");
+ export type ChatHarnessKind = ("Tasci" | "Codex" | "ClaudeCode");
 /**
  * A coding harness available within the workspace.
  */

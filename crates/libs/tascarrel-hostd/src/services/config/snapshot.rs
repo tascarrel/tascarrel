@@ -19,6 +19,9 @@ use reportify::Report;
 use tascarrel_api::types::config as api;
 use thiserror::Error;
 
+use super::settings;
+use super::settings::SettingsValidationError;
+
 /// Configuration contents and modification times observed in one scan.
 pub(crate) struct WorkspaceSnapshot {
     config: Result<api::WorkspaceConfig, api::ConfigError>,
@@ -370,11 +373,12 @@ fn decode_settings(text: &str) -> Result<api::WorkspaceSettings, Report<Settings
     deserializer
         .end()
         .map_err(|_| SettingsLoadError::Decode.report())?;
-    if unknown.is_empty() {
-        Ok(settings)
-    } else {
-        Err(SettingsLoadError::UnknownFields(unknown.into_iter().collect()).report())
+    if !unknown.is_empty() {
+        return Err(SettingsLoadError::UnknownFields(unknown.into_iter().collect()).report());
     }
+    settings::validate(&settings)
+        .map_err(|report| SettingsLoadError::Invalid(*report.error()).report())?;
+    Ok(settings)
 }
 
 /// Value-safe configuration loading failure categories.
@@ -431,6 +435,8 @@ enum SettingsLoadError {
     Decode,
     #[error("settings.json contains unknown fields")]
     UnknownFields(Vec<String>),
+    #[error("settings.json is invalid: {0}")]
+    Invalid(SettingsValidationError),
 }
 
 impl SettingsLoadError {
@@ -595,5 +601,94 @@ mod tests {
         let message = invalid.last_settings_error.unwrap().message;
         assert!(message.contains("unknown"));
         assert!(!message.contains("secret-value"));
+    }
+
+    /// Verifies a complete Tasci catalog is loaded and a later dangling model
+    /// reference retains that last valid catalog.
+    #[test]
+    fn snapshot_validates_tasci_endpoint_and_model_references() {
+        let temporary = tempdir().unwrap();
+        let workspace = temporary.path().join("demo");
+        fs::create_dir_all(workspace.join("image")).unwrap();
+        fs::write(workspace.join("config.toml"), "").unwrap();
+        fs::write(workspace.join("settings.json"), valid_tasci_settings()).unwrap();
+
+        let valid = load(&workspace, 4 * 1024 * 1024).unwrap().into_event(None);
+        let tasci = valid
+            .settings
+            .as_ref()
+            .unwrap()
+            .chat
+            .as_ref()
+            .unwrap()
+            .tasci
+            .as_ref()
+            .unwrap();
+        assert_eq!(tasci.default_model.as_deref(), Some("qwen"));
+        assert_eq!(
+            tasci
+                .models
+                .as_ref()
+                .unwrap()
+                .get("qwen")
+                .unwrap()
+                .endpoint
+                .as_ref(),
+            "local"
+        );
+
+        fs::write(
+            workspace.join("settings.json"),
+            valid_tasci_settings().replace(r#""endpoint": "local""#, r#""endpoint": "missing""#),
+        )
+        .unwrap();
+        let invalid = load(&workspace, 4 * 1024 * 1024)
+            .unwrap()
+            .into_event(Some(&valid));
+
+        assert_eq!(invalid.settings, valid.settings);
+        assert!(
+            invalid
+                .last_settings_error
+                .unwrap()
+                .message
+                .contains("references an endpoint")
+        );
+    }
+
+    fn valid_tasci_settings() -> &'static str {
+        r#"{
+            "chat": {
+                "tasci": {
+                    "defaultModel": "qwen",
+                    "endpoints": {
+                        "local": {
+                            "displayName": "Local llama.cpp",
+                            "protocol": "OpenAiChatCompletions",
+                            "baseUrl": "http://host.tascarrel.internal:18080/v1",
+                            "authorization": {
+                                "header": "Authorization",
+                                "prefix": "Bearer ",
+                                "credential": {
+                                    "provider": "inference",
+                                    "secret": "local_token"
+                                }
+                            }
+                        }
+                    },
+                    "models": {
+                        "qwen": {
+                            "endpoint": "local",
+                            "model": "qwen3.6-35b-a3b-q6",
+                            "displayName": "Qwen 35B A3B",
+                            "contextWindow": 131072,
+                            "maxOutputTokens": 32768,
+                            "toolCalls": true,
+                            "parallelToolCalls": true
+                        }
+                    }
+                }
+            }
+        }"#
     }
 }

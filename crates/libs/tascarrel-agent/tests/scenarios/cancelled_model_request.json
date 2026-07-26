@@ -1,0 +1,20 @@
+{
+  "name": "model cancellation terminates the run",
+  "prompt": "Wait for the model.",
+  "responses": [
+    {
+      "cancel_before_response": true,
+      "events": []
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "request_last_messages": [
+      {
+        "role": "user",
+        "content_contains": "Wait for the model"
+      }
+    ],
+    "error_contains": "cancelled"
+  }
+}

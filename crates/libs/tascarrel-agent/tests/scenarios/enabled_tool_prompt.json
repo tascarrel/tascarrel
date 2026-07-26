@@ -1,0 +1,33 @@
+{
+  "name": "system prompt includes only enabled tool capabilities",
+  "prompt": "Read only.",
+  "enabled_tools": ["read"],
+  "responses": [
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Ready to read." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "system_prompt_contains": [
+      "- read: Read workspace file contents",
+      "Use read to inspect file contents"
+    ],
+    "system_prompt_not_contains": [
+      "- bash:",
+      "- edit:",
+      "- process:",
+      "- write:",
+      "Use background mode",
+      "Use edit for localized changes"
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

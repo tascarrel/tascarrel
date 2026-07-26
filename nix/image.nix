@@ -6,6 +6,7 @@
   tascarrelGuestPackage,
   tascarrelPodctlPackage,
   tascarrelPoddPackage,
+  tascarrelTasciPackage,
   ...
 }:
 
@@ -79,6 +80,7 @@ in
     package = tascarrelGuestPackage;
     podctlPackage = tascarrelPodctlPackage;
     poddPackage = tascarrelPoddPackage;
+    tasciPackage = tascarrelTasciPackage;
     portName = "tascarrel-control";
     networkIsolation = true;
     dataDevice = "/dev/disk/by-id/virtio-tascarrel-data";

@@ -1,0 +1,93 @@
+{
+  "name": "overlong lines can be continued without weakening edit coverage",
+  "prompt": "Change the marker at the end of the long line.",
+  "initial_repeated_files": [
+    {
+      "path": "long.txt",
+      "unit": "x",
+      "count": 60000,
+      "suffix": "TARGET\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"long.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-2", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-2", "delta": "{\"path\":\"long.txt\",\"offset\":1,\"byteOffset\":51200}" },
+        { "kind": "tool_call_completed", "id": "read-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-1", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "{\"files\":[{\"path\":\"long.txt\",\"edits\":[{\"oldText\":\"TARGET\",\"newText\":\"DONE\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Changed the marker." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 4,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "byteOffset=51200"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "TARGET"
+      },
+      {
+        "name": "edit",
+        "is_error": false,
+        "content_contains": "Applied 1 edit"
+      }
+    ],
+    "file_changes": [
+      {
+        "path": "long.txt",
+        "operation": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "unified_diff_contains": "--- a/long.txt\n+++ b/long.txt"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

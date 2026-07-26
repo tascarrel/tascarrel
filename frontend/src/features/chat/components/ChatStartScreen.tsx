@@ -11,7 +11,10 @@ import {
   storeChatCreatorDraft,
 } from "../model/drafts.ts";
 import { harnessKindKey } from "../model/format.ts";
-import { chatModelPreferences } from "../model/modelPreferences.ts";
+import {
+  chatModelPreferences,
+  configuredChatHarness,
+} from "../model/modelPreferences.ts";
 import type {
   AttachmentUploader,
   AttachmentUrlResolver,
@@ -54,9 +57,13 @@ export function ChatStartScreen({
     return !composerDraft?.text.trim() && !composerDraft?.attachments.length;
   });
   const [startingTarget, setStartingTarget] = useState<"chat" | "pod">();
+  const configuredHarnesses = useMemo(
+    () => harnesses.map((harness) => configuredChatHarness(harness, settings)),
+    [harnesses, settings],
+  );
   const authenticatedHarnesses = useMemo(
-    () => harnesses.filter((candidate) => candidate.credentials.state === "Valid"),
-    [harnesses],
+    () => configuredHarnesses.filter((candidate) => candidate.credentials.state === "Valid"),
+    [configuredHarnesses],
   );
   const harness = useMemo(
     () => authenticatedHarnesses.find(

@@ -1,0 +1,113 @@
+{
+  "name": "background commands remain observable until removed",
+  "prompt": "Run a background command and supervise it.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "bash-1", "name": "bash" },
+        { "kind": "tool_call_arguments_delta", "id": "bash-1", "delta": "{\"command\":\"sleep 0.05; printf 'done\\\\n'\",\"background\":true}" },
+        { "kind": "tool_call_completed", "id": "bash-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "list-1", "name": "process" },
+        { "kind": "tool_call_arguments_delta", "id": "list-1", "delta": "{\"action\":\"list\"}" },
+        { "kind": "tool_call_completed", "id": "list-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "wait-1", "name": "process" },
+        { "kind": "tool_call_arguments_delta", "id": "wait-1", "delta": "{\"action\":\"wait\",\"processId\":\"process-1\",\"cursor\":0,\"timeoutMs\":1000}" },
+        { "kind": "tool_call_completed", "id": "wait-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "wait-2", "name": "process" },
+        { "kind": "tool_call_arguments_delta", "id": "wait-2", "delta": "{\"action\":\"wait\",\"processId\":\"process-1\",\"cursor\":5,\"timeoutMs\":1000}" },
+        { "kind": "tool_call_completed", "id": "wait-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "remove-1", "name": "process" },
+        { "kind": "tool_call_arguments_delta", "id": "remove-1", "delta": "{\"action\":\"remove\",\"processId\":\"process-1\"}" },
+        { "kind": "tool_call_completed", "id": "remove-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The process completed." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 6,
+    "tool_results": [
+      {
+        "name": "bash",
+        "is_error": false,
+        "content_contains": "Started background process process-1"
+      },
+      {
+        "name": "process",
+        "is_error": false,
+        "content_contains": "process-1"
+      },
+      {
+        "name": "process",
+        "is_error": false,
+        "content_contains": "done",
+        "additional_content_contains": ["\"nextCursor\": 5"]
+      },
+      {
+        "name": "process",
+        "is_error": false,
+        "content_contains": "\"state\": \"exited\""
+      },
+      {
+        "name": "process",
+        "is_error": false,
+        "content_contains": "Removed process-1"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

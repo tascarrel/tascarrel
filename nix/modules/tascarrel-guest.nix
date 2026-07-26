@@ -33,6 +33,7 @@ let
   guestBinary = lib.getExe' cfg.package cfg.binary;
   podctlBinary = lib.getExe' cfg.podctlPackage "podctl";
   poddBinary = lib.getExe' cfg.poddPackage "tascarrel-podd";
+  tasciBinary = lib.getExe' cfg.tasciPackage "tasci-exec";
   tascarrelStarshipConfig = pkgs.writeText "tascarrel-starship.toml" ''
     add_newline = false
     command_timeout = 1000
@@ -79,6 +80,7 @@ let
     lib.optionals (cfg.package != null) [ cfg.package ]
     ++ lib.optionals (cfg.poddPackage != null) [ cfg.poddPackage ]
     ++ lib.optionals (cfg.podctlPackage != null) [ cfg.podctlPackage ]
+    ++ lib.optionals (cfg.tasciPackage != null) [ cfg.tasciPackage ]
     ++ [
       config.nix.package
       pkgs.bashInteractive
@@ -116,6 +118,12 @@ in
       type = types.nullOr types.package;
       default = null;
       description = "Package containing the immutable Tascarrel pod control client.";
+    };
+
+    tasciPackage = mkOption {
+      type = types.nullOr types.package;
+      default = null;
+      description = "Package containing the immutable Tasci coding harness.";
     };
 
     codeServerPackage = mkOption {
@@ -287,6 +295,10 @@ in
       {
         assertion = cfg.podctlPackage != null;
         message = "services.tascarrel-guest.podctlPackage must be set when the service is enabled";
+      }
+      {
+        assertion = cfg.tasciPackage != null;
+        message = "services.tascarrel-guest.tasciPackage must be set when the service is enabled";
       }
       {
         assertion = cfg.dataDevice != null;
@@ -559,6 +571,7 @@ in
         bind_binary tascarrel-podd ${lib.escapeShellArg persistentPoddBinary}
         bind_binary podctl ${lib.escapeShellArg podctlBinary}
         bind_binary podctl ${lib.escapeShellArg persistentPodctlBinary}
+        bind_binary tasci-exec ${lib.escapeShellArg tasciBinary}
         echo "tascarrel: using local guest binaries from ${localBinariesDirectory}"
       '';
       serviceConfig = {
@@ -675,6 +688,7 @@ in
         TASCARREL_GUEST_NSENTER = lib.getExe' pkgs.util-linux "nsenter";
         TASCARREL_GUEST_PODD = poddBinary;
         TASCARREL_GUEST_PODCTL = podctlBinary;
+        TASCARREL_GUEST_TASCI = tasciBinary;
         TASCARREL_GUEST_RUNC = lib.getExe' pkgs.runc "runc";
         TASCARREL_GUEST_TAR = lib.getExe' pkgs.gnutar "tar";
         TASCARREL_GUEST_UMOCI = lib.getExe' pkgs.umoci "umoci";

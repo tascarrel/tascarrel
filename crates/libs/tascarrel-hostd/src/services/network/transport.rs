@@ -2,7 +2,6 @@
 
 use std::io;
 use std::net::IpAddr;
-use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +64,28 @@ pub(crate) enum NetworkTransportError {
 enum ProxyMode {
     Http,
     Https,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TcpDestination {
+    Socket(SocketAddr),
+    ConfiguredHost { host: String, port: u16 },
+}
+
+impl TcpDestination {
+    const fn port(&self) -> u16 {
+        match self {
+            Self::Socket(address) => address.port(),
+            Self::ConfiguredHost { port, .. } => *port,
+        }
+    }
+
+    const fn effective_address(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Socket(address) => Some(*address),
+            Self::ConfiguredHost { .. } => None,
+        }
+    }
 }
 
 impl NetworkService {
@@ -235,7 +256,14 @@ impl NetworkService {
         let admission = request
             .validate()
             .map_err(|error| TcpAdmissionError::Invalid(error.to_string()))
-            .and_then(|()| tcp_destination(request.destination, policy, pod_host_forward));
+            .and_then(|()| {
+                tcp_destination(
+                    request.destination,
+                    policy,
+                    pod_host_forward,
+                    &self.inner.config.host_port_host,
+                )
+            });
         let (destination, proxy) = match admission {
             Ok(admission) => admission,
             Err(error) => {
@@ -255,7 +283,7 @@ impl NetworkService {
             &tcp_flow_id,
             &request,
             source,
-            Some(destination),
+            destination.effective_address(),
             Some(mode),
         );
         let Ok(permit) = Arc::clone(&self.inner.connections).try_acquire_owned() else {
@@ -314,7 +342,7 @@ impl NetworkService {
         } else {
             let mut upstream = match timeout(
                 self.inner.config.connect_timeout,
-                TcpStream::connect(destination),
+                connect_tcp_destination(&destination),
             )
             .await
             {
@@ -578,10 +606,11 @@ fn tcp_destination(
     requested: SocketAddr,
     policy: &NetworkPolicy,
     pod_host_forward: Option<SocketAddr>,
-) -> Result<(SocketAddr, Option<ProxyMode>), TcpAdmissionError> {
+    host_port_host: &str,
+) -> Result<(TcpDestination, Option<ProxyMode>), TcpAdmissionError> {
     if requested.ip() == IpAddr::V4(VIRTUAL_HOST_ADDRESS) {
         if let Some(destination) = pod_host_forward {
-            return Ok((destination, None));
+            return Ok((TcpDestination::Socket(destination), None));
         }
         let mapping = policy
             .host_ports
@@ -589,7 +618,10 @@ fn tcp_destination(
             .find(|mapping| mapping.pod_port == requested.port())
             .ok_or(TcpAdmissionError::Denied)?;
         return Ok((
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mapping.host_port),
+            TcpDestination::ConfiguredHost {
+                host: host_port_host.to_owned(),
+                port: mapping.host_port,
+            },
             None,
         ));
     }
@@ -607,7 +639,7 @@ fn tcp_destination(
         None
     };
     if proxy.is_some() {
-        return Ok((requested, proxy));
+        return Ok((TcpDestination::Socket(requested), proxy));
     }
     let host_addresses = host_interface_addresses()
         .map_err(|error| TcpAdmissionError::Unavailable(error.to_string()))?;
@@ -617,7 +649,16 @@ fn tcp_destination(
     if !allowed {
         return Err(TcpAdmissionError::Denied);
     }
-    Ok((requested, None))
+    Ok((TcpDestination::Socket(requested), None))
+}
+
+async fn connect_tcp_destination(destination: &TcpDestination) -> io::Result<TcpStream> {
+    match destination {
+        TcpDestination::Socket(address) => TcpStream::connect(address).await,
+        TcpDestination::ConfiguredHost { host, port } => {
+            TcpStream::connect((host.as_str(), *port)).await
+        }
+    }
 }
 
 fn dns_addresses(message: &Message) -> Vec<IpAddr> {
@@ -656,6 +697,8 @@ fn duration_ms(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
     use crate::services::network::policy::HostPortMapping;
 
@@ -677,13 +720,25 @@ mod tests {
             ..NetworkPolicy::default()
         };
         let requested = SocketAddr::new(IpAddr::V4(VIRTUAL_HOST_ADDRESS), 15432);
-        let (destination, proxy) = tcp_destination(requested, &policy, None).unwrap();
-        assert_eq!(destination, (Ipv4Addr::LOCALHOST, 5432).into());
+        let (destination, proxy) =
+            tcp_destination(requested, &policy, None, "outer.internal").unwrap();
+        assert_eq!(
+            destination,
+            TcpDestination::ConfiguredHost {
+                host: "outer.internal".to_owned(),
+                port: 5432,
+            }
+        );
         assert!(proxy.is_none());
         let shorthand = SocketAddr::new(IpAddr::V4(VIRTUAL_HOST_ADDRESS), 3000);
         assert_eq!(
-            tcp_destination(shorthand, &policy, None).unwrap().0,
-            (Ipv4Addr::LOCALHOST, 3000).into()
+            tcp_destination(shorthand, &policy, None, "outer.internal")
+                .unwrap()
+                .0,
+            TcpDestination::ConfiguredHost {
+                host: "outer.internal".to_owned(),
+                port: 3000,
+            }
         );
     }
 
@@ -701,10 +756,10 @@ mod tests {
         let requested = SocketAddr::new(IpAddr::V4(VIRTUAL_HOST_ADDRESS), 15432);
         let dynamic = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6432);
         assert_eq!(
-            tcp_destination(requested, &policy, Some(dynamic))
+            tcp_destination(requested, &policy, Some(dynamic), "outer.internal")
                 .unwrap()
                 .0,
-            dynamic
+            TcpDestination::Socket(dynamic)
         );
     }
 }

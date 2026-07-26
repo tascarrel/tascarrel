@@ -25,6 +25,8 @@ import {
 import { useChatHarnesses } from "../chat/state.ts";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { SecretsSettings } from "../secrets/SecretsSettings.tsx";
+import { sameWorkspaceSettings } from "./settingsComparison.ts";
+import { TasciSettings } from "./TasciSettings.tsx";
 import { WorkspaceRuntimeSettings } from "./WorkspaceRuntimeSettings.tsx";
 
 export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspace }) {
@@ -47,6 +49,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
               }]
             : []),
           {
+            value: "tasci",
+            label: "Tasci",
+          },
+          {
             value: "secrets",
             label: "Secrets",
           },
@@ -66,6 +72,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
             <HarnessSettings workspace={workspace.name} />
           </SidebarTabsPanel>
         ) : null}
+
+        <SidebarTabsPanel value="tasci">
+          <TasciSettings workspace={workspace.name} />
+        </SidebarTabsPanel>
 
         <SidebarTabsPanel value="secrets">
           <SecretsSettings workspace={workspace.name} />
@@ -161,7 +171,7 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
   useEffect(() => {
     if (
       pendingSettings !== undefined
-      && sameSettings(configState.value?.settings, pendingSettings)
+      && sameWorkspaceSettings(configState.value?.settings, pendingSettings)
     ) setPendingSettings(undefined);
   }, [configState.value?.settings, pendingSettings]);
 
@@ -473,23 +483,4 @@ function withHarnessPreferences(
         : { ...harnesses, claudeCode: preferences },
     },
   };
-}
-
-function sameSettings(
-  left: config.WorkspaceSettings | undefined,
-  right: config.WorkspaceSettings,
-): boolean {
-  return JSON.stringify(sortJson(left)) === JSON.stringify(sortJson(right));
-}
-
-function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, sortJson(child)]),
-    );
-  }
-  return value;
 }

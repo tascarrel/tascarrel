@@ -49,7 +49,9 @@ const DELIVERY_OPTIONS = [
   { label: "Send Now", value: "InterruptAndSend" },
 ];
 
-const HARNESS_PROVIDERS = {
+const HARNESS_PROVIDERS: Partial<
+  Record<chats.ChatHarnessKind, { label: string; href: string }>
+> = {
   Codex: {
     label: "Codex App Server",
     href: "https://developers.openai.com/codex/app-server",

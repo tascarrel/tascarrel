@@ -1,0 +1,40 @@
+{
+  "name": "foreground timeout stops the supervised process group",
+  "prompt": "Run a command with a short timeout.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "bash-1", "name": "bash" },
+        { "kind": "tool_call_arguments_delta", "id": "bash-1", "delta": "{\"command\":\"sleep 5\",\"timeoutMs\":10}" },
+        { "kind": "tool_call_completed", "id": "bash-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The command timed out." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "tool_results": [
+      {
+        "name": "bash",
+        "is_error": true,
+        "content_contains": "timed out after 10 ms"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

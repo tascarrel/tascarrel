@@ -1,0 +1,115 @@
+{
+  "name": "complete rewrites require all current lines to be observed",
+  "prompt": "Rewrite the file.",
+  "initial_files": [
+    {
+      "path": "document.txt",
+      "content": "first\nsecond\nthird\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"document.txt\",\"limit\":1}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-1", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-1", "delta": "{\"path\":\"document.txt\",\"content\":\"rewritten\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-2", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-2", "delta": "{\"path\":\"document.txt\",\"offset\":2,\"limit\":2}" },
+        { "kind": "tool_call_completed", "id": "read-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-2", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-2", "delta": "{\"path\":\"document.txt\",\"content\":\"rewritten\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-2" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The file was rewritten safely." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 5,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "Use offset=2 to continue"
+      },
+      {
+        "name": "write",
+        "is_error": true,
+        "content_contains": "only partially read"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "third"
+      },
+      {
+        "name": "write",
+        "is_error": false,
+        "content_contains": "Wrote document.txt"
+      }
+    ],
+    "file_changes": [
+      {
+        "path": "document.txt",
+        "operation": "modified",
+        "additions": 1,
+        "deletions": 3,
+        "unified_diff_contains": "--- a/document.txt\n+++ b/document.txt"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "document.txt",
+        "content": "rewritten\n"
+      }
+    ]
+  }
+}

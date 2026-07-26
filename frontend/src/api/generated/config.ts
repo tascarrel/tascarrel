@@ -39,6 +39,47 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type UpdateWorkspaceSettingsOutput = Record<string, never>;
 /**
+ * Resolves the current Tasci catalog and one selected model for a workspace
+ * harness process.
+ * 
+ * This internal action is available only to the authenticated guest daemon
+ * belonging to the requested workspace.
+ */
+ export type ResolveTasciModelAction = { /**
+                                            * Workspace whose portable Tasci settings to resolve.
+                                            */
+                                                        "workspaceName": __schema_workspaces.WorkspaceName, /**
+                                            * Workspace-local model alias, or the configured default when omitted.
+                                            */
+                                                        "model"?: __sidex_types.builtins.String };
+/**
+ * Secret-bearing runtime configuration and secret-free selectable catalog.
+ */
+ export type ResolveTasciModelOutput = { /**
+                                            * Workspace-local model alias selected for this session.
+                                            */
+                                                        "selectedModel": __sidex_types.builtins.String, /**
+                                            * API base URL configured for the model's endpoint.
+                                            */
+                                                        "baseUrl": __sidex_types.builtins.String, /**
+                                            * Endpoint-native model identifier sent in completion requests.
+                                            */
+                                                        "providerModel": __sidex_types.builtins.String, /**
+                                            * Authorization header name, when configured.
+                                            */
+                                                        "authorizationHeader"?: __sidex_types.builtins.String, /**
+                                            * Complete authorization header value, when configured.
+                                            * 
+                                            * This value is passed only to the selected pod's private harness process.
+                                            */
+                                                        "authorizationValue"?: __sidex_types.builtins.String, /**
+                                            * Model alias selected when a new Tasci chat omits a model.
+                                            */
+                                                        "defaultModel": __sidex_types.builtins.String, /**
+                                            * Current secret-free Tasci models expressed as ordinary chat models.
+                                            */
+                                                        "models": __sidex_types.builtins.Sequence<__schema_chats.ChatModel> };
+/**
  * Subscribes to configuration changes for one workspace owned by the host daemon.
  */
  export type ConfigChangedSubscription = { /**
@@ -102,7 +143,94 @@ import * as __schema_workspaces from "./workspaces";
  export type WorkspaceChatSettings = { /**
                                             * Per-harness model preferences.
                                             */
-                                                        "harnesses"?: WorkspaceChatHarnessSettings };
+                                                        "harnesses"?: WorkspaceChatHarnessSettings, /**
+                                            * Tasci endpoint and model catalog.
+                                            */
+                                                        "tasci"?: WorkspaceTasciSettings };
+/**
+ * Endpoint and model catalog used by Tasci.
+ */
+ export type WorkspaceTasciSettings = { /**
+                                            * Model alias selected for new Tasci chats.
+                                            */
+                                                        "defaultModel"?: __sidex_types.builtins.String, /**
+                                            * Inference endpoints keyed by stable workspace-local aliases.
+                                            */
+                                                        "endpoints"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciEndpoint>, /**
+                                            * Selectable models keyed by stable workspace-local aliases.
+                                            */
+                                                        "models"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciModel> };
+/**
+ * One inference endpoint available to Tasci.
+ */
+ export type WorkspaceTasciEndpoint = { /**
+                                            * Human-readable endpoint name, or the map key when absent.
+                                            */
+                                                        "displayName"?: __sidex_types.builtins.String, /**
+                                            * Wire protocol implemented by the endpoint.
+                                            */
+                                                        "protocol": WorkspaceTasciProtocol, /**
+                                            * API base URL to which protocol-specific paths are appended.
+                                            */
+                                                        "baseUrl": __sidex_types.builtins.String, /**
+                                            * Secret-backed HTTP authorization, when the endpoint requires it.
+                                            */
+                                                        "authorization"?: WorkspaceTasciAuthorization };
+/**
+ * Wire protocols that Tasci can use for model requests.
+ */
+ export type WorkspaceTasciProtocol = ("OpenAiChatCompletions");
+/**
+ * Secret-backed HTTP authorization for one inference endpoint.
+ */
+ export type WorkspaceTasciAuthorization = { /**
+                                            * HTTP request header carrying the credential.
+                                            */
+                                                        "header": __sidex_types.builtins.String, /**
+                                            * Text placed before the secret value, such as `"Bearer "`.
+                                            */
+                                                        "prefix"?: __sidex_types.builtins.String, /**
+                                            * Host-owned secret referenced without copying its value into settings.
+                                            */
+                                                        "credential": WorkspaceSecretReference };
+/**
+ * Reference to one value in a host-owned workspace secret provider.
+ */
+ export type WorkspaceSecretReference = { /**
+                                            * Workspace-local secret-provider name.
+                                            */
+                                                        "provider": __sidex_types.builtins.String, /**
+                                            * Name of the secret within the provider.
+                                            */
+                                                        "secret": __sidex_types.builtins.String };
+/**
+ * One selectable model routed through a configured Tasci endpoint.
+ */
+ export type WorkspaceTasciModel = { /**
+                                            * Endpoint alias used for requests.
+                                            */
+                                                        "endpoint": __sidex_types.builtins.String, /**
+                                            * Endpoint-native model identifier included in requests.
+                                            */
+                                                        "model": __sidex_types.builtins.String, /**
+                                            * Human-readable model name, or the map key when absent.
+                                            */
+                                                        "displayName"?: __sidex_types.builtins.String, /**
+                                            * Maximum context size in tokens, when known.
+                                            */
+                                                        "contextWindow"?: __sidex_types.builtins.U64, /**
+                                            * Maximum generated output in tokens, when known.
+                                            */
+                                                        "maxOutputTokens"?: __sidex_types.builtins.U64, /**
+                                            * Whether the endpoint and model support structured tool calls.
+                                            */
+                                                        "toolCalls"?: __sidex_types.builtins.Bool, /**
+                                            * Whether the endpoint and model support parallel structured tool calls.
+                                            */
+                                                        "parallelToolCalls"?: __sidex_types.builtins.Bool, /**
+                                            * Versioned token pricing for this endpoint and model combination, when known.
+                                            */
+                                                        "pricing"?: __schema_chats.ChatModelPricing };
 /**
  * Model preferences for the coding harnesses known to Tascarrel.
  */

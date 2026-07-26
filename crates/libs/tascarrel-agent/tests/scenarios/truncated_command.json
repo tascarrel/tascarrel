@@ -1,0 +1,42 @@
+{
+  "name": "foreground output retains bounded recent lines",
+  "prompt": "Run a verbose command.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "bash-1", "name": "bash" },
+        { "kind": "tool_call_arguments_delta", "id": "bash-1", "delta": "{\"command\":\"printf 'first-marker\\\\n'; seq 1 2100; printf 'last-marker\\\\n'\"}" },
+        { "kind": "tool_call_completed", "id": "bash-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The recent output was retained." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "tool_results": [
+      {
+        "name": "bash",
+        "is_error": false,
+        "content_contains": "[Earlier command output was truncated.]",
+        "additional_content_contains": ["last-marker"],
+        "content_not_contains": ["first-marker"]
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

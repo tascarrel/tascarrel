@@ -81,9 +81,7 @@ pub struct DaemonOptions {
     #[arg(long, env = "TASCARREL_SOCKET")]
     socket: Option<PathBuf>,
 
-    /// Read-only directory containing local tascarrel-guest, tascarrel-podd,
-    /// and podctl
-    /// binaries.
+    /// Read-only directory containing local guest, pod, and Tasci binaries.
     #[arg(
         long,
         env = "TASCARREL_LOCAL_BINARIES",
@@ -147,6 +145,10 @@ pub struct DaemonOptions {
     /// DNS resolver used for guest requests to the virtual DNS address.
     #[arg(long, env = "TASCARREL_DNS_RESOLVER")]
     dns_resolver: Option<SocketAddr>,
+
+    /// Outer host reached by static workspace host-port mappings.
+    #[arg(long, env = "TASCARREL_HOST_PORT_HOST", default_value = "127.0.0.1")]
+    host_port_host: String,
 
     /// Maximum number of workspace VMs this host daemon may own.
     #[arg(long, default_value_t = DEFAULT_MAX_WORKSPACES)]
@@ -327,6 +329,7 @@ pub async fn run_until_shutdown(
         .context("start host configuration service")?;
     let network_service = NetworkService::new(NetworkServiceConfig {
         dns_resolver: args.dns_resolver,
+        host_port_host: args.host_port_host,
         ..NetworkServiceConfig::default()
     })
     .map_err(|error| anyhow!(error.to_string()))
@@ -448,6 +451,7 @@ impl DaemonOptions {
             startup_timeout: 120,
             shutdown_timeout: 10,
             dns_resolver: None,
+            host_port_host: "127.0.0.1".to_owned(),
             max_workspaces: DEFAULT_MAX_WORKSPACES,
             web_address: Some(DEFAULT_WEB_ADDRESS),
             ui_dir: Some(guest.ui),
@@ -743,7 +747,7 @@ fn validate_local_binaries(path: PathBuf) -> Result<PathBuf> {
             path.display()
         );
     }
-    for name in ["tascarrel-guest", "tascarrel-podd", "podctl"] {
+    for name in ["tascarrel-guest", "tascarrel-podd", "podctl", "tasci-exec"] {
         let binary = path.join(name);
         let metadata = fs::symlink_metadata(&binary)
             .with_context(|| format!("inspect local guest binary {}", binary.display()))?;
@@ -900,7 +904,7 @@ mod tests {
     #[test]
     fn local_binary_share_requires_executable_guest_and_podd_files() {
         let directory = tempfile::tempdir().unwrap();
-        for name in ["tascarrel-guest", "tascarrel-podd", "podctl"] {
+        for name in ["tascarrel-guest", "tascarrel-podd", "podctl", "tasci-exec"] {
             let binary = directory.path().join(name);
             fs::write(&binary, name).unwrap();
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();

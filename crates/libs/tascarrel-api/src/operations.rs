@@ -150,6 +150,7 @@ macro_rules! with_hostd_operations {
     (actions => $macro:ident) => {
         $macro! {
             ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
+            ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
             ("secrets_Reveal", secrets::RevealSecretAction, secrets::RevealSecretOutput),
             ("secrets_Set", secrets::SetSecretAction, secrets::SetSecretOutput),
             ("secrets_Delete", secrets::DeleteSecretAction, secrets::DeleteSecretOutput),
@@ -199,6 +200,7 @@ macro_rules! with_all_actions {
         $crate::__with_guestd_actions! {
             @append $macro {
                 ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
+                ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
                 ("secrets_Reveal", secrets::RevealSecretAction, secrets::RevealSecretOutput),
                 ("secrets_Set", secrets::SetSecretAction, secrets::SetSecretOutput),
                 ("secrets_Delete", secrets::DeleteSecretAction, secrets::DeleteSecretOutput),

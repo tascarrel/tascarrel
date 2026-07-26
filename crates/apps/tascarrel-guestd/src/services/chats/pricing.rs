@@ -118,6 +118,7 @@ impl ModelPricingCatalog {
     /// Applies the catalog's default rate to every known model in place.
     pub(crate) fn apply(&self, kind: &ChatHarnessKind, models: &mut [ChatModel]) {
         let provider = match kind {
+            ChatHarnessKind::Tasci => return,
             ChatHarnessKind::Codex => &self.openai,
             ChatHarnessKind::ClaudeCode => &self.anthropic,
         };

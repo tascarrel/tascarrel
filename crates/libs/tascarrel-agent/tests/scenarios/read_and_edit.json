@@ -1,0 +1,81 @@
+{
+  "name": "read and edit with fragmented arguments",
+  "prompt": "Change the greeting to mention Tasci.",
+  "initial_files": [
+    {
+      "path": "src/lib.rs",
+      "content": "pub fn greeting() -> &'static str {\n    \"hello\"\n}\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"src/" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "lib.rs\"}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-1", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "{\"files\":[{\"path\":\"src/lib.rs\",\"edits\":[{\"oldText\":\"greeting\",\"newText\":\"tasci_greeting\"},{\"oldText\":\"\\\"hello\\\"\",\"newText\":\"\\\"hello, Tasci\\\"\"}]}" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "]}" },
+        { "kind": "tool_call_completed", "id": "edit-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Updated the greeting." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 3,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "\"hello\""
+      },
+      {
+        "name": "edit",
+        "is_error": false,
+        "content_contains": "Applied 2 edit(s)"
+      }
+    ],
+    "file_changes": [
+      {
+        "path": "src/lib.rs",
+        "operation": "modified",
+        "additions": 2,
+        "deletions": 2,
+        "unified_diff_contains": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "src/lib.rs",
+        "content": "pub fn tasci_greeting() -> &'static str {\n    \"hello, Tasci\"\n}\n"
+      }
+    ]
+  }
+}

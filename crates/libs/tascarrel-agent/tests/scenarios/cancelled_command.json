@@ -1,0 +1,23 @@
+{
+  "name": "agent cancellation terminates a foreground command group",
+  "prompt": "Run a cancellable command.",
+  "check_after_ms": 300,
+  "responses": [
+    {
+      "cancel_after_ms": 10,
+      "events": [
+        { "kind": "tool_call_started", "id": "bash-1", "name": "bash" },
+        { "kind": "tool_call_arguments_delta", "id": "bash-1", "delta": "{\"command\":\"sleep 0.2; printf unsafe > survived.txt\"}" },
+        { "kind": "tool_call_completed", "id": "bash-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "error_contains": "cancelled",
+    "absent_files": [
+      "survived.txt"
+    ]
+  }
+}

@@ -581,6 +581,8 @@ record ChatItemCompleted {
 /// Coding harness durably associated with a chat.
 #[json(tagged = externally)]
 variant ChatHarnessKind {
+    /// The provider-neutral Tasci coding harness.
+    Tasci,
     /// The OpenAI Codex coding harness.
     Codex,
     /// The Anthropic Claude Code coding harness.

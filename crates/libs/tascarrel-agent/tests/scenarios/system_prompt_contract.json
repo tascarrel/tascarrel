@@ -1,0 +1,69 @@
+{
+  "name": "system prompt is composed from enabled tools and project instructions",
+  "prompt": "Inspect the workspace.",
+  "initial_files": [
+    {
+      "path": "AGENTS.md",
+      "content": "Always preserve the scenario marker.\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Ready." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "system_prompt_contains": [
+      "You are Tasci",
+      "- read: Read workspace file contents",
+      "- edit: Apply exact, revision-safe edits",
+      "- bash: Run foreground commands",
+      "- process: Inspect and control supervised background commands",
+      "Current working directory:",
+      "<project_instructions path=\"AGENTS.md\">",
+      "Always preserve the scenario marker.",
+      "Use read to inspect file contents instead of cat"
+    ],
+    "tool_contracts": [
+      {
+        "name": "read",
+        "description_contains": "one-based line paging",
+        "schema_contains": ["\"offset\"", "\"byteOffset\"", "\"limit\""],
+        "guideline_contains": ["instead of cat"]
+      },
+      {
+        "name": "edit",
+        "description_contains": "complete multi-file batch",
+        "schema_contains": ["\"oldText\"", "\"newText\"", "\"edits\""],
+        "guideline_contains": ["small as possible", "must not overlap"]
+      },
+      {
+        "name": "write",
+        "description_contains": "last read revision",
+        "schema_contains": ["\"content\""],
+        "guideline_contains": ["complete rewrites"]
+      },
+      {
+        "name": "bash",
+        "description_contains": "process group",
+        "schema_contains": ["\"background\"", "\"timeoutMs\""],
+        "guideline_contains": ["file discovery"]
+      },
+      {
+        "name": "process",
+        "description_contains": "cursor-based",
+        "schema_contains": ["\"processId\"", "\"terminate\"", "\"kill\""],
+        "guideline_contains": ["nextCursor"]
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

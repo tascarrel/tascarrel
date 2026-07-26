@@ -6,6 +6,7 @@
 //! [`ConfigServiceConfig`] defines its filesystem and resource bounds.
 
 mod service;
+mod settings;
 mod snapshot;
 mod watcher;
 

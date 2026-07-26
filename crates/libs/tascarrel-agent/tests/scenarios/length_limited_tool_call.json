@@ -1,0 +1,27 @@
+{
+  "name": "length-limited tool calls are not executed",
+  "prompt": "Create a file.",
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-1", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-1", "delta": "{\"path\":\"unsafe.txt\",\"content\":\"must not exist\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-1" },
+        { "kind": "completed", "finish_reason": "length" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "request_last_messages": [
+      {
+        "role": "user",
+        "content_contains": "Create a file"
+      }
+    ],
+    "error_contains": "refusing to execute tool calls from a length-limited response",
+    "absent_files": [
+      "unsafe.txt"
+    ]
+  }
+}

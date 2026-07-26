@@ -1,0 +1,70 @@
+{
+  "name": "ambiguous exact edits are rejected",
+  "prompt": "Change one repeated line.",
+  "initial_files": [
+    {
+      "path": "repeated.txt",
+      "content": "same\nsame\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"repeated.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-1", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-1", "delta": "{\"files\":[{\"path\":\"repeated.txt\",\"edits\":[{\"oldText\":\"same\",\"newText\":\"changed\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The edit was ambiguous." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 3,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "same"
+      },
+      {
+        "name": "edit",
+        "is_error": true,
+        "content_contains": "must match exactly once"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "repeated.txt",
+        "content": "same\nsame\n"
+      }
+    ]
+  }
+}

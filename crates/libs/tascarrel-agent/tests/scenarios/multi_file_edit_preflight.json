@@ -1,0 +1,97 @@
+{
+  "name": "multi-file edit rejects every change when one file is stale",
+  "prompt": "Update both files.",
+  "initial_files": [
+    {
+      "path": "a.txt",
+      "content": "alpha\n"
+    },
+    {
+      "path": "b.txt",
+      "content": "bravo\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-a", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-a", "delta": "{\"path\":\"a.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-a" },
+        { "kind": "tool_call_started", "id": "read-b", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-b", "delta": "{\"path\":\"b.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-b" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "before_response": [
+        {
+          "kind": "write",
+          "path": "b.txt",
+          "content": "external bravo\n"
+        }
+      ],
+      "events": [
+        { "kind": "tool_call_started", "id": "edit-both", "name": "edit" },
+        { "kind": "tool_call_arguments_delta", "id": "edit-both", "delta": "{\"files\":[{\"path\":\"a.txt\",\"edits\":[{\"oldText\":\"alpha\",\"newText\":\"updated alpha\"}]},{\"path\":\"b.txt\",\"edits\":[{\"oldText\":\"bravo\",\"newText\":\"updated bravo\"}]}]}" },
+        { "kind": "tool_call_completed", "id": "edit-both" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The batch was rejected." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 3,
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "alpha"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "bravo"
+      },
+      {
+        "name": "edit",
+        "is_error": true,
+        "content_contains": "changed after it was read"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "a.txt",
+        "content": "alpha\n"
+      },
+      {
+        "path": "b.txt",
+        "content": "external bravo\n"
+      }
+    ]
+  }
+}

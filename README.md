@@ -233,8 +233,42 @@ and use provider-native model identifiers:
 }
 ```
 
-The other harness key is `codex`. Credentials and chat state are not stored in
-this file.
+The other harness key is `codex`. Tasci uses the same host-owned file for its
+provider-neutral endpoint and model catalog:
+
+```json
+{
+  "chat": {
+    "tasci": {
+      "defaultModel": "local-35b",
+      "endpoints": {
+        "local": {
+          "protocol": "OpenAiChatCompletions",
+          "baseUrl": "http://host.tascarrel.internal:18080/v1"
+        }
+      },
+      "models": {
+        "local-35b": {
+          "endpoint": "local",
+          "model": "qwen3.6-35b-a3b-q6",
+          "displayName": "Local 35B A3B",
+          "toolCalls": true
+        }
+      }
+    }
+  }
+}
+```
+
+Each model points to an endpoint and carries the provider-native model
+identifier. Optional pricing belongs to that endpoint/model combination rather
+than to the identifier globally. Authenticated endpoints refer to a host-owned
+secret instead of storing a token in `settings.json`; hostd reveals it only
+while resolving a Tasci session and guestd passes it privately to that
+session's pod process. The UI exposes the same endpoint and model configuration
+under workspace settings.
+
+Provider credentials and chat state are not stored in `settings.json`.
 
 Workspace slash commands are harness-independent message snippets defined in
 `config.toml`. Typing `/` at the start of a composer opens the command menu.
@@ -476,16 +510,21 @@ typed process request override `.env` for that process.
 
 ## Networking and Hardware
 
-`[network].host-ports` exposes selected services bound to host loopback. Entries
-accept `<port>` as same-port shorthand or a quoted
+`[network].host-ports` exposes selected host services. Entries accept `<port>`
+as same-port shorthand or a quoted
 `"<host-port>:<pod-port>"` mapping. Every pod resolves
 `host.tascarrel.internal` to a reserved synthetic address; its traffic is
 intercepted in the guest and carried to hostd, which connects to the mapped
-`127.0.0.1:<host-port>`. Other ports at that address are denied, and the
-synthetic route does not make arbitrary host-local addresses reachable.
+`127.0.0.1:<host-port>` by default. Other ports at that address are denied, and
+the synthetic route does not make arbitrary host-local addresses reachable.
 Pod-scoped mappings can also be added and removed while a workspace is running
 from the Network tab. A dynamic mapping overrides the configured mapping for
 the same pod-visible port and is removed when the workspace is destroyed.
+When hostd itself runs in a nested environment, `--host-port-host <hostname>`
+changes the outer target for static mappings without affecting dynamic
+pod-scoped forwards. For example, `--host-port-host
+host.tascarrel.internal` carries a nested workspace mapping to the parent
+namespace's port.
 
 Secret providers are host-owned. The SOPS provider reads an encrypted,
 string-valued JSON document with the host's credentials; its values can be

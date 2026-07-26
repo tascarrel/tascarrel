@@ -1,0 +1,120 @@
+{
+  "name": "writes require a current read for existing files",
+  "prompt": "Replace the existing file and create a summary.",
+  "initial_files": [
+    {
+      "path": "existing.txt",
+      "content": "original\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-1", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-1", "delta": "{\"path\":\"existing.txt\",\"content\":\"changed\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":\"existing.txt\"}" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "write-2", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-2", "delta": "{\"path\":\"existing.txt\",\"content\":\"changed\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-2" },
+        { "kind": "tool_call_started", "id": "write-3", "name": "write" },
+        { "kind": "tool_call_arguments_delta", "id": "write-3", "delta": "{\"path\":\"reports/summary.txt\",\"content\":\"created\\n\"}" },
+        { "kind": "tool_call_completed", "id": "write-3" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "Both files are ready." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 4,
+    "tool_results": [
+      {
+        "name": "write",
+        "is_error": true,
+        "content_contains": "must be read before"
+      },
+      {
+        "name": "read",
+        "is_error": false,
+        "content_contains": "original"
+      },
+      {
+        "name": "write",
+        "is_error": false,
+        "content_contains": "Wrote existing.txt"
+      },
+      {
+        "name": "write",
+        "is_error": false,
+        "content_contains": "Wrote reports/summary.txt"
+      }
+    ],
+    "file_changes": [
+      {
+        "path": "existing.txt",
+        "operation": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "unified_diff_contains": "--- a/existing.txt\n+++ b/existing.txt"
+      },
+      {
+        "path": "reports/summary.txt",
+        "operation": "created",
+        "additions": 1,
+        "deletions": 0,
+        "unified_diff_contains": "--- /dev/null\n+++ b/reports/summary.txt"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "existing.txt",
+        "content": "changed\n"
+      },
+      {
+        "path": "reports/summary.txt",
+        "content": "created\n"
+      }
+    ]
+  }
+}

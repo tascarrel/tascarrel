@@ -30,6 +30,7 @@ use sha2::Sha512;
 use tar::Archive;
 use tascarrel_api::ArcVec;
 use tascarrel_api::types::chats as api;
+use tascarrel_api::types::config as config_api;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Mutex as AsyncMutex;
@@ -40,6 +41,8 @@ use crate::GuestNetworkService;
 use crate::ProcessSupervisor;
 use crate::services::chats::adaptors::ClaudeCodeAdaptor;
 use crate::services::chats::adaptors::CodexAdaptor;
+use crate::services::chats::adaptors::TasciAdaptor;
+use crate::services::chats::adaptors::TasciConfigurationStore;
 use crate::services::chats::auth::AccountReadResult;
 use crate::services::chats::auth::CodexAuthServer;
 use crate::services::chats::auth::LoginCompletedParams;
@@ -71,6 +74,7 @@ use crate::services::pods::PodService;
 
 const CODEX_VERSION: &str = "0.144.4";
 const CLAUDE_CODE_VERSION: &str = "2.1.215";
+const TASCI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const INSTALL_RETRY_DELAY: Duration = Duration::from_secs(30);
 const INSTALL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const PRICING_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -86,6 +90,7 @@ pub(crate) struct HarnessManager {
     pricing_cache: PathBuf,
     codex_credentials: PathBuf,
     claude_credentials: PathBuf,
+    tasci_executable: PathBuf,
     harness_uid: u32,
     harness_gid: u32,
     local_launcher: Arc<dyn HarnessProcessLauncher>,
@@ -98,6 +103,7 @@ pub(crate) struct HarnessManager {
     codex_login: AsyncMutex<Option<ActiveCodexLogin>>,
     codex_credentials_revision: AtomicU64,
     claude_credentials_revision: AtomicU64,
+    tasci_configurations: TasciConfigurationStore,
 }
 
 impl HarnessManager {
@@ -106,6 +112,7 @@ impl HarnessManager {
         root: PathBuf,
         harness_user_id: u32,
         harness_group_id: u32,
+        tasci_executable: PathBuf,
     ) -> Result<Arc<Self>, Report<HarnessManagerError>> {
         prepare_directory(&root, 0o711).whatever("failed to prepare chat state directory")?;
         let harnesses_root = root.join("harnesses");
@@ -131,6 +138,7 @@ impl HarnessManager {
         prepare_owned_credential_tree(&claude_credentials, harness_user_id, harness_group_id)?;
 
         let initial: ArcVec<_> = vec![
+            initial_tasci_harness(tasci_executable.is_file()),
             initial_harness(
                 api::ChatHarnessKind::Codex,
                 "Codex",
@@ -156,6 +164,7 @@ impl HarnessManager {
             pricing_cache,
             codex_credentials,
             claude_credentials,
+            tasci_executable,
             harness_uid: harness_user_id,
             harness_gid: harness_group_id,
             local_launcher: Arc::new(LocalHarnessProcessLauncher::new(
@@ -171,7 +180,24 @@ impl HarnessManager {
             codex_login: AsyncMutex::new(None),
             codex_credentials_revision: AtomicU64::new(0),
             claude_credentials_revision: AtomicU64::new(0),
+            tasci_configurations: TasciConfigurationStore::default(),
         }))
+    }
+
+    /// Publishes a host-resolved Tasci model and caches its secret-bearing
+    /// runtime configuration for attachments and active sessions.
+    pub(crate) fn configure_tasci(&self, output: config_api::ResolveTasciModelOutput) {
+        let configuration = self.tasci_configurations.configure(output);
+        self.update_harness(&api::ChatHarnessKind::Tasci, |harness| {
+            harness.models = configuration.models.clone();
+            harness.credentials =
+                api::ChatHarnessCredentialState::Valid(api::ChatHarnessValidCredentials {
+                    method: "workspace-settings".into(),
+                    email: None,
+                    plan: None,
+                    checked_at: Timestamp::now(),
+                });
+        });
     }
 
     /// Starts the pricing refresh and eager installation loops.
@@ -218,7 +244,18 @@ impl HarnessManager {
         &self,
         kind: api::ChatHarnessKind,
     ) -> Result<(), Report<HarnessManagerError>> {
+        if kind == api::ChatHarnessKind::Tasci {
+            if self.tasci_executable.is_file() {
+                return Ok(());
+            }
+            return Err(Report::new(HarnessManagerError::Internal(
+                "the bundled Tasci harness executable is unavailable".to_owned(),
+            )));
+        }
         let install_guard = match kind {
+            api::ChatHarnessKind::Tasci => unreachable!(
+                "Tasci installation is handled before selecting a downloadable harness lock"
+            ),
             api::ChatHarnessKind::Codex => self.codex_install.lock().await,
             api::ChatHarnessKind::ClaudeCode => self.claude_install.lock().await,
         };
@@ -294,6 +331,11 @@ impl HarnessManager {
         self: &Arc<Self>,
         kind: api::ChatHarnessKind,
     ) -> Result<(), Report<HarnessManagerError>> {
+        if kind == api::ChatHarnessKind::Tasci {
+            return Err(Report::new(HarnessManagerError::InvalidRequest(
+                "Tasci credentials are configured through workspace settings".to_owned(),
+            )));
+        }
         if !self.credentials_are_present(&kind) {
             return Err(Report::new(HarnessManagerError::InvalidRequest(
                 "the selected harness has no workspace credentials".to_owned(),
@@ -326,7 +368,7 @@ impl HarnessManager {
     ) -> Result<(), Report<HarnessManagerError>> {
         if kind != api::ChatHarnessKind::Codex {
             return Err(Report::new(HarnessManagerError::InvalidRequest(
-                "Claude setup-token installation is not cancellable".to_owned(),
+                "the selected harness has no cancellable authentication flow".to_owned(),
             )));
         }
         let active = self.codex_login.lock().await.take();
@@ -356,6 +398,9 @@ impl HarnessManager {
             return Err(report);
         }
         let validation = match kind {
+            api::ChatHarnessKind::Tasci => {
+                unreachable!("Tasci credential validation is rejected before scheduling validation")
+            }
             api::ChatHarnessKind::Codex => self.validate_codex_credentials().await,
             api::ChatHarnessKind::ClaudeCode => self.validate_claude_credentials().await,
         };
@@ -393,11 +438,19 @@ impl HarnessManager {
         &self,
         kind: api::ChatHarnessKind,
     ) -> Result<(), Report<HarnessManagerError>> {
+        if kind == api::ChatHarnessKind::Tasci {
+            return Err(Report::new(HarnessManagerError::InvalidRequest(
+                "Tasci credentials are configured through workspace settings".to_owned(),
+            )));
+        }
         self.advance_credentials_revision(&kind);
         self.update_harness(&kind, |harness| {
             harness.validating_credentials = false;
         });
         match kind {
+            api::ChatHarnessKind::Tasci => {
+                unreachable!("Tasci logout is rejected before mutating credential state")
+            }
             api::ChatHarnessKind::Codex => {
                 if let Some(active) = self.codex_login.lock().await.take() {
                     active.server.stop().await.map_err(harness_manager_error)?;
@@ -433,6 +486,7 @@ impl HarnessManager {
         kind: &api::ChatHarnessKind,
     ) -> Arc<dyn ProcessEnvironment> {
         match kind {
+            api::ChatHarnessKind::Tasci => Arc::new(HarnessEnvironment::tasci()),
             api::ChatHarnessKind::Codex => {
                 Arc::new(HarnessEnvironment::codex(self.codex_credentials.clone()))
             }
@@ -445,12 +499,16 @@ impl HarnessManager {
     /// Returns the pinned executable on the VM filesystem.
     pub(crate) fn local_executable(&self, kind: &api::ChatHarnessKind) -> PathBuf {
         match kind {
+            api::ChatHarnessKind::Tasci => self.tasci_executable.clone(),
             api::ChatHarnessKind::Codex => codex_executable(&self.harnesses_root),
             api::ChatHarnessKind::ClaudeCode => claude_executable(&self.harnesses_root),
         }
     }
 
     async fn discover_models(&self, kind: api::ChatHarnessKind) {
+        if kind == api::ChatHarnessKind::Tasci {
+            return;
+        }
         if !self.credentials_are_present(&kind) {
             return;
         }
@@ -472,6 +530,18 @@ impl HarnessManager {
         let executable = self.local_executable(kind);
         let environment = self.local_environment(kind);
         match kind {
+            api::ChatHarnessKind::Tasci => {
+                let configuration = self
+                    .tasci_configurations
+                    .default_configuration()
+                    .expect("a local Tasci harness is created only after a model was configured");
+                Box::new(TasciAdaptor::new(
+                    executable,
+                    Arc::clone(&self.local_launcher),
+                    configuration,
+                    self.tasci_configurations.clone(),
+                ))
+            }
             api::ChatHarnessKind::Codex => Box::new(
                 CodexAdaptor::new(executable, Arc::clone(&self.local_launcher))
                     .with_process_environment(environment)
@@ -725,6 +795,9 @@ impl HarnessManager {
 
     fn credentials_revision(&self, kind: &api::ChatHarnessKind) -> u64 {
         match kind {
+            api::ChatHarnessKind::Tasci => {
+                unreachable!("Tasci does not use workspace harness credential revisions")
+            }
             api::ChatHarnessKind::Codex => &self.codex_credentials_revision,
             api::ChatHarnessKind::ClaudeCode => &self.claude_credentials_revision,
         }
@@ -733,6 +806,9 @@ impl HarnessManager {
 
     fn advance_credentials_revision(&self, kind: &api::ChatHarnessKind) {
         match kind {
+            api::ChatHarnessKind::Tasci => {
+                unreachable!("Tasci does not use workspace harness credential revisions")
+            }
             api::ChatHarnessKind::Codex => &self.codex_credentials_revision,
             api::ChatHarnessKind::ClaudeCode => &self.claude_credentials_revision,
         }
@@ -861,6 +937,37 @@ impl BindingProvider for HarnessManager {
                 PodHarnessProcessLauncher::new(request.pod_id, processes, pods, network_service),
             );
             let harness: Box<dyn Harness> = match request.resumption.harness {
+                api::ChatHarnessKind::Tasci => {
+                    let selected = request
+                        .resumption
+                        .model
+                        .as_ref()
+                        .map(|selection| selection.model.to_string())
+                        .or_else(|| {
+                            self.tasci_configurations
+                                .default_configuration()
+                                .map(|configuration| configuration.selection.model.to_string())
+                        })
+                        .ok_or_else(|| {
+                            manager_binding_error(Report::new(HarnessManagerError::InvalidRequest(
+                                "Tasci has no resolved default model".to_owned(),
+                            )))
+                        })?;
+                    let configuration = self
+                        .tasci_configurations
+                        .configuration(&selected)
+                        .ok_or_else(|| {
+                            manager_binding_error(Report::new(HarnessManagerError::InvalidRequest(
+                                "the selected Tasci model was not resolved by hostd".to_owned(),
+                            )))
+                        })?;
+                    Box::new(TasciAdaptor::new(
+                        PathBuf::from("/usr/local/bin/tasci-exec"),
+                        launcher,
+                        configuration,
+                        self.tasci_configurations.clone(),
+                    ))
+                }
                 api::ChatHarnessKind::Codex => Box::new(
                     CodexAdaptor::new(pod_codex_executable(), launcher).with_process_environment(
                         Arc::new(HarnessEnvironment::codex(PathBuf::from(
@@ -909,6 +1016,10 @@ impl TitleGenerationService for HarnessManager {
             let executable = self.local_executable(&request.harness);
             let environment = self.local_environment(&request.harness);
             match request.harness {
+                api::ChatHarnessKind::Tasci => Err(TitleGenerationError {
+                    code: "unsupported_harness".to_owned(),
+                    message: "Tasci title generation is not available yet".to_owned(),
+                }),
                 api::ChatHarnessKind::Codex => {
                     CodexExecTitleGenerator::new(executable)
                         .with_process_environment(environment)
@@ -1017,6 +1128,14 @@ struct HarnessEnvironment {
 }
 
 impl HarnessEnvironment {
+    fn tasci() -> Self {
+        Self {
+            kind: api::ChatHarnessKind::Tasci,
+            credentials: PathBuf::new(),
+            credential_source: PathBuf::new(),
+        }
+    }
+
     fn codex(credentials: PathBuf) -> Self {
         Self {
             kind: api::ChatHarnessKind::Codex,
@@ -1046,6 +1165,7 @@ impl ProcessEnvironment for HarnessEnvironment {
     fn variables(&self) -> io::Result<HashMap<String, String>> {
         let mut environment = HashMap::new();
         match self.kind {
+            api::ChatHarnessKind::Tasci => {}
             api::ChatHarnessKind::Codex => {
                 let home = self.credentials.to_string_lossy().into_owned();
                 environment.insert("CODEX_HOME".to_owned(), home.clone());
@@ -1181,6 +1301,11 @@ fn publish_installation(
     prepare_directory(&harness_root, 0o755).whatever("failed to prepare harness directory")?;
     let version_root = harness_root.join(pin.version);
     let executable = match pin.kind {
+        api::ChatHarnessKind::Tasci => {
+            return Err(Report::new(HarnessManagerError::InvalidRequest(
+                "Tasci is bundled and cannot be installed from an archive".to_owned(),
+            )));
+        }
         api::ChatHarnessKind::Codex => version_root.join("bin/codex"),
         api::ChatHarnessKind::ClaudeCode => version_root.join("bin/claude"),
     };
@@ -1190,6 +1315,9 @@ fn publish_installation(
     }
     if !version_root.exists() {
         match pin.kind {
+            api::ChatHarnessKind::Tasci => {
+                unreachable!("Tasci archive publication is rejected before staging an installation")
+            }
             api::ChatHarnessKind::Codex => {
                 fs::rename(staging.join(&pin.archive_prefix), &version_root)
                     .whatever("failed to publish Codex installation")?;
@@ -1225,6 +1353,9 @@ fn publish_installation(
 fn harness_pin(kind: &api::ChatHarnessKind) -> Result<HarnessPin, Report<HarnessManagerError>> {
     let architecture = std::env::consts::ARCH;
     match (kind, architecture) {
+        (api::ChatHarnessKind::Tasci, _) => Err(Report::new(HarnessManagerError::InvalidRequest(
+            "Tasci is bundled and has no downloadable harness pin".to_owned(),
+        ))),
         (api::ChatHarnessKind::Codex, "x86_64") => Ok(HarnessPin {
             kind: kind.clone(),
             version: CODEX_VERSION,
@@ -1297,8 +1428,34 @@ fn initial_harness(
     }
 }
 
+fn initial_tasci_harness(installed: bool) -> api::ChatHarness {
+    let mut harness = initial_harness(
+        api::ChatHarnessKind::Tasci,
+        "Tasci",
+        TASCI_VERSION,
+        installed,
+        true,
+    );
+    harness.credentials =
+        api::ChatHarnessCredentialState::Valid(api::ChatHarnessValidCredentials {
+            method: "workspace-settings".into(),
+            email: None,
+            plan: None,
+            checked_at: Timestamp::now(),
+        });
+    harness
+}
+
 fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
     match kind {
+        api::ChatHarnessKind::Tasci => api::ChatHarnessCapabilities {
+            resume_session: false,
+            interrupt_turn: true,
+            steer_turn: false,
+            structured_user_input: false,
+            compact_context: false,
+            model_switching: api::ChatModelSwitching::InSession,
+        },
         api::ChatHarnessKind::Codex => api::ChatHarnessCapabilities {
             resume_session: true,
             interrupt_turn: true,
@@ -1336,6 +1493,7 @@ fn pod_claude_executable() -> PathBuf {
 
 fn harness_directory_name(kind: &api::ChatHarnessKind) -> &'static str {
     match kind {
+        api::ChatHarnessKind::Tasci => "tasci",
         api::ChatHarnessKind::Codex => "codex",
         api::ChatHarnessKind::ClaudeCode => "claude-code",
     }

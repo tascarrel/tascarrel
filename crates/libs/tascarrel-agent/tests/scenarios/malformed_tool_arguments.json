@@ -1,0 +1,64 @@
+{
+  "name": "malformed tool arguments become a recoverable result",
+  "prompt": "Read a file.",
+  "initial_files": [
+    {
+      "path": "safe.txt",
+      "content": "safe\n"
+    }
+  ],
+  "responses": [
+    {
+      "events": [
+        { "kind": "tool_call_started", "id": "read-1", "name": "read" },
+        { "kind": "tool_call_arguments_delta", "id": "read-1", "delta": "{\"path\":" },
+        { "kind": "tool_call_completed", "id": "read-1" },
+        { "kind": "completed", "finish_reason": "tool_calls" }
+      ]
+    },
+    {
+      "events": [
+        { "kind": "text_delta", "delta": "The tool arguments were invalid." },
+        { "kind": "completed", "finish_reason": "stop" }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "request_last_messages": [
+      {
+        "role": "user",
+        "content_contains": "Read a file"
+      },
+      {
+        "role": "tool",
+        "name": "read",
+        "is_error": true,
+        "content_contains": "invalid arguments"
+      }
+    ],
+    "tool_results": [
+      {
+        "name": "read",
+        "is_error": true,
+        "content_contains": "invalid arguments"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ],
+    "files": [
+      {
+        "path": "safe.txt",
+        "content": "safe\n"
+      }
+    ]
+  }
+}

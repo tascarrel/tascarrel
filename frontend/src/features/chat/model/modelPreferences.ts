@@ -5,8 +5,38 @@ export function chatModelPreferences(
   settings: config.WorkspaceSettings | undefined,
   harness: chats.ChatHarnessKind,
 ): config.WorkspaceChatModelPreferences | undefined {
+  if (harness === "Tasci") {
+    const defaultModel = settings?.chat?.tasci?.defaultModel;
+    return defaultModel
+      ? {
+        defaultModel: {
+          model: defaultModel,
+          options: [],
+        },
+      }
+      : undefined;
+  }
   const harnesses = settings?.chat?.harnesses;
   return harness === "Codex" ? harnesses?.codex : harnesses?.claudeCode;
+}
+
+export function configuredChatHarness(
+  harness: chats.ChatHarness,
+  settings: config.WorkspaceSettings | undefined,
+): chats.ChatHarness {
+  if (harness.kind !== "Tasci") return harness;
+  const models = Object.entries(settings?.chat?.tasci?.models ?? {}).flatMap(
+    ([id, model]): chats.ChatModel[] => model
+      ? [{
+        id,
+        displayName: model.displayName ?? id,
+        isCustom: true,
+        options: [],
+        ...(model.pricing ? { pricing: model.pricing } : {}),
+      }]
+      : [],
+  );
+  return { ...harness, models };
 }
 
 export function visibleChatModels(

@@ -1,0 +1,48 @@
+{
+  "name": "interrupted model response retries the current step",
+  "prompt": "Explain the daemon architecture.",
+  "responses": [
+    {
+      "events": [
+        {
+          "kind": "text_delta",
+          "delta": "The incomplete response"
+        }
+      ],
+      "transport_error": "response stream ended before a finish reason"
+    },
+    {
+      "events": [
+        {
+          "kind": "text_delta",
+          "delta": "The complete response."
+        },
+        {
+          "kind": "completed",
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 2,
+    "request_last_messages": [
+      {
+        "role": "user",
+        "content_contains": "Explain the daemon architecture"
+      },
+      {
+        "role": "user",
+        "content_contains": "Explain the daemon architecture"
+      }
+    ],
+    "event_kinds": [
+      "model_request_started",
+      "text_delta",
+      "model_request_retrying",
+      "model_request_started",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

@@ -60,6 +60,7 @@ impl ChatService {
         storage: &ChatStorage,
         harness_user_id: u32,
         harness_group_id: u32,
+        tasci_executable: PathBuf,
     ) -> Result<Self, Report<ChatServiceError>> {
         let attachment_store_path = storage.root().join("attachments");
         attachment::prepare_binding_tree(
@@ -68,9 +69,13 @@ impl ChatService {
             harness_group_id,
         )
         .map_err(|error| Report::new(ChatServiceError::Attachment(error.to_string())))?;
-        let harnesses =
-            HarnessManager::open(storage.root().to_owned(), harness_user_id, harness_group_id)
-                .map_err(|report| report.escalate(ChatServiceError::Harnesses))?;
+        let harnesses = HarnessManager::open(
+            storage.root().to_owned(),
+            harness_user_id,
+            harness_group_id,
+            tasci_executable,
+        )
+        .map_err(|report| report.escalate(ChatServiceError::Harnesses))?;
         let state = ChatState::new(database.connection().clone())
             .await
             .map_err(|error| Report::new(ChatServiceError::State(error.message)))?;
