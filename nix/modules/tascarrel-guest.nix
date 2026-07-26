@@ -226,6 +226,7 @@ in
         "nix-command"
         "flakes"
       ];
+      fsync-store-paths = true;
     };
     services.fstrim = mkIf (cfg.dataDevice != null) {
       enable = true;
