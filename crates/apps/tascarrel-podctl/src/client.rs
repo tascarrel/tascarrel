@@ -97,12 +97,17 @@ impl PodClient {
         self.invoke(wire::Address::Host, input).await
     }
 
-    /// Reads the first event of a subscription addressed to this pod.
-    pub(crate) async fn first_pod_event<S>(&self, input: S) -> PodctlResult<S::Event>
+    /// Reads pod events until `receive` produces the requested result.
+    pub(crate) async fn pod_events_until<S, T>(
+        &self,
+        input: S,
+        mut receive: impl FnMut(S::Event) -> PodctlResult<Option<T>>,
+    ) -> PodctlResult<T>
     where
         S: Subscription,
     {
-        self.first_event(self.pod_target(), input).await
+        self.events_until(self.pod_target(), input, &mut receive)
+            .await
     }
 
     /// Reads the first event of a host-owned pod-scoped subscription.
@@ -153,6 +158,22 @@ impl PodClient {
     where
         S: Subscription,
     {
+        self.events_until(target, input, &mut |event| Ok(Some(event)))
+            .await
+    }
+
+    /// Opens one typed subscription and consumes events until `receive`
+    /// produces a result.
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    async fn events_until<S, T>(
+        &self,
+        target: wire::Address,
+        input: S,
+        receive: &mut impl FnMut(S::Event) -> PodctlResult<Option<T>>,
+    ) -> PodctlResult<T>
+    where
+        S: Subscription,
+    {
         let input = serde_json::to_value(input).escalate(PodctlError::InvalidControlInput)?;
         let mut subscription = self
             .peer
@@ -165,26 +186,32 @@ impl PodClient {
             })
             .await
             .map_err(|error| error.escalate(PodctlError::ControlPlane))?;
-        subscription
-            .grant_credit(1)
-            .await
-            .map_err(|error| error.escalate(PodctlError::ControlPlane))?;
-        match subscription.recv().await {
-            Some(wire::SubscriptionMessage::Event(event)) => {
-                serde_json::from_value(event.event).escalate(PodctlError::InvalidControlOutput)
+        loop {
+            subscription
+                .grant_credit(1)
+                .await
+                .map_err(|error| error.escalate(PodctlError::ControlPlane))?;
+            match subscription.recv().await {
+                Some(wire::SubscriptionMessage::Event(event)) => {
+                    let event = serde_json::from_value(event.event)
+                        .escalate(PodctlError::InvalidControlOutput)?;
+                    if let Some(output) = receive(event)? {
+                        return Ok(output);
+                    }
+                }
+                Some(wire::SubscriptionMessage::Failed(failed)) => {
+                    return Err(PodctlError::RemoteOperation(failed.error).report());
+                }
+                Some(wire::SubscriptionMessage::Completed(_)) => {
+                    return Err(PodctlError::SubscriptionCompleted.report());
+                }
+                Some(
+                    wire::SubscriptionMessage::Subscribe(_)
+                    | wire::SubscriptionMessage::GrantCredit(_)
+                    | wire::SubscriptionMessage::Unsubscribe(_),
+                ) => return Err(PodctlError::InvalidControlResponse.report()),
+                None => return Err(PodctlError::ControlConnectionClosed.report()),
             }
-            Some(wire::SubscriptionMessage::Failed(failed)) => {
-                Err(PodctlError::RemoteOperation(failed.error).report())
-            }
-            Some(wire::SubscriptionMessage::Completed(_)) => {
-                Err(PodctlError::SubscriptionCompleted.report())
-            }
-            Some(
-                wire::SubscriptionMessage::Subscribe(_)
-                | wire::SubscriptionMessage::GrantCredit(_)
-                | wire::SubscriptionMessage::Unsubscribe(_),
-            ) => Err(PodctlError::InvalidControlResponse.report()),
-            None => Err(PodctlError::ControlConnectionClosed.report()),
         }
     }
 

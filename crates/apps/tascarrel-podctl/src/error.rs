@@ -105,8 +105,9 @@ pub(crate) enum PodctlError {
     /// A control-plane action was canceled before completion.
     #[error("pod control action was canceled")]
     ActionCanceled,
-    /// A control-plane subscription completed without an initial event.
-    #[error("pod control subscription completed before its initial event")]
+    /// A control-plane subscription completed before yielding the requested
+    /// state.
+    #[error("pod control subscription completed before the requested state became available")]
     SubscriptionCompleted,
     /// The control plane returned a message invalid for the current operation.
     #[error("pod control plane returned an invalid response")]
@@ -114,12 +115,9 @@ pub(crate) enum PodctlError {
     /// Guestd closed the control-plane connection during an operation.
     #[error("pod control-plane connection closed")]
     ControlConnectionClosed,
-    /// A live-state subscription did not begin with a snapshot.
-    #[error("invalid {resource} subscription: the initial event is not a snapshot")]
-    InitialEventNotSnapshot {
-        /// Human-readable live resource name.
-        resource: &'static str,
-    },
+    /// A chat subscription emitted an invalid or incomplete bootstrap sequence.
+    #[error("invalid chat subscription bootstrap: {0}")]
+    InvalidChatBootstrap(&'static str),
     /// JSON command output could not be encoded.
     #[error("failed to encode podctl JSON output")]
     EncodeOutput,

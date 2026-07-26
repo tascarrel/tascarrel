@@ -21,10 +21,12 @@ use clap::ValueEnum;
 use reportify::ErrorExt as _;
 use reportify::ResultExt as _;
 use serde::Serialize;
+use tascarrel_api::ArcVec;
 use tascarrel_api::types::chats;
 use tascarrel_api::types::network;
 use tascarrel_api::types::pods;
 use tascarrel_api::types::processes;
+use tascarrel_api::types::store;
 
 use crate::client::PodClient;
 use crate::device::create_device_link;
@@ -272,19 +274,218 @@ async fn run_chat_command(client: &PodClient, command: ChatCommand) -> PodctlRes
             print_json(&output)?;
         }
         ChatCommand::Show { chat_id } => {
-            let event = client
-                .first_pod_event(chats::ChatSubscription {
-                    chat_id,
-                    cursor: None,
-                })
+            let mut bootstrap = None;
+            let chat = client
+                .pod_events_until(
+                    chats::ChatSubscription {
+                        chat_id,
+                        cursor: None,
+                    },
+                    |event| project_chat_bootstrap(&mut bootstrap, event.change),
+                )
                 .await?;
-            let tascarrel_api::types::store::StoreEvent::Snapshot(snapshot) = event.change else {
-                return Err(PodctlError::InitialEventNotSnapshot { resource: "chat" }.report());
-            };
-            print_json(&snapshot.value)?;
+            print_json(&chat)?;
         }
     }
     Ok(())
+}
+
+/// State accumulated while receiving one bounded chat snapshot.
+struct ChatBootstrap {
+    stamp: store::Stamp,
+    summary: chats::ChatSummary,
+    turn_count: usize,
+    timeline_count: usize,
+    attachment_count: usize,
+    queued_prompt_count: usize,
+    turns: Vec<chats::ChatTurn>,
+    timeline: Vec<chats::ChatTimelineEntry>,
+    attachments: Vec<chats::ChatPromptAttachment>,
+    queued_prompts: Vec<chats::ChatQueuedPrompt>,
+}
+
+impl ChatBootstrap {
+    /// Starts an empty accumulator from bootstrap metadata.
+    fn new(started: chats::ChatBootstrapStarted) -> PodctlResult<Self> {
+        Ok(Self {
+            stamp: started.stamp,
+            summary: started.summary,
+            turn_count: bootstrap_count(started.turn_count)?,
+            timeline_count: bootstrap_count(started.timeline_count)?,
+            attachment_count: bootstrap_count(started.attachment_count)?,
+            queued_prompt_count: bootstrap_count(started.queued_prompt_count)?,
+            turns: Vec::new(),
+            timeline: Vec::new(),
+            attachments: Vec::new(),
+            queued_prompts: Vec::new(),
+        })
+    }
+
+    /// Appends one ordered turn range.
+    fn append_turns(&mut self, range: chats::ChatBootstrapTurns) -> PodctlResult<()> {
+        self.require_stamp(&range.stamp)?;
+        append_bootstrap_range(&mut self.turns, range.offset, range.turns, self.turn_count)
+    }
+
+    /// Appends one ordered timeline range.
+    fn append_timeline(&mut self, range: chats::ChatBootstrapTimeline) -> PodctlResult<()> {
+        self.require_stamp(&range.stamp)?;
+        append_bootstrap_range(
+            &mut self.timeline,
+            range.offset,
+            range.entries,
+            self.timeline_count,
+        )
+    }
+
+    /// Appends one ordered attachment range.
+    fn append_attachments(&mut self, range: chats::ChatBootstrapAttachments) -> PodctlResult<()> {
+        self.require_stamp(&range.stamp)?;
+        append_bootstrap_range(
+            &mut self.attachments,
+            range.offset,
+            range.attachments,
+            self.attachment_count,
+        )
+    }
+
+    /// Appends one ordered queued-prompt range.
+    fn append_prompt_queue(&mut self, range: chats::ChatBootstrapPromptQueue) -> PodctlResult<()> {
+        self.require_stamp(&range.stamp)?;
+        append_bootstrap_range(
+            &mut self.queued_prompts,
+            range.offset,
+            range.prompts,
+            self.queued_prompt_count,
+        )
+    }
+
+    /// Validates the completion boundary and returns the assembled chat.
+    fn complete(self, completed: &chats::ChatBootstrapCompleted) -> PodctlResult<chats::Chat> {
+        self.require_stamp(&completed.stamp)?;
+        require_bootstrap_count(self.turns.len(), self.turn_count)?;
+        require_bootstrap_count(self.timeline.len(), self.timeline_count)?;
+        require_bootstrap_count(self.attachments.len(), self.attachment_count)?;
+        require_bootstrap_count(self.queued_prompts.len(), self.queued_prompt_count)?;
+        Ok(chats::Chat {
+            summary: self.summary,
+            turns: self.turns.into(),
+            timeline: self.timeline.into(),
+            attachments: self.attachments.into(),
+            queued_prompts: self.queued_prompts.into(),
+        })
+    }
+
+    /// Requires every event in the bootstrap to describe the same store state.
+    fn require_stamp(&self, stamp: &store::Stamp) -> PodctlResult<()> {
+        if self.stamp == *stamp {
+            Ok(())
+        } else {
+            Err(
+                PodctlError::InvalidChatBootstrap("store stamp changed within the snapshot")
+                    .report(),
+            )
+        }
+    }
+}
+
+/// Applies one wire event and returns the chat at the completion boundary.
+fn project_chat_bootstrap(
+    bootstrap: &mut Option<ChatBootstrap>,
+    change: chats::ChatChange,
+) -> PodctlResult<Option<chats::Chat>> {
+    match change {
+        chats::ChatChange::BootstrapStarted(started) => {
+            if bootstrap.is_some() {
+                return Err(
+                    PodctlError::InvalidChatBootstrap("snapshot started more than once").report(),
+                );
+            }
+            *bootstrap = Some(ChatBootstrap::new(started)?);
+            Ok(None)
+        }
+        chats::ChatChange::BootstrapTurns(range) => {
+            require_chat_bootstrap(bootstrap)?.append_turns(range)?;
+            Ok(None)
+        }
+        chats::ChatChange::BootstrapTimeline(range) => {
+            require_chat_bootstrap(bootstrap)?.append_timeline(range)?;
+            Ok(None)
+        }
+        chats::ChatChange::BootstrapAttachments(range) => {
+            require_chat_bootstrap(bootstrap)?.append_attachments(range)?;
+            Ok(None)
+        }
+        chats::ChatChange::BootstrapPromptQueue(range) => {
+            require_chat_bootstrap(bootstrap)?.append_prompt_queue(range)?;
+            Ok(None)
+        }
+        chats::ChatChange::BootstrapCompleted(completed) => {
+            let bootstrap = bootstrap.take().ok_or_else(|| {
+                PodctlError::InvalidChatBootstrap("snapshot completed before it started").report()
+            })?;
+            bootstrap.complete(&completed).map(Some)
+        }
+        chats::ChatChange::Mutation(_) => Err(PodctlError::InvalidChatBootstrap(
+            "received a mutation before snapshot completion",
+        )
+        .report()),
+    }
+}
+
+/// Returns the active bootstrap or rejects an out-of-sequence range.
+fn require_chat_bootstrap(
+    bootstrap: &mut Option<ChatBootstrap>,
+) -> PodctlResult<&mut ChatBootstrap> {
+    bootstrap.as_mut().ok_or_else(|| {
+        PodctlError::InvalidChatBootstrap("snapshot range arrived before it started").report()
+    })
+}
+
+/// Converts a wire collection size into the local indexing type.
+fn bootstrap_count(count: u32) -> PodctlResult<usize> {
+    usize::try_from(count).map_err(|_| {
+        PodctlError::InvalidChatBootstrap("collection size is unsupported on this platform")
+            .report()
+    })
+}
+
+/// Appends one contiguous bounded bootstrap collection range.
+fn append_bootstrap_range<T: Clone>(
+    target: &mut Vec<T>,
+    offset: u32,
+    values: ArcVec<T>,
+    expected_count: usize,
+) -> PodctlResult<()> {
+    if bootstrap_count(offset)? != target.len() {
+        return Err(
+            PodctlError::InvalidChatBootstrap("collection ranges are not contiguous").report(),
+        );
+    }
+    if target
+        .len()
+        .checked_add(values.len())
+        .is_none_or(|length| length > expected_count)
+    {
+        return Err(PodctlError::InvalidChatBootstrap(
+            "collection contains more values than declared",
+        )
+        .report());
+    }
+    target.extend(values);
+    Ok(())
+}
+
+/// Requires a completed collection to contain its declared number of values.
+fn require_bootstrap_count(actual: usize, expected: usize) -> PodctlResult<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(PodctlError::InvalidChatBootstrap(
+            "snapshot completed before all collection values arrived",
+        )
+        .report())
+    }
 }
 
 /// Executes one dynamic host-loopback forwarding command.
