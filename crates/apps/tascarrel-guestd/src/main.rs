@@ -833,10 +833,7 @@ async fn main() -> Result<()> {
         );
     }
     shares.push(PodShare::code_server(code_server)?);
-    let ca_path = if workspace.network.secret_injection.is_empty()
-        && workspace.network.allow_hosts.is_empty()
-        && workspace.network.deny_hosts.is_empty()
-    {
+    let ca_path = if workspace.network.secret_injection.is_empty() {
         None
     } else {
         // Pod recovery happens before the virtio-serial transport is served.

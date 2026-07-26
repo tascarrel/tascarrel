@@ -317,6 +317,11 @@ question or requested TCP destination to `hostd`. `hostd` applies the
 workspace's hostname, address, port, and local-network policy before resolving
 the name or opening an external socket.
 
+On configured HTTPS ports, `hostd` admits connections using the normalized TLS
+SNI and resolves that server name itself before relaying TLS unchanged. It
+terminates TLS only when an HTTPS secret-injection rule matches the SNI. In that
+case, every forwarded HTTP host must match the SNI.
+
 The guest firewall also denies direct pod-to-guest and pod-to-pod traffic unless
 Tascarrel provides an explicit path. A pod reaches configured services on the
 host through a reserved synthetic address, which `hostd` translates only to

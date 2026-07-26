@@ -2538,7 +2538,7 @@ fn network_policy(
     let policy = NetworkPolicy::load(&workspace_root(workspace, service).join("config.toml"))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let authority = policy
-        .needs_authority()
+        .requires_https_authority()
         .then(|| {
             WorkspaceAuthority::load_or_create(
                 &workspace_state(workspace, service).join("https-ca"),

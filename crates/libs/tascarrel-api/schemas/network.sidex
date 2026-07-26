@@ -508,7 +508,7 @@ variant TcpFlowMode {
     Raw,
     /// An HTTP connection inspected and routed by its normalized host.
     Http,
-    /// A TLS connection inspected and routed by its normalized server name and HTTP host.
+    /// A TLS connection inspected and routed by its normalized server name.
     Https,
 }
 

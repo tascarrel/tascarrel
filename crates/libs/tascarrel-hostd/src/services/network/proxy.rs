@@ -1,4 +1,8 @@
-//! HTTP and HTTPS policy enforcement for attributed guest TCP flows.
+//! HTTP and TLS policy enforcement for attributed guest TCP flows.
+//!
+//! [`HttpProxy`] resolves admitted hostnames on the host. It relays TLS
+//! unchanged unless the connection's SNI matches an HTTPS secret-injection
+//! rule, in which case it terminates TLS and validates each HTTP host.
 
 use std::convert::Infallible;
 use std::io;
@@ -137,11 +141,12 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for SharedIo<T> {
     }
 }
 
+/// Enforces hostname policy and secret injection for one attributed TCP flow.
 #[derive(Clone)]
 pub(crate) struct HttpProxy {
     policy: NetworkPolicy,
     authority: Option<Arc<WorkspaceAuthority>>,
-    client_tls: Arc<ClientConfig>,
+    interception_client_tls: Option<Arc<ClientConfig>>,
     connect_timeout: Duration,
 }
 
@@ -162,11 +167,11 @@ impl HttpProxy {
         authority: Option<Arc<WorkspaceAuthority>>,
         connect_timeout: Duration,
     ) -> Self {
-        let client_tls = native_client_config(authority.as_deref());
+        let interception_client_tls = authority.as_deref().map(interception_client_config);
         Self {
             policy,
             authority,
-            client_tls,
+            interception_client_tls,
             connect_timeout,
         }
     }
@@ -195,22 +200,34 @@ impl HttpProxy {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let authority = self
-            .authority
-            .as_ref()
-            .ok_or_else(|| proxy_error("workspace HTTPS authority is unavailable"))?;
-        let start = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), channel)
-            .await
-            .map_err(|error| proxy_error(format!("failed to read TLS ClientHello: {error}")))?;
+        let start = timeout(
+            self.connect_timeout,
+            LazyConfigAcceptor::new(
+                rustls::server::Acceptor::default(),
+                ClientHelloRecordingIo::new(channel),
+            ),
+        )
+        .await
+        .map_err(|_| proxy_error("timed out reading TLS ClientHello"))?
+        .map_err(|error| proxy_error(format!("failed to read TLS ClientHello: {error}")))?;
         let host = start
             .client_hello()
             .server_name()
             .ok_or_else(|| proxy_error("TLS SNI is required"))?
             .to_ascii_lowercase();
         self.require_host(&host)?;
+        if !self.policy.injects_secret_for_host(&host) {
+            return self.relay_tls(start.io, &host, port).await;
+        }
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or_else(|| proxy_error("workspace HTTPS authority is unavailable"))?;
         let server = authority
             .server_config(&host)
             .map_err(|error| proxy_error(format!("failed to issue TLS certificate: {error}")))?;
+        let mut start = start;
+        start.io.discard_recording();
         let stream = start.into_stream(server).await.map_err(|error| {
             proxy_error(format!(
                 "failed to complete pod-facing TLS handshake: {error}"
@@ -218,6 +235,40 @@ impl HttpProxy {
         })?;
         self.serve_connection(stream, port, Some(host), true, workspace_name, secrets)
             .await
+    }
+
+    /// Resolves an admitted SNI and relays the original TLS stream unchanged.
+    #[tracing::instrument(
+        name = "tascarrel_host.network.relay_tls",
+        level = "debug",
+        skip(self, channel),
+        err(Debug)
+    )]
+    async fn relay_tls<T>(
+        &self,
+        mut channel: ClientHelloRecordingIo<T>,
+        host: &str,
+        port: u16,
+    ) -> ProxyResult<()>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let client_hello = channel.finish_recording();
+        let mut upstream = self.connect(host, port).await?;
+        upstream.write_all(&client_hello).await.map_err(|error| {
+            proxy_error(format!(
+                "failed to forward upstream TLS ClientHello: {error}"
+            ))
+        })?;
+        if let Err(error) = copy_bidirectional(&mut channel, &mut upstream).await {
+            if !is_closed_connection_error(&error) {
+                return Err(proxy_error(format!(
+                    "failed to relay TLS connection: {error}"
+                )));
+            }
+            debug!(%error, "TLS relay peer closed the connection");
+        }
+        Ok(())
     }
 
     async fn serve_connection<T>(
@@ -326,9 +377,13 @@ impl HttpProxy {
 
         let stream = self.connect(&host, context.port).await?;
         if context.upstream_tls {
+            let client_tls = self
+                .interception_client_tls
+                .as_ref()
+                .ok_or_else(|| proxy_error("workspace HTTPS authority is unavailable"))?;
             let name = ServerName::try_from(host.clone())
                 .map_err(|error| proxy_error(format!("invalid TLS server name: {error}")))?;
-            let tls = TlsConnector::from(Arc::clone(&self.client_tls))
+            let tls = TlsConnector::from(Arc::clone(client_tls))
                 .connect(name, stream)
                 .await
                 .map_err(|error| proxy_error(format!("failed to connect upstream TLS: {error}")))?;
@@ -428,6 +483,72 @@ impl HttpProxy {
             }
         }
         Ok(())
+    }
+}
+
+/// Records the bytes `rustls` consumes while parsing a bounded `ClientHello`.
+struct ClientHelloRecordingIo<T> {
+    inner: T,
+    recorded: Vec<u8>,
+    recording: bool,
+}
+
+impl<T> ClientHelloRecordingIo<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            recorded: Vec::new(),
+            recording: true,
+        }
+    }
+
+    /// Stops capture and returns all bytes consumed during inspection.
+    fn finish_recording(&mut self) -> Vec<u8> {
+        self.recording = false;
+        std::mem::take(&mut self.recorded)
+    }
+
+    /// Stops capture after `rustls` assumes ownership of the consumed bytes.
+    fn discard_recording(&mut self) {
+        self.recording = false;
+        self.recorded.clear();
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ClientHelloRecordingIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let filled_before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
+        if matches!(result, Poll::Ready(Ok(()))) && self.recording {
+            self.recorded
+                .extend_from_slice(&buffer.filled()[filled_before..]);
+        }
+        result
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for ClientHelloRecordingIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(context, bytes)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 
@@ -723,7 +844,19 @@ fn proxy_error(message: impl Into<String>) -> Report<HttpProxyError> {
     HttpProxyError::Failed(message.into()).report()
 }
 
-fn native_client_config(authority: Option<&WorkspaceAuthority>) -> Arc<ClientConfig> {
+/// Returns whether a relay error reports that either TCP peer already closed.
+fn is_closed_connection_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+    )
+}
+
+/// Builds the upstream TLS configuration used after HTTPS interception.
+fn interception_client_config(authority: &WorkspaceAuthority) -> Arc<ClientConfig> {
     let loaded = rustls_native_certs::load_native_certs();
     let mut roots = RootCertStore::empty();
     for error in loaded.errors {
@@ -734,11 +867,9 @@ fn native_client_config(authority: Option<&WorkspaceAuthority>) -> Arc<ClientCon
             debug!(%error, "could not add one native TLS root");
         }
     }
-    if let Some(authority) = authority {
-        roots
-            .add(authority.certificate_der())
-            .expect("the parsed workspace CA is a valid trust anchor");
-    }
+    roots
+        .add(authority.certificate_der())
+        .expect("the parsed workspace CA is a valid trust anchor");
     let mut config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -760,6 +891,114 @@ mod tests {
     use super::*;
     use crate::services::network::NetworkPolicy;
     use crate::services::secrets::SecretsServiceConfig;
+
+    /// Exercises hostname admission and encrypted pass-through for an SNI that
+    /// does not match the configured secret-injection rule.
+    #[tokio::test]
+    async fn https_proxy_relays_tls_without_a_workspace_authority() {
+        install_crypto_provider();
+        let directory = tempfile::tempdir().unwrap();
+        let workspaces = directory.path().join("workspaces");
+        let workspace_name = WorkspaceName::new("proxy-test");
+        let workspace = workspaces.join(workspace_name.as_str());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("config.toml"),
+            "[secrets.providers.project]\nkind = 'sops'\n\
+             [network]\ndefault = 'deny'\nallow-local = true\n\
+             allow-hosts = ['localhost']\n\
+             [[network.secret-injection]]\nhost = 'api.example'\n\
+             secret = 'project.API_TOKEN'\n",
+        )
+        .unwrap();
+        let secrets = SecretsService::new(SecretsServiceConfig::new(
+            &workspaces,
+            directory.path().join("unused-sops"),
+        ))
+        .unwrap();
+        let upstream_authority =
+            WorkspaceAuthority::load_or_create(&directory.path().join("upstream"), "upstream-test")
+                .unwrap();
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let upstream_server_authority = Arc::clone(&upstream_authority);
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let tls = TlsAcceptor::from(
+                upstream_server_authority
+                    .server_config("localhost")
+                    .unwrap(),
+            )
+            .accept(stream)
+            .await
+            .unwrap();
+            server_http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(tls),
+                    service_fn(|_request: Request<Incoming>| async move {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                            b"encrypted-upstream",
+                        ))))
+                    }),
+                )
+                .await
+                .unwrap();
+        });
+
+        let policy = NetworkPolicy::load(&workspace.join("config.toml")).unwrap();
+        let proxy = HttpProxy::new(policy, None, Duration::from_secs(5));
+        let (client_io, proxy_io) = duplex(256 * 1024);
+        let proxy_task =
+            tokio::spawn(proxy.serve_https(proxy_io, upstream_port, workspace_name, secrets));
+
+        let mut roots = RootCertStore::empty();
+        roots.add(upstream_authority.certificate_der()).unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tls = TlsConnector::from(Arc::new(client_config))
+            .connect(
+                ServerName::try_from("localhost".to_owned()).unwrap(),
+                client_io,
+            )
+            .await
+            .unwrap();
+        let (mut sender, connection) = client_http1::handshake(TokioIo::new(tls)).await.unwrap();
+        let client_connection = tokio::spawn(connection);
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .uri("/")
+                    .header(HOST, "localhost")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "encrypted-upstream"
+        );
+        drop(sender);
+
+        timeout(Duration::from_secs(5), client_connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), proxy_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     /// Exercises HTTPS interception, host-side SOPS resolution, and header
     /// injection across complete client, proxy, and upstream connections.

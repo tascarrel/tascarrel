@@ -222,11 +222,26 @@ impl NetworkPolicy {
         })
     }
 
+    /// Returns whether HTTP Host or TLS SNI must be inspected.
     #[must_use]
-    pub fn needs_authority(&self) -> bool {
+    pub fn needs_hostname_inspection(&self) -> bool {
         !self.secret_injection.is_empty()
             || !self.allow_hosts.is_empty()
             || !self.deny_hosts.is_empty()
+    }
+
+    /// Returns whether HTTPS secret injection needs a workspace CA.
+    #[must_use]
+    pub fn requires_https_authority(&self) -> bool {
+        !self.secret_injection.is_empty()
+    }
+
+    /// Returns whether HTTPS requests for a host require interception.
+    #[must_use]
+    pub(crate) fn injects_secret_for_host(&self, host: &str) -> bool {
+        self.secret_injection
+            .iter()
+            .any(|rule| host_matches(&rule.host, host))
     }
 
     #[must_use]

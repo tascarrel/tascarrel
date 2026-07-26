@@ -628,12 +628,11 @@ fn tcp_destination(
     if !policy.allow_ports.contains(&requested.port()) {
         return Err(TcpAdmissionError::Denied);
     }
-    let has_http_policy = !policy.allow_hosts.is_empty()
-        || !policy.deny_hosts.is_empty()
-        || !policy.secret_injection.is_empty();
-    let proxy = if has_http_policy && policy.http_ports.contains(&requested.port()) {
+    let proxy = if policy.needs_hostname_inspection()
+        && policy.http_ports.contains(&requested.port())
+    {
         Some(ProxyMode::Http)
-    } else if policy.needs_authority() && policy.https_ports.contains(&requested.port()) {
+    } else if policy.needs_hostname_inspection() && policy.https_ports.contains(&requested.port()) {
         Some(ProxyMode::Https)
     } else {
         None
