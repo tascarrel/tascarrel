@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { chats } from "../../../api/generated/index.ts";
-import type { ChatReplica } from "../model/replicas.ts";
+import {
+  chatTimeline,
+  chatTurns,
+  type ChatReplica,
+} from "../model/replicas.ts";
 import {
   presentChatLineChanges,
   type LineChangePresentation,
@@ -22,14 +26,22 @@ export function ChatStatusBar({
   variant?: ChatStatusVariant;
 }) {
   const [now, setNow] = useState(Date.now);
-  const status = chatStatus(summary, replica, runningTurn, now);
+  const turns = useMemo(
+    () => replica ? chatTurns(replica) : [],
+    [replica?.turnOrder, replica?.turnsById],
+  );
+  const timeline = useMemo(
+    () => replica ? chatTimeline(replica) : [],
+    [replica?.timelineOrder, replica?.timelineById],
+  );
+  const status = chatStatus(summary, replica, turns, timeline, runningTurn, now);
   const totalUsage = useMemo(
-    () => replica ? presentChatUsage(replica.turns) : undefined,
-    [replica?.turns],
+    () => replica ? presentChatUsage(turns) : undefined,
+    [replica !== undefined, turns],
   );
   const lineChanges = useMemo(
-    () => replica ? presentChatLineChanges(replica.timeline) : undefined,
-    [replica?.timeline],
+    () => replica ? presentChatLineChanges(timeline) : undefined,
+    [replica !== undefined, timeline],
   );
 
   useEffect(() => {
@@ -154,6 +166,8 @@ const toneClasses: Record<StatusTone, string> = {
 function chatStatus(
   summary: chats.ChatSummary,
   replica: ChatReplica | undefined,
+  turns: chats.ChatTurn[],
+  timeline: chats.ChatTimelineEntry[],
   runningTurn: chats.ChatTurn | undefined,
   now: number,
 ): Status {
@@ -177,7 +191,7 @@ function chatStatus(
   }
 
   const currentBindingId = summary.binding?.bindingId;
-  const waitingForInput = replica.timeline.some(
+  const waitingForInput = timeline.some(
     (entry) =>
       entry.entry === "Request"
       && !entry.resolved
@@ -202,7 +216,7 @@ function chatStatus(
     case "Detaching":
       return { label: "Disconnecting", busy: true, tone: "warning" };
     case "Attached": {
-      const lastTurn = replica.turns.findLast((turn) => turn.state !== "Running");
+      const lastTurn = turns.findLast((turn) => turn.state !== "Running");
       return {
         label: "Done",
         leadingDetail: lastTurn ? elapsedTime(lastTurn, now) : undefined,

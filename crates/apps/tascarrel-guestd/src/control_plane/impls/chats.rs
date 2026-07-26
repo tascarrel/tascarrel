@@ -8,6 +8,7 @@ use tascarrel_api::types::protocol as wire;
 
 use crate::control_plane::InvocationCtx;
 use crate::control_plane::SubscriptionCtx;
+use crate::control_plane::chat_subscription::ChatEventSource;
 use crate::control_plane::operation_error_details;
 use crate::control_plane::operations::EventSource;
 use crate::control_plane::operations::ExecuteAction;
@@ -15,7 +16,6 @@ use crate::control_plane::operations::OpenSubscription;
 use crate::control_plane::operations::store_event;
 use crate::services::chats::ChatEngineError;
 use crate::services::chats::ChatListStoreSubscription;
-use crate::services::chats::ChatStoreSubscription;
 use crate::services::chats::HarnessListSubscription;
 use crate::services::chats::HarnessManagerError;
 use crate::services::pods::PodServiceError;
@@ -367,7 +367,7 @@ impl OpenSubscription for api::ChatSubscription {
         require_chat_reader(context).map(|_| ())
     }
 
-    type Source = ChatStoreSubscription;
+    type Source = ChatEventSource;
 
     async fn open(
         self,
@@ -386,26 +386,14 @@ impl OpenSubscription for api::ChatSubscription {
         {
             return Err(wire::OperationError::forbidden());
         }
-        context
+        let subscription = context
             .state()
             .chats()
             .engine()
             .subscribe_chat(self)
             .await
-            .map_err(chat_error)
-    }
-}
-
-#[async_trait]
-impl EventSource for ChatStoreSubscription {
-    type Event = api::ChatEvent;
-
-    async fn recv(&mut self) -> Result<Option<Self::Event>, Report<wire::OperationError>> {
-        Ok(tascarrel_store::Subscription::recv(self)
-            .await
-            .map(|change| api::ChatEvent {
-                change: store_event(change),
-            }))
+            .map_err(chat_error)?;
+        Ok(ChatEventSource::new(subscription))
     }
 }
 

@@ -4,6 +4,7 @@
 //! [`GuestControlService`] terminates the persistent hostd control-plane
 //! connection and dispatches typed actions and subscriptions into that state.
 
+mod chat_subscription;
 mod host;
 mod impls;
 mod operations;

@@ -332,9 +332,10 @@ import * as __schema_workspaces from "./workspaces";
  * Resumable event emitted when one chat changes.
  */
  export type ChatEvent = { /**
-                                            * Snapshot or mutation used to advance the consumer's cached chat.
+                                            * Bootstrap boundary, bounded collection chunk, or mutation used to advance the consumer's
+                                            * chat replica.
                                             */
-                                                        "change": __schema_store.StoreEvent<Chat, ChatMutation> };
+                                                        "change": ChatChange };
 /**
  * Subscribes to workspace-wide harness installation, credentials, login state, capabilities, and
  * models.
@@ -383,6 +384,101 @@ import * as __schema_workspaces from "./workspaces";
  * Identifies one runtime queued chat prompt.
  */
  export type ChatQueuedPromptId = __sidex_types.Nominal<(string), "::tascarrel_api::chats::ChatQueuedPromptId">;
+/**
+ * One ordered change in a chat subscription.
+ */
+ export type ChatChange = (({ "type": "BootstrapStarted" } & ChatBootstrapStarted) | ({ "type": "BootstrapTurns" } & ChatBootstrapTurns) | ({ "type": "BootstrapTimeline" } & ChatBootstrapTimeline) | ({ "type": "BootstrapAttachments" } & ChatBootstrapAttachments) | ({ "type": "BootstrapPromptQueue" } & ChatBootstrapPromptQueue) | ({ "type": "BootstrapCompleted" } & ChatBootstrapCompleted) | ({ "type": "Mutation" } & StampedChatMutation));
+/**
+ * Metadata and collection sizes captured at the start of one chat bootstrap.
+ */
+ export type ChatBootstrapStarted = { /**
+                                            * Store state represented by every part of this bootstrap.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Metadata captured with the bootstrap snapshot.
+                                            */
+                                                        "summary": ChatSummary, /**
+                                            * Number of turns expected before bootstrap completion.
+                                            */
+                                                        "turnCount": __sidex_types.builtins.U32, /**
+                                            * Number of timeline entries expected before bootstrap completion.
+                                            */
+                                                        "timelineCount": __sidex_types.builtins.U32, /**
+                                            * Number of attachments expected before bootstrap completion.
+                                            */
+                                                        "attachmentCount": __sidex_types.builtins.U32, /**
+                                            * Number of queued prompts expected before bootstrap completion.
+                                            */
+                                                        "queuedPromptCount": __sidex_types.builtins.U32 };
+/**
+ * One bounded ordered range of turns from a chat bootstrap.
+ */
+ export type ChatBootstrapTurns = { /**
+                                            * Store state represented by this bootstrap range.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Zero-based position of the first turn in this range.
+                                            */
+                                                        "offset": __sidex_types.builtins.U32, /**
+                                            * Contiguous turns in chronological order.
+                                            */
+                                                        "turns": __sidex_types.builtins.Sequence<ChatTurn> };
+/**
+ * One bounded ordered range of timeline entries from a chat bootstrap.
+ */
+ export type ChatBootstrapTimeline = { /**
+                                            * Store state represented by this bootstrap range.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Zero-based position of the first timeline entry in this range.
+                                            */
+                                                        "offset": __sidex_types.builtins.U32, /**
+                                            * Contiguous entries in authoritative presentation order.
+                                            */
+                                                        "entries": __sidex_types.builtins.Sequence<ChatTimelineEntry> };
+/**
+ * One bounded ordered range of attachments from a chat bootstrap.
+ */
+ export type ChatBootstrapAttachments = { /**
+                                            * Store state represented by this bootstrap range.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Zero-based position of the first attachment in this range.
+                                            */
+                                                        "offset": __sidex_types.builtins.U32, /**
+                                            * Contiguous attachments in their bootstrap order.
+                                            */
+                                                        "attachments": __sidex_types.builtins.Sequence<ChatPromptAttachment> };
+/**
+ * One bounded ordered range of queued prompts from a chat bootstrap.
+ */
+ export type ChatBootstrapPromptQueue = { /**
+                                            * Store state represented by this bootstrap range.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Zero-based position of the first queued prompt in this range.
+                                            */
+                                                        "offset": __sidex_types.builtins.U32, /**
+                                            * Contiguous prompts in delivery order.
+                                            */
+                                                        "prompts": __sidex_types.builtins.Sequence<ChatQueuedPrompt> };
+/**
+ * Completion boundary for one chat bootstrap.
+ */
+ export type ChatBootstrapCompleted = { /**
+                                            * Store state represented by the completed bootstrap.
+                                            */
+                                                        "stamp": __schema_store.Stamp };
+/**
+ * One ordered mutation following a complete chat bootstrap or resumable cursor.
+ */
+ export type StampedChatMutation = { /**
+                                            * Store state after applying the mutation.
+                                            */
+                                                        "stamp": __schema_store.Stamp, /**
+                                            * Mutation advancing the consumer to `stamp`.
+                                            */
+                                                        "mutation": ChatMutation };
 /**
  * Complete workspace-wide active chat list.
  */

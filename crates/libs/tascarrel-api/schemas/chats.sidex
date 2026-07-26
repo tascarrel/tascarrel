@@ -10,10 +10,10 @@
 //! secret-free credential state. Credential state distinguishes whether credentials exist from
 //! whether their provider has validated them.
 //!
-//! The chat list and each opened chat use the generic tascarrel-store wire model. Their [`Stamp`]
-//! cursors identify an authoritative store generation and version. A subscription replaces its
-//! consumer state with a snapshot whenever its retained cursor cannot be resumed. Harness-list
-//! events instead replace the complete workspace-wide harness list.
+//! The chat list uses the generic tascarrel-store wire model. Each opened chat instead bootstraps
+//! its independently retained collections in bounded chunks before delivering ordered mutations.
+//! Their [`Stamp`] cursors identify an authoritative store generation and version. Harness-list
+//! events replace the complete workspace-wide harness list.
 
 import common::{JsonValue, Money, Timestamp}
 import pods::PodId
@@ -281,8 +281,9 @@ record ChatSubscription {
 
 /// Resumable event emitted when one chat changes.
 record ChatEvent {
-    /// Snapshot or mutation used to advance the consumer's cached chat.
-    change: StoreEvent<Chat, ChatMutation>,
+    /// Bootstrap boundary, bounded collection chunk, or mutation used to advance the consumer's
+    /// chat replica.
+    change: ChatChange,
 }
 
 /// Subscribes to workspace-wide harness installation, credentials, login state, capabilities, and
@@ -342,6 +343,95 @@ opaque ChatAttachmentId
 #[json(type = "string")]
 #[rust(type = "crate::ids::ChatQueuedPromptId")]
 opaque ChatQueuedPromptId
+
+/// One ordered change in a chat subscription.
+#[json(tag = "type")]
+variant ChatChange {
+    /// Starts replacement of the consumer's chat replica from one store snapshot.
+    BootstrapStarted: ChatBootstrapStarted,
+    /// Supplies an ordered range of turns from the bootstrap snapshot.
+    BootstrapTurns: ChatBootstrapTurns,
+    /// Supplies an ordered range of timeline entries from the bootstrap snapshot.
+    BootstrapTimeline: ChatBootstrapTimeline,
+    /// Supplies an ordered range of attachments from the bootstrap snapshot.
+    BootstrapAttachments: ChatBootstrapAttachments,
+    /// Supplies an ordered range of queued prompts from the bootstrap snapshot.
+    BootstrapPromptQueue: ChatBootstrapPromptQueue,
+    /// Atomically completes replacement of the consumer's chat replica.
+    BootstrapCompleted: ChatBootstrapCompleted,
+    /// Applies one store mutation after the consumer's complete replica.
+    Mutation: StampedChatMutation,
+}
+
+/// Metadata and collection sizes captured at the start of one chat bootstrap.
+record ChatBootstrapStarted {
+    /// Store state represented by every part of this bootstrap.
+    stamp: Stamp,
+    /// Metadata captured with the bootstrap snapshot.
+    summary: ChatSummary,
+    /// Number of turns expected before bootstrap completion.
+    turn_count: u32,
+    /// Number of timeline entries expected before bootstrap completion.
+    timeline_count: u32,
+    /// Number of attachments expected before bootstrap completion.
+    attachment_count: u32,
+    /// Number of queued prompts expected before bootstrap completion.
+    queued_prompt_count: u32,
+}
+
+/// One bounded ordered range of turns from a chat bootstrap.
+record ChatBootstrapTurns {
+    /// Store state represented by this bootstrap range.
+    stamp: Stamp,
+    /// Zero-based position of the first turn in this range.
+    offset: u32,
+    /// Contiguous turns in chronological order.
+    turns: [ChatTurn],
+}
+
+/// One bounded ordered range of timeline entries from a chat bootstrap.
+record ChatBootstrapTimeline {
+    /// Store state represented by this bootstrap range.
+    stamp: Stamp,
+    /// Zero-based position of the first timeline entry in this range.
+    offset: u32,
+    /// Contiguous entries in authoritative presentation order.
+    entries: [ChatTimelineEntry],
+}
+
+/// One bounded ordered range of attachments from a chat bootstrap.
+record ChatBootstrapAttachments {
+    /// Store state represented by this bootstrap range.
+    stamp: Stamp,
+    /// Zero-based position of the first attachment in this range.
+    offset: u32,
+    /// Contiguous attachments in their bootstrap order.
+    attachments: [ChatPromptAttachment],
+}
+
+/// One bounded ordered range of queued prompts from a chat bootstrap.
+record ChatBootstrapPromptQueue {
+    /// Store state represented by this bootstrap range.
+    stamp: Stamp,
+    /// Zero-based position of the first queued prompt in this range.
+    offset: u32,
+    /// Contiguous prompts in delivery order.
+    prompts: [ChatQueuedPrompt],
+}
+
+/// Completion boundary for one chat bootstrap.
+record ChatBootstrapCompleted {
+    /// Store state represented by the completed bootstrap.
+    stamp: Stamp,
+}
+
+/// One ordered mutation following a complete chat bootstrap or resumable cursor.
+record StampedChatMutation {
+    /// Store state after applying the mutation.
+    stamp: Stamp,
+    /// Mutation advancing the consumer to `stamp`.
+    mutation: ChatMutation,
+}
 
 /// Complete workspace-wide active chat list.
 record ChatList {

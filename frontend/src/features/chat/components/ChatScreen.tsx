@@ -4,11 +4,12 @@ import {
   LoaderCircle,
   Trash2,
 } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { chats } from "../../../api/generated/index.ts";
 import { Button } from "../../../components/ui/Button.tsx";
 import type { ChatScreenProps } from "../types.ts";
+import { chatTimeline, chatTurns } from "../model/replicas.ts";
 import { ChatComposer } from "./ChatComposer.tsx";
 import { ChatStatusBar } from "./ChatStatusBar.tsx";
 import { ChatTimeline } from "./ChatTimeline.tsx";
@@ -31,7 +32,15 @@ export function ChatScreen({
   const [followingTimeline, setFollowingTimeline] = useState(
     () => !hasStoredNonFollowState(summary.chatId),
   );
-  const runningTurn = replica?.turns.findLast(
+  const turns = useMemo(
+    () => replica ? chatTurns(replica) : [],
+    [replica?.turnOrder, replica?.turnsById],
+  );
+  const timeline = useMemo(
+    () => replica ? chatTimeline(replica) : [],
+    [replica?.timelineOrder, replica?.timelineById],
+  );
+  const runningTurn = turns.findLast(
     (turn) => turn.state === "Running" && turn.bindingId === summary.binding?.bindingId,
   );
   const attached = summary.binding?.status === "Attached";
@@ -101,7 +110,7 @@ export function ChatScreen({
             </div>
           ) : (
             <ChatTimeline
-              entries={replica.timeline}
+              entries={timeline}
               replica={replica}
               summary={summary}
               runningTurn={runningTurn}

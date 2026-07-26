@@ -85,7 +85,7 @@ where
 }
 
 /// Converts an in-memory store stamp to its API representation.
-fn store_stamp(stamp: tascarrel_store::Stamp) -> store_api::Stamp {
+pub(crate) fn store_stamp(stamp: tascarrel_store::Stamp) -> store_api::Stamp {
     store_api::Stamp {
         generation: stamp.generation.to_string().into(),
         version: stamp.version,
