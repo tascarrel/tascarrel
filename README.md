@@ -37,14 +37,17 @@ attention, and lets you review changes before publishing them through Git.
 
 ## Highlights
 
-- **Bring Your Subscriptions** — Sign in to Codex with ChatGPT, connect Claude
-  Code with a setup token, or use Tasci with an OpenAI-compatible endpoint.
-- **Layered VM and Task Isolation** — Run each development context in a
-  dedicated VM and each task in a disposable pod.
-- **Controlled Network Access** — Restrict egress by hostname, address, and port,
-  and expose services deliberately.
-- **Host-Injected Credentials** — Keep Git authentication and eligible HTTP
-  secrets on the host, outside workspace VMs and task pods.
+- **Bring Your Subscriptions** — Sign in with ChatGPT or connect Claude Code.
+- **Layered VM and Task Isolation** — VMs isolate workspaces; pods separate tasks.
+- **Controlled Network Access** — Set egress rules and expose services deliberately.
+- **Host-Injected Credentials** — Keep Git and injected HTTP credentials on the host.
+- **Agent-Agnostic** — Use Codex, Claude Code, or Tascarrel's own agent in one UI.
+- **Many Agents at Once** — Switch and steer parallel tasks in one UI.
+- **Autonomy through Isolation** — Run agents without permission prompts.
+- **Local First** — Keep environments and sessions on your hardware.
+- **Shareable Workspaces** — Track reusable workspace configuration in Git.
+- **Multi-Repository Workspaces** — Work across every repository at once.
+- **Fast, Fresh Tasks** — Reuse prepared images, snapshots, and caches.
 
 ## Isolation Model
 
