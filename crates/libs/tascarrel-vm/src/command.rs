@@ -167,9 +167,14 @@ fn append_machine(args: &mut Vec<OsString>, config: &VmConfig, acceleration: Acc
     if uses_virtiofs(config) {
         machine.push_str(",memory-backend=tascarrel-memory");
     }
+    let name = if cfg!(target_os = "macos") {
+        "tascarrel"
+    } else {
+        "tascarrel,process=tascarrel-qemu"
+    };
     args.extend([
         OsString::from("-name"),
-        OsString::from("tascarrel,process=tascarrel-qemu"),
+        OsString::from(name),
         OsString::from("-machine"),
         OsString::from(machine),
         OsString::from("-accel"),
