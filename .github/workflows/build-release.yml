@@ -89,24 +89,18 @@ jobs:
         include:
           - release_target: x86_64-linux
             rust_target: x86_64-unknown-linux-musl
-            desktop_target: x86_64-unknown-linux-gnu
-            desktop_bundles: deb,rpm
             guest_system: x86_64-linux
             guest_architecture: x86_64
             runner: ubuntu-24.04
             file_pattern: "ELF 64-bit LSB.*x86-64"
           - release_target: aarch64-linux
             rust_target: aarch64-unknown-linux-musl
-            desktop_target: aarch64-unknown-linux-gnu
-            desktop_bundles: deb,rpm
             guest_system: aarch64-linux
             guest_architecture: aarch64
             runner: ubuntu-24.04-arm
             file_pattern: "ELF 64-bit LSB.*ARM aarch64"
           - release_target: aarch64-darwin
             rust_target: aarch64-apple-darwin
-            desktop_target: aarch64-apple-darwin
-            desktop_bundles: dmg
             guest_system: aarch64-linux
             guest_architecture: aarch64
             runner: macos-15
@@ -142,11 +136,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev \
+            fakeroot \
             musl-tools \
-            patchelf \
             rpm
           echo "CC=musl-gcc" >> "$GITHUB_ENV"
           case "$RUST_TARGET" in
@@ -164,9 +155,6 @@ jobs:
         run: |
           rustup set profile minimal
           rustup toolchain install 1.97.1 --target "$RUST_TARGET"
-
-      - name: Install Tauri CLI
-        run: npm install --global @tauri-apps/cli@2.11.4
 
       - name: Build host release
         env:
@@ -226,27 +214,23 @@ jobs:
             (cd dist && sha256sum "$archive" > "$archive.sha256")
           fi
 
-      - name: Stage the desktop server sidecar
-        env:
-          DESKTOP_TARGET: ${{ matrix.desktop_target }}
-          RUST_TARGET: ${{ matrix.rust_target }}
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+
+      - name: Install desktop build dependencies
+        working-directory: crates/apps/tascarrel-desktop
         run: |
-          set -euo pipefail
-          sidecars=crates/apps/tascarrel-desktop/binaries
-          mkdir -p "$sidecars"
-          cp "target/$RUST_TARGET/release/tascarrel" \
-            "$sidecars/tascarrel-$DESKTOP_TARGET"
+          npm install --global pnpm@11.9.0
+          pnpm install --frozen-lockfile
 
       - name: Build desktop packages
         working-directory: crates/apps/tascarrel-desktop
         env:
-          DESKTOP_BUNDLES: ${{ matrix.desktop_bundles }}
-        run: >-
-          tauri build
-          --config tauri.bundle.conf.json
-          --bundles "$DESKTOP_BUNDLES"
-          --
-          --locked
+          TASCARREL_DESKTOP_SERVER: ${{ github.workspace }}/target/${{ matrix.rust_target }}/release/tascarrel
+        run: pnpm make
 
       - name: Stage desktop packages
         env:
@@ -254,14 +238,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ runner.os }}" = macOS ]; then
-            dmg=$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -type f)
+            dmg=$(find crates/apps/tascarrel-desktop/out/make -name '*.dmg' -type f)
             test "$(wc -l <<< "$dmg" | tr -d ' ')" -eq 1
             package="tascarrel-desktop-$RELEASE_TARGET.dmg"
             cp "$dmg" "dist/$package"
             (cd dist && shasum -a 256 "$package" > "$package.sha256")
           else
-            deb=$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f)
-            rpm=$(find target/release/bundle/rpm -maxdepth 1 -name '*.rpm' -type f)
+            deb=$(find crates/apps/tascarrel-desktop/out/make -name '*.deb' -type f)
+            rpm=$(find crates/apps/tascarrel-desktop/out/make -name '*.rpm' -type f)
             test "$(wc -l <<< "$deb" | tr -d ' ')" -eq 1
             test "$(wc -l <<< "$rpm" | tr -d ' ')" -eq 1
             deb_archive="tascarrel-desktop-$RELEASE_TARGET.deb"

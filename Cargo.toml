@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/apps/*", "crates/libs/*"]
+exclude = ["crates/apps/tascarrel-desktop"]
 resolver = "2"
 
 [workspace.package]
@@ -43,9 +44,6 @@ sha2 = "0.10"
 similar = "3.1.1"
 sysinfo = { version = "0.37", default-features = false }
 tar = "0.4"
-tauri = "2.11.5"
-tauri-build = "2.6.3"
-tauri-plugin-single-instance = "2.4.3"
 tempfile = "3"
 thiserror = "2.0"
 tokio = "1.45.1"

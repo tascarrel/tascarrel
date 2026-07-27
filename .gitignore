@@ -1,4 +1,7 @@
 /target/
+/crates/apps/tascarrel-desktop/dist/
+/crates/apps/tascarrel-desktop/node_modules/
+/crates/apps/tascarrel-desktop/out/
 /.tascarrel/
 /.tascarrel-new/
 /result

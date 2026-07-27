@@ -1,0 +1,12 @@
+allowBuilds:
+  fs-xattr: true
+  macos-alias: true
+blockExoticSubdeps: false
+nodeLinker: hoisted
+overrides:
+  brace-expansion: 5.0.8
+  tar: 7.5.21
+  tmp: 0.2.7
+
+packages:
+  - .

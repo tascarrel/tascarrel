@@ -27,8 +27,9 @@ payload to feed both AArch64 Linux and Apple Silicon macOS releases.
 Linux distributions use a statically linked musl executable; macOS remains one
 executable while linking the platform system libraries.
 
-The native `tascarrel-desktop` Nix package retains Nix store references for use
-with `nix run` and Nix profiles. Build `tascarrel-desktop-appimage` when the
+The `tascarrel-desktop` Nix package combines the Tascarrel server with a thin
+Electron window and installs a freedesktop application entry. Closing the
+window does not stop the server. Build `tascarrel-desktop-appimage` when the
 result must run on Debian, Ubuntu, or another Linux distribution without Nix:
 
 ```console

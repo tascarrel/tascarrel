@@ -256,49 +256,11 @@
           pkgs = pkgsFor system;
           server = distributionPackageFor system;
         in
-        (workspacePackageFor system {
-          cargoPackage = "tascarrel-desktop";
-          binaryName = "tascarrel-desktop";
-          description = "Tascarrel desktop application";
-          nativeBuildInputs = [
-            pkgs.autoPatchelfHook
-            pkgs.pkg-config
-            pkgs.wrapGAppsHook3
-          ];
-          buildInputs = [
-            pkgs.gtk3
-            pkgs.libayatana-appindicator
-            pkgs.libsoup_3
-            pkgs.webkitgtk_4_1
-          ];
-          supportedPlatforms = lib.platforms.linux;
-          doCheck = false;
-        }).overrideAttrs
-          (old: {
-            postInstall = (old.postInstall or "") + ''
-              install -Dm755 ${server}/bin/tascarrel "$out/bin/tascarrel"
-              install -Dm644 \
-                crates/apps/tascarrel-desktop/icons/icon.svg \
-                "$out/share/icons/hicolor/scalable/apps/tascarrel.svg"
-              install -Dm644 /dev/stdin \
-                "$out/share/applications/dev.tascarrel.Tascarrel.desktop" <<'EOF'
-              [Desktop Entry]
-              Type=Application
-              Name=Tascarrel
-              Comment=Local-first agentic development environment
-              Exec=tascarrel-desktop
-              Icon=tascarrel
-              Categories=Development;
-              StartupNotify=true
-              StartupWMClass=tascarrel-desktop
-              EOF
-            '';
-            preFixup = (old.preFixup or "") + ''
-              gappsWrapperArgs+=(
-                --set FONTCONFIG_FILE ${pkgs.fontconfig.out}/etc/fonts/fonts.conf
-              )
-            '';
-          });
+        pkgs.callPackage ./nix/desktop-package.nix {
+          electron = pkgs.electron_42;
+          inherit server;
+          source = self;
+        };
 
       mkTascarrelNixosSystem =
         {
@@ -512,13 +474,7 @@
               ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
                 with pkgs;
                 [
-                  glib
-                  gtk3
-                  libayatana-appindicator
-                  librsvg
-                  libsoup_3
                   openssl
-                  webkitgtk_4_1
                 ]
               )
               ++ [ (nightlyToolchainFor system) ];
