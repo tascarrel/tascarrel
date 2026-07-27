@@ -68,8 +68,10 @@ export function ChatStartScreen({
   const harness = useMemo(
     () => authenticatedHarnesses.find(
       (candidate) => harnessKindKey(candidate.kind) === harnessKey,
+    ) ?? authenticatedHarnesses.find(
+      (candidate) => candidate.kind === settings?.chat?.defaultHarness,
     ) ?? authenticatedHarnesses[0],
-    [authenticatedHarnesses, harnessKey],
+    [authenticatedHarnesses, harnessKey, settings?.chat?.defaultHarness],
   );
 
   useEffect(() => {

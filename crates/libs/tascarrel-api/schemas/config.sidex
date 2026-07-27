@@ -11,9 +11,7 @@
 //! times when opened and whenever they change.
 
 import common::Timestamp
-import chats::ChatModel
-import chats::ChatModelPricing
-import chats::ChatModelSelection
+import chats::{ChatHarnessKind, ChatModel, ChatModelPricing, ChatModelSelection}
 import network::PortMapping
 import workspaces::WorkspaceName
 
@@ -120,6 +118,8 @@ record WorkspaceSettings {
 
 /// Portable preferences for the workspace chat interface.
 record WorkspaceChatSettings {
+    /// Coding harness selected for newly created chats.
+    default_harness?: ChatHarnessKind,
     /// Per-harness model preferences.
     harnesses?: WorkspaceChatHarnessSettings,
     /// Tasci endpoint and model catalog.

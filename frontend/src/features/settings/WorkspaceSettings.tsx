@@ -14,9 +14,11 @@ import { guestApi, hostApi } from "../../api/client.ts";
 import type { chats, config, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
+import { SelectControl } from "../../components/ui/SelectControl.tsx";
 import { SidebarTabs, SidebarTabsPanel } from "../../components/ui/SidebarTabs.tsx";
 import { HarnessConnectionCard } from "../chat/components/HarnessAuthPanel.tsx";
 import { ModelControls } from "../chat/components/ModelControls.tsx";
+import { harnessLabel } from "../chat/model/format.ts";
 import {
   chatModelPreferences,
   preferredDefaultModelSelection,
@@ -88,6 +90,8 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
     </div>
   );
 }
+
+const AUTOMATIC_DEFAULT_HARNESS = "__automatic_default_harness__";
 
 function WorkspaceDangerSettings({ workspace }: { workspace: workspaces.WorkspaceName }) {
   const [confirmationOpen, setConfirmationOpen] = useState(false);
@@ -175,10 +179,7 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
     ) setPendingSettings(undefined);
   }, [configState.value?.settings, pendingSettings]);
 
-  const updatePreferences = async (
-    harness: chats.ChatHarnessKind,
-    preferences: config.WorkspaceChatModelPreferences,
-  ) => {
+  const persistSettings = async (nextSettings: config.WorkspaceSettings) => {
     if (configState.value?.lastSettingsError) {
       setActionError("Fix settings.json before changing settings in the UI.");
       return;
@@ -187,7 +188,6 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
       setActionError("Workspace configuration is not ready yet.");
       return;
     }
-    const nextSettings = withHarnessPreferences(settings, harness, preferences);
     setActionError(undefined);
     setPendingSettings(nextSettings);
     setSavingSettings(true);
@@ -204,6 +204,19 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
       setSavingSettings(false);
     }
   };
+  const updateDefaultHarness = async (value: string) => {
+    const chat = { ...(settings.chat ?? {}) };
+    if (value === AUTOMATIC_DEFAULT_HARNESS) {
+      delete chat.defaultHarness;
+    } else {
+      chat.defaultHarness = value as chats.ChatHarnessKind;
+    }
+    await persistSettings({ ...settings, chat });
+  };
+  const updatePreferences = (
+    harness: chats.ChatHarnessKind,
+    preferences: config.WorkspaceChatModelPreferences,
+  ) => persistSettings(withHarnessPreferences(settings, harness, preferences));
 
   const accountActions = {
     onInstall: async (harness: chats.ChatHarnessKind) => {
@@ -241,6 +254,43 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
           </p>
         </div>
       </div>
+
+      <section
+        aria-labelledby="default-harness-title"
+        className="mb-4 rounded-2xl border border-ui-border bg-surface/60 p-4"
+      >
+        <div className="mb-3">
+          <h3 className="text-xs font-medium text-foreground" id="default-harness-title">
+            Default Harness
+          </h3>
+          <p className="mt-1 max-w-2xl text-[11px] leading-5 text-subtle">
+            Used when starting a chat if connected; otherwise Tascarrel uses the first connected harness. You can choose another harness before submitting.
+          </p>
+        </div>
+        <SelectControl
+          className="w-full sm:max-w-xs"
+          disabled={settingsPending || !harnessState.ready}
+          label="Default harness"
+          options={[
+            { label: "First connected harness", value: AUTOMATIC_DEFAULT_HARNESS },
+            ...(harnessState.value ?? []).map((harness) => ({
+              label: harness.displayName,
+              value: harness.kind,
+            })),
+            ...(settings.chat?.defaultHarness
+              && !(harnessState.value ?? []).some(
+                (harness) => harness.kind === settings.chat?.defaultHarness,
+              )
+              ? [{
+                  label: harnessLabel(settings.chat.defaultHarness),
+                  value: settings.chat.defaultHarness,
+                }]
+              : []),
+          ]}
+          value={settings.chat?.defaultHarness ?? AUTOMATIC_DEFAULT_HARNESS}
+          onChange={(value) => void updateDefaultHarness(value)}
+        />
+      </section>
 
       <div className="grid gap-4">
         {(harnessState.value ?? []).map((harness) =>

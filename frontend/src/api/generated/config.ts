@@ -141,6 +141,9 @@ import * as __schema_workspaces from "./workspaces";
  * Portable preferences for the workspace chat interface.
  */
  export type WorkspaceChatSettings = { /**
+                                            * Coding harness selected for newly created chats.
+                                            */
+                                                        "defaultHarness"?: __schema_chats.ChatHarnessKind, /**
                                             * Per-harness model preferences.
                                             */
                                                         "harnesses"?: WorkspaceChatHarnessSettings, /**
@@ -485,10 +488,10 @@ import * as __schema_workspaces from "./workspaces";
                                             * Destination IP addresses rejected regardless of the default action.
                                             */
                                                         "deny-addresses"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
-                                            * HTTP host patterns admitted by the hostname policy.
+                                            * Host patterns admitted by HTTP Host or TLS SNI policy.
                                             */
                                                         "allow-hosts"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
-                                            * HTTP host patterns rejected by the hostname policy.
+                                            * Host patterns rejected by HTTP Host or TLS SNI policy.
                                             */
                                                         "deny-hosts"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
                                             * Destination TCP ports available to pods.
