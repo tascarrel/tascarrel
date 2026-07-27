@@ -905,15 +905,15 @@ fn default_vm_cpu_count() -> Result<u16> {
 fn default_vm_memory_mib() -> Result<u32> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
-    memory_mib_from_available_bytes(system.available_memory())
+    memory_mib_from_total_bytes(system.total_memory())
 }
 
-fn memory_mib_from_available_bytes(available: u64) -> Result<u32> {
+fn memory_mib_from_total_bytes(total: u64) -> Result<u32> {
     const MIB: u64 = 1024 * 1024;
 
-    let memory_mib = available / 3 / MIB;
+    let memory_mib = total / 3 / MIB;
     if memory_mib == 0 {
-        bail!("available host memory is too small to assign one third to a VM");
+        bail!("total host memory is too small to assign one third to a VM");
     }
     Ok(u32::try_from(memory_mib).unwrap_or(u32::MAX))
 }
@@ -1084,12 +1084,12 @@ mod tests {
     }
 
     #[test]
-    fn default_vm_memory_is_one_third_of_available_memory() {
+    fn default_vm_memory_is_one_third_of_total_memory() {
         assert_eq!(
-            memory_mib_from_available_bytes(24 * 1024 * 1024 * 1024).unwrap(),
+            memory_mib_from_total_bytes(24 * 1024 * 1024 * 1024).unwrap(),
             8192
         );
-        assert!(memory_mib_from_available_bytes(2 * 1024 * 1024).is_err());
+        assert!(memory_mib_from_total_bytes(2 * 1024 * 1024).is_err());
     }
 
     /// Verifies development binary shares contain only real executable files.
