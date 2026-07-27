@@ -17,11 +17,9 @@ server without that payload for development, while the
 Additional assets can be added to the archive without changing the embedding
 scheme.
 
-The release pipeline builds portable payload archives on an x86-64 NixOS
-builder through `guest-payload-x86_64-linux` and
-`guest-payload-aarch64-linux`. The latter uses the builder's AArch64 binfmt
-support only for target derivations; frontend and archive assembly derivations
-remain native x86-64 builds. Each output contains `payload.tar.xz`,
+The release pipeline builds each portable payload archive on a matching native
+runner through `packages.x86_64-linux.guest-payload` and
+`packages.aarch64-linux.guest-payload`. Each output contains `payload.tar.xz`,
 `payload.sha256`, `payload.size`, and `architecture`. The host Cargo build wraps
 the archive in an object for its own target, allowing the same AArch64 guest
 payload to feed both AArch64 Linux and Apple Silicon macOS releases.

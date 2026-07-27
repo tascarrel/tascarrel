@@ -18,7 +18,7 @@ concurrency:
 jobs:
   guest-payload:
     name: Build ${{ matrix.guest_system }} guest payload
-    runs-on: [self-hosted, linux, x64, nixos]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -26,20 +26,30 @@ jobs:
         include:
           - guest_system: x86_64-linux
             architecture: x86_64
+            runner: [self-hosted, linux, x64, nixos]
+            install_nix: false
           - guest_system: aarch64-linux
             architecture: aarch64
+            runner: ubuntu-24.04-arm
+            install_nix: true
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
+      - name: Install Nix
+        if: matrix.install_nix
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+        with:
+          determinate: false
+
       - name: Build guest payload
         run: >-
           nix build
           --print-build-logs
           --out-link result-payload
-          ".#packages.x86_64-linux.guest-payload-${{ matrix.guest_system }}"
+          ".#packages.${{ matrix.guest_system }}.guest-payload"
 
       - name: Stage and verify guest payload
         env:
