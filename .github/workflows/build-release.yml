@@ -198,6 +198,18 @@ jobs:
               echo "release binary has a dynamic program interpreter" >&2
               exit 1
             fi
+          else
+            for executable in "$BINARY" "$CLIENT"; do
+              non_system_dependencies=$(
+                otool -L "$executable" |
+                  awk 'NR > 1 && $1 !~ "^/usr/lib/" && $1 !~ "^/System/Library/" { print $1 }'
+              )
+              if [ -n "$non_system_dependencies" ]; then
+                echo "$executable depends on non-system dynamic libraries:" >&2
+                echo "$non_system_dependencies" >&2
+                exit 1
+              fi
+            done
           fi
           "$BINARY" --version
 
