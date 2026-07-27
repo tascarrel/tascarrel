@@ -451,6 +451,7 @@ fn workspace_network_from_api(
             .iter()
             .map(|secret| WorkspaceSecretInjection {
                 host: secret.host.to_string(),
+                methods: secret.methods.iter().map(ToString::to_string).collect(),
                 header: secret.header.as_ref().map(ToString::to_string),
                 placeholder: secret.placeholder.as_ref().map(ToString::to_string),
                 secret: secret.secret.to_string(),
@@ -507,6 +508,7 @@ pub struct WorkspaceHostPort {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSecretInjection {
     pub host: String,
+    pub methods: Vec<String>,
     pub header: Option<String>,
     pub placeholder: Option<String>,
     pub secret: String,
@@ -927,6 +929,7 @@ mod tests {
              host-ports = [3000, \"5432:15432\"]\n\
              [secrets.providers.project]\nkind = \"sops\"\n\
              [[network.secret-injection]]\nhost = \"api.example\"\n\
+             methods = [\"GET\", \"HEAD\"]\n\
              secret = \"project.TOKEN\"\n",
         )
         .unwrap();
@@ -946,6 +949,7 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(parsed.network.secret_injection[0].methods, ["GET", "HEAD"]);
         assert!(parsed.network.secret_injection[0].header.is_none());
         assert_eq!(parsed.network.secret_injection[0].secret, "project.TOKEN");
     }

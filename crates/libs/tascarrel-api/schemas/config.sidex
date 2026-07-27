@@ -444,6 +444,9 @@ variant WorkspaceHostPort {
 record WorkspaceSecretInjectionConfig {
     /// HTTP host pattern whose matching requests receive the secret.
     host: string,
+    /// HTTP methods that may be sent to matching hosts.
+    /// Requests using other methods are rejected by the host proxy.
+    methods: [string],
     /// Header inspected for the placeholder, or every eligible header when absent.
     header?: string,
     /// Request value replaced by the secret before forwarding.

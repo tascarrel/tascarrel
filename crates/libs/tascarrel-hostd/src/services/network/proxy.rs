@@ -2,7 +2,8 @@
 //!
 //! [`HttpProxy`] resolves admitted hostnames on the host. It relays TLS
 //! unchanged unless the connection's SNI matches an HTTPS secret-injection
-//! rule, in which case it terminates TLS and validates each HTTP host.
+//! rule, in which case it terminates TLS and enforces the configured HTTP host
+//! and method policy before injecting secrets.
 
 use std::convert::Infallible;
 use std::io;
@@ -366,8 +367,15 @@ impl HttpProxy {
         if context.tls_host.as_deref().is_some_and(|sni| sni != host) {
             return Err(proxy_error("HTTP Host does not match TLS SNI"));
         }
-        self.inject_secrets(request.headers_mut(), &host, workspace_name, secrets)
-            .await?;
+        let method = request.method().clone();
+        self.inject_secrets(
+            request.headers_mut(),
+            &host,
+            &method,
+            workspace_name,
+            secrets,
+        )
+        .await?;
         strip_hop_by_hop(request.headers_mut(), wants_upgrade);
         *request.uri_mut() = request
             .uri()
@@ -448,11 +456,19 @@ impl HttpProxy {
         &self,
         headers: &mut hyper::HeaderMap,
         host: &str,
+        method: &Method,
         workspace_name: &WorkspaceName,
         secrets: &SecretsService,
     ) -> ProxyResult<()> {
+        if self.policy.injects_secret_for_host(host)
+            && !self.policy.allows_secret_injection_method(host, method)
+        {
+            return Err(proxy_error(format!(
+                "HTTP method {method} is denied for secret-injection host {host:?}"
+            )));
+        }
         for rule in &self.policy.secret_injection {
-            if !NetworkPolicy::rule_matches(&rule.host, host) {
+            if !NetworkPolicy::rule_matches(&rule.host, host) || !rule.methods.contains(method) {
                 continue;
             }
             let secret = secrets
@@ -908,6 +924,7 @@ mod tests {
              [network]\ndefault = 'deny'\nallow-local = true\n\
              allow-hosts = ['localhost']\n\
              [[network.secret-injection]]\nhost = 'api.example'\n\
+             methods = ['GET']\n\
              secret = 'project.API_TOKEN'\n",
         )
         .unwrap();
@@ -1000,10 +1017,10 @@ mod tests {
             .unwrap();
     }
 
-    /// Exercises HTTPS interception, host-side SOPS resolution, and header
-    /// injection across complete client, proxy, and upstream connections.
+    /// Exercises HTTPS secret injection for an admitted method and host-side
+    /// denial for a method outside the rule.
     #[tokio::test]
-    async fn https_proxy_injects_sops_secret_into_upstream_request() {
+    async fn https_proxy_enforces_secret_injection_methods() {
         install_crypto_provider();
         let directory = tempfile::tempdir().unwrap();
         let workspaces = directory.path().join("workspaces");
@@ -1023,6 +1040,7 @@ mod tests {
             "[secrets.providers.project]\nkind = 'sops'\n\
              [network]\nallow-local = true\n\
              [[network.secret-injection]]\nhost = 'localhost'\n\
+             methods = ['GET']\n\
              header = 'authorization'\nsecret = 'project.API_TOKEN'\n",
         )
         .unwrap();
@@ -1060,10 +1078,50 @@ mod tests {
         });
 
         let proxy = HttpProxy::new(policy, Some(Arc::clone(&authority)), Duration::from_secs(5));
+        let (status, body) = send_intercepted_https_request(
+            proxy.clone(),
+            &authority,
+            upstream_port,
+            workspace_name.clone(),
+            secrets.clone(),
+            Method::GET,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "Bearer super-secret");
+        timeout(Duration::from_secs(5), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (status, body) = send_intercepted_https_request(
+            proxy,
+            &authority,
+            upstream_port,
+            workspace_name,
+            secrets,
+            Method::POST,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.starts_with(
+            b"Tascarrel network denied: HTTP proxy failed: HTTP method POST is denied",
+        ));
+    }
+
+    /// Sends one request through an intercepting HTTPS proxy and returns its
+    /// fully collected response.
+    async fn send_intercepted_https_request(
+        proxy: HttpProxy,
+        authority: &Arc<WorkspaceAuthority>,
+        upstream_port: u16,
+        workspace_name: WorkspaceName,
+        secrets: SecretsService,
+        method: Method,
+    ) -> (StatusCode, Bytes) {
         let (client_io, proxy_io) = duplex(256 * 1024);
         let proxy_task =
             tokio::spawn(proxy.serve_https(proxy_io, upstream_port, workspace_name, secrets));
-
         let mut roots = RootCertStore::empty();
         roots.add(authority.certificate_der()).unwrap();
         let mut client_config = ClientConfig::builder()
@@ -1080,19 +1138,16 @@ mod tests {
         let (mut sender, connection) = client_http1::handshake(TokioIo::new(tls)).await.unwrap();
         let client_connection = tokio::spawn(connection);
         let request = Request::builder()
+            .method(method)
             .uri("/")
             .header(HOST, "localhost")
             .header(AUTHORIZATION, "Bearer tascarrel-secret:api-token")
             .body(Empty::<Bytes>::new())
             .unwrap();
         let response = sender.send_request(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
-            "Bearer super-secret"
-        );
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
         drop(sender);
-
         timeout(Duration::from_secs(5), client_connection)
             .await
             .unwrap()
@@ -1103,10 +1158,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        timeout(Duration::from_secs(5), upstream_task)
-            .await
-            .unwrap()
-            .unwrap();
+        (status, body)
     }
 
     /// Installs the process-wide provider when another TLS test has not.

@@ -517,6 +517,10 @@ import * as __schema_workspaces from "./workspaces";
                                             * HTTP host pattern whose matching requests receive the secret.
                                             */
                                                         "host": __sidex_types.builtins.String, /**
+                                            * HTTP methods that may be sent to matching hosts.
+                                            * Requests using other methods are rejected by the host proxy.
+                                            */
+                                                        "methods": __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
                                             * Header inspected for the placeholder, or every eligible header when absent.
                                             */
                                                         "header"?: __sidex_types.builtins.String, /**

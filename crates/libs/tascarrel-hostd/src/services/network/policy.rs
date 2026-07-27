@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::Path;
 
+use hyper::Method;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_api::types::config as config_api;
@@ -52,6 +53,7 @@ pub(crate) struct HostPortMapping {
 #[derive(Clone)]
 pub struct SecretInjection {
     pub host: String,
+    pub methods: Vec<Method>,
     pub header: Option<String>,
     pub placeholder: String,
     pub reference: SecretReference,
@@ -62,6 +64,7 @@ impl std::fmt::Debug for SecretInjection {
         formatter
             .debug_struct("SecretInjection")
             .field("host", &self.host)
+            .field("methods", &self.methods)
             .field("header", &self.header)
             .field("placeholder", &self.placeholder)
             .field("reference", &"[SECRET REFERENCE]")
@@ -155,6 +158,22 @@ impl NetworkPolicy {
         let mut secret_injection = Vec::with_capacity(rules.len());
         for rule in rules {
             validate_host_pattern(&rule.host)?;
+            let methods = rule
+                .methods
+                .iter()
+                .map(|method| {
+                    Method::from_bytes(method.as_bytes()).map_err(|_| {
+                        invalid_policy(format!(
+                            "invalid HTTP method {method:?} in secret-injection rule"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if methods.is_empty() {
+                return Err(invalid_policy(
+                    "HTTP secret-injection methods must not be empty",
+                ));
+            }
             let reference = SecretReference::parse(rule.secret.as_ref())
                 .map_err(|error| invalid_policy(error.to_string()))?;
             let placeholder = rule
@@ -181,6 +200,7 @@ impl NetworkPolicy {
             }
             secret_injection.push(SecretInjection {
                 host: rule.host.to_ascii_lowercase(),
+                methods,
                 header: rule.header.map(|header| header.to_ascii_lowercase()),
                 placeholder,
                 reference,
@@ -242,6 +262,14 @@ impl NetworkPolicy {
         self.secret_injection
             .iter()
             .any(|rule| host_matches(&rule.host, host))
+    }
+
+    /// Returns whether a matching injection rule admits an HTTP method.
+    #[must_use]
+    pub(crate) fn allows_secret_injection_method(&self, host: &str, method: &Method) -> bool {
+        self.secret_injection
+            .iter()
+            .any(|rule| host_matches(&rule.host, host) && rule.methods.contains(method))
     }
 
     #[must_use]
@@ -504,10 +532,10 @@ mod tests {
         assert_eq!(policy.https_ports, [443]);
     }
 
-    /// Verifies explicit ports replace defaults and secret placeholders remain
-    /// optional while legacy keys are rejected.
+    /// Verifies explicit ports and secret-injection methods are parsed while
+    /// optional placeholders may be omitted and legacy keys are rejected.
     #[test]
-    fn config_can_replace_allowed_ports_and_omit_injection_header() {
+    fn config_parses_explicit_ports_and_secret_injection_methods() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         fs::write(
@@ -515,6 +543,7 @@ mod tests {
             "[secrets.providers.project]\nkind = 'sops'\n\
              [network]\nhost-ports = [3000, '5432:15432']\nallow-ports = [22, 8443]\n\
              [[network.secret-injection]]\nhost = 'api.example'\n\
+             methods = ['GET', 'HEAD']\n\
              secret = 'project.API_TOKEN'\n",
         )
         .unwrap();
@@ -523,9 +552,15 @@ mod tests {
         assert_eq!(network.host_ports.as_ref().unwrap().len(), 2);
         assert_eq!(network.allow_ports.unwrap().as_ref(), [22, 8443]);
         let secret_injection = network.secret_injection.unwrap();
+        assert_eq!(secret_injection[0].methods.as_ref(), ["GET", "HEAD"]);
         assert!(secret_injection[0].header.is_none());
         assert!(secret_injection[0].placeholder.is_none());
         assert_eq!(infer_placeholder("API_TOKEN"), "tascarrel-secret:api-token");
+        let policy = NetworkPolicy::load(&config).unwrap();
+        assert_eq!(
+            policy.secret_injection[0].methods,
+            [Method::GET, Method::HEAD]
+        );
 
         fs::write(&config, "[network]\nhost-ports = [3000, '5432:15432']\n").unwrap();
         let policy = NetworkPolicy::load(&config).unwrap();
@@ -545,9 +580,29 @@ mod tests {
         fs::write(
             &config,
             "[network]\n[[network.secret-injection]]\nhost = 'api.example'\n\
-             placeholder = 'x'\nsecret-env = 'TASCARREL_TOKEN'\n",
+             methods = ['GET']\nplaceholder = 'x'\nsecret-env = 'TASCARREL_TOKEN'\n",
         )
         .unwrap();
         assert!(load_config_file(&config, DEFAULT_MAX_CONFIG_BYTES).is_err());
+    }
+
+    /// Verifies each secret-injection rule explicitly admits at least one
+    /// syntactically valid HTTP method.
+    #[test]
+    fn secret_injection_requires_valid_methods() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let prefix = "[secrets.providers.project]\nkind = 'sops'\n\
+                      [network]\n[[network.secret-injection]]\nhost = 'api.example'\n\
+                      secret = 'project.API_TOKEN'\n";
+
+        fs::write(&config, prefix).unwrap();
+        assert!(load_config_file(&config, DEFAULT_MAX_CONFIG_BYTES).is_err());
+
+        fs::write(&config, format!("{prefix}methods = []\n")).unwrap();
+        assert!(NetworkPolicy::load(&config).is_err());
+
+        fs::write(&config, format!("{prefix}methods = ['NOT VALID']\n")).unwrap();
+        assert!(NetworkPolicy::load(&config).is_err());
     }
 }

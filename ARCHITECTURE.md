@@ -322,7 +322,9 @@ the name or opening an external socket.
 On configured HTTPS ports, `hostd` admits connections using the normalized TLS
 SNI and resolves that server name itself before relaying TLS unchanged. It
 terminates TLS only when an HTTPS secret-injection rule matches the SNI. In that
-case, every forwarded HTTP host must match the SNI.
+case, every forwarded HTTP host must match the SNI. Each secret-injection rule
+also lists the HTTP methods it admits. When a host matches one or more rules,
+`hostd` rejects the request unless at least one matching rule admits its method.
 
 The guest firewall also denies direct pod-to-guest and pod-to-pod traffic unless
 Tascarrel provides an explicit path. A pod reaches configured services on the
@@ -341,8 +343,9 @@ secret becomes visible to a workspace only through an explicit operation:
   the resulting plaintext environment is sent to `guestd` and inherited by
   pod processes.
 - HTTP secret injection is performed by the host proxy for matching requests,
-  after the request has left the pod; the value is not placed in the pod's
-  environment or filesystem by Tascarrel.
+  after the request has left the pod; each rule restricts the admitted HTTP
+  methods, and the value is not placed in the pod's environment or filesystem
+  by Tascarrel.
 - Host-facing secret management actions may reveal or mutate values for an
   authorized client.
 
