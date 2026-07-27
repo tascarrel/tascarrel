@@ -14,11 +14,11 @@ let
     ;
   cfg = config.services.tascarrel-guest;
   system = pkgs.stdenv.hostPlatform.system;
-  emulatedSystem =
+  emulatedSystems =
     if system == "x86_64-linux" then
-      "aarch64-linux"
+      [ "aarch64-linux" ]
     else if system == "aarch64-linux" then
-      "x86_64-linux"
+      [ ]
     else
       throw "Tascarrel guests do not support ${system}";
   dataDiskDevice = "/dev/disk/by-id/virtio-tascarrel-data";
@@ -327,7 +327,7 @@ in
 
     boot = {
       binfmt = {
-        emulatedSystems = [ emulatedSystem ];
+        inherit emulatedSystems;
         preferStaticEmulators = true;
       };
       supportedFilesystems = [
