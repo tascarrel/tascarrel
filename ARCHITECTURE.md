@@ -72,9 +72,11 @@ or Git traffic.
 
 ## Security Model
 
-The boundaries in this section are security goals, not support guarantees.
-Tascarrel remains experimental and unsupported as described in the
-[security policy](SECURITY.md).
+> [!WARNING]
+> **Tascarrel is under active development.** Things may break, and its security
+> properties have not been independently audited.
+
+See the [security policy](SECURITY.md) for vulnerability reporting.
 
 There are two different isolation claims:
 

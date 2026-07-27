@@ -4,13 +4,11 @@
 > **Do not report security vulnerabilities through GitHub issues or any other
 > public medium.**
 
-Tascarrel is experimental software provided without support. No release, branch,
-or version receives guaranteed security updates, and Tascarrel makes no
-commitment to remain compatible with existing installations or configurations.
-Do not rely on Tascarrel for production workloads or as a control protecting
-sensitive systems or data.
+> [!WARNING]
+> **Tascarrel is under active development.** Things may break, and its security
+> properties have not been independently audited.
 
-We nevertheless welcome private reports of potential security vulnerabilities.
+We welcome private reports of potential security vulnerabilities.
 
 > [!TIP]
 > Before reporting a vulnerability, read the

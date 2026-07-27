@@ -30,10 +30,9 @@ processes, and network namespace, so agents working in parallel do not trip over
 one another. The UI keeps you on top of their sessions, shows what needs your
 attention, and lets you review changes before publishing them through Git.
 
-> [!CAUTION]
-> **Tascarrel is experimental.** It may change or break without notice. Do not
-> entrust it with important or confidential data. Use it only with data you can
-> afford to lose or leak.
+> [!WARNING]
+> **Tascarrel is under active development.** Things may break, and its security
+> properties have not been independently audited.
 
 ## Highlights
 
