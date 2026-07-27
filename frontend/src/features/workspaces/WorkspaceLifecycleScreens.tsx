@@ -31,7 +31,9 @@ export function WorkspaceLifecycleScreen({
   }
   if (screen === "starting") return <WorkspaceStartingScreen workspace={workspace} />;
   if (screen === "stopping") return <WorkspaceStoppingScreen workspace={workspace} />;
-  if (screen === "failed") return <WorkspaceFailedScreen workspace={workspace} />;
+  if (screen === "failed") {
+    return <WorkspaceFailedScreen workspace={workspace} onStart={onStart} />;
+  }
   return <WorkspaceDestroyingScreen />;
 }
 
@@ -42,31 +44,17 @@ export function WorkspaceStoppedScreen({
   workspace: workspaces.Workspace;
   onStart: () => Promise<void>;
 }) {
-  const [starting, setStarting] = useState(false);
-  const [error, setError] = useState<string>();
-  const canStart = workspace.state.status === "Stopped" && !starting;
-  const start = async () => {
-    if (!canStart) return;
-    setStarting(true);
-    setError(undefined);
-    try {
-      await onStart();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      setStarting(false);
-    }
-  };
-
   return (
     <WorkspaceScreenFrame
       icon={<Power aria-hidden="true" className="size-4" />}
       title="Workspace Stopped"
     >
-      <Button variant="primary" disabled={!canStart} onClick={() => void start()}>
-        {starting ? <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" /> : null}
-        {starting ? "Starting…" : "Start workspace"}
-      </Button>
-      {error ? <p className="mt-3 text-xs text-red-200" role="alert">{error}</p> : null}
+      <WorkspaceStartButton
+        enabled={workspace.state.status === "Stopped"}
+        label="Start workspace"
+        pendingLabel="Starting…"
+        onStart={onStart}
+      />
     </WorkspaceScreenFrame>
   );
 }
@@ -93,7 +81,13 @@ export function WorkspaceStoppingScreen({ workspace }: { workspace: workspaces.W
   );
 }
 
-export function WorkspaceFailedScreen({ workspace }: { workspace: workspaces.Workspace }) {
+export function WorkspaceFailedScreen({
+  workspace,
+  onStart,
+}: {
+  workspace: workspaces.Workspace;
+  onStart: () => Promise<void>;
+}) {
   const failure = workspace.state.status === "Failed"
     ? workspace.state.message
     : "No failure is currently recorded for this workspace.";
@@ -108,6 +102,14 @@ export function WorkspaceFailedScreen({ workspace }: { workspace: workspaces.Wor
       <p className="mx-auto max-w-xl text-xs leading-5 text-red-200" role="alert">
         {failure}
       </p>
+      <div className="mt-4">
+        <WorkspaceStartButton
+          enabled={workspace.state.status === "Failed"}
+          label="Restart workspace"
+          pendingLabel="Restarting…"
+          onStart={onStart}
+        />
+      </div>
     </WorkspaceScreenFrame>
   );
 }
@@ -119,6 +121,43 @@ export function WorkspaceDestroyingScreen() {
       icon={<Trash2 aria-hidden="true" className="size-4" />}
       title="Destroying Workspace"
     />
+  );
+}
+
+function WorkspaceStartButton({
+  enabled,
+  label,
+  pendingLabel,
+  onStart,
+}: {
+  enabled: boolean;
+  label: string;
+  pendingLabel: string;
+  onStart: () => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  const canStart = enabled && !pending;
+  const start = async () => {
+    if (!canStart) return;
+    setPending(true);
+    setError(undefined);
+    try {
+      await onStart();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setPending(false);
+    }
+  };
+
+  return (
+    <>
+      <Button variant="primary" disabled={!canStart} onClick={() => void start()}>
+        {pending ? <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" /> : null}
+        {pending ? pendingLabel : label}
+      </Button>
+      {error ? <p className="mt-3 text-xs text-red-200" role="alert">{error}</p> : null}
+    </>
   );
 }
 
