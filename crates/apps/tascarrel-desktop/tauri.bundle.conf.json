@@ -1,5 +1,10 @@
 {
   "bundle": {
-    "externalBin": ["binaries/tascarrel"]
+    "externalBin": ["binaries/tascarrel"],
+    "linux": {
+      "rpm": {
+        "compression": { "type": "none" }
+      }
+    }
   }
 }
