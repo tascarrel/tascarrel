@@ -82,8 +82,20 @@ pub enum PodGitError {
 /// Supplies the current repository declarations for a managed workspace.
 #[async_trait::async_trait]
 pub trait RepositoryConfigProvider: Send + Sync {
-    /// Refreshes workspace input and returns its configured repositories.
-    async fn repositories(&self) -> Result<BTreeMap<String, WorkspaceRepository>, RemoteError>;
+    /// Refreshes workspace input and returns one immutable configuration view.
+    async fn repository_config(&self) -> Result<RepositoryConfigSnapshot, RemoteError>;
+}
+
+/// Repository declarations, image input, and overlay captured from one
+/// workspace-input generation.
+#[derive(Clone, Debug)]
+pub struct RepositoryConfigSnapshot {
+    /// Repository declarations loaded from the captured generation.
+    pub repositories: BTreeMap<String, WorkspaceRepository>,
+    /// Image definition directory from the same generation, when host-backed.
+    pub image_definition_directory: Option<PathBuf>,
+    /// Workspace overlay directory from the same generation, when host-backed.
+    pub workspace_overlay_directory: Option<PathBuf>,
 }
 
 /// Reconciles the golden workspace and image-owned workspace seeds.
@@ -106,7 +118,8 @@ pub(crate) struct RepositoryPreparation {
     manager: Arc<GuestRepositoryManager>,
     repositories: Arc<BTreeMap<String, WorkspaceRepository>>,
     versions: Arc<BTreeMap<String, RepositoryCacheVersion>>,
-    refreshed_input: bool,
+    image_definition_directory: Option<PathBuf>,
+    workspace_overlay_directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,10 +176,16 @@ impl RepositoryPreparation {
     /// Creates operation-scoped repository preparation state.
     pub(crate) fn new_versioned(
         manager: Arc<GuestRepositoryManager>,
-        repositories: BTreeMap<String, WorkspaceRepository>,
+        config: RepositoryConfigSnapshot,
         versions: impl IntoIterator<Item = RepositoryCacheVersion>,
-        refreshed_input: bool,
     ) -> Result<Self, RemoteError> {
+        let RepositoryConfigSnapshot {
+            repositories,
+            image_definition_directory,
+            workspace_overlay_directory,
+        } = config;
+        let workspace_overlay_directory =
+            workspace_overlay_directory.or_else(|| manager.overlay.clone());
         let mut by_path = BTreeMap::new();
         for version in versions {
             if version.version == 0
@@ -189,20 +208,25 @@ impl RepositoryPreparation {
             manager,
             repositories: Arc::new(repositories),
             versions: Arc::new(by_path),
-            refreshed_input,
+            image_definition_directory,
+            workspace_overlay_directory,
         })
     }
 
-    /// Reports whether repository capture already refreshed image inputs for
-    /// this operation.
-    pub(crate) fn input_was_refreshed(&self) -> bool {
-        self.refreshed_input
+    /// Returns the immutable image input captured with the repositories.
+    pub(crate) fn image_definition_directory(&self) -> Option<&Path> {
+        self.image_definition_directory.as_deref()
     }
 
     /// Reconciles the golden workspace used by a new image setup run.
     pub(crate) async fn reconcile_golden(&self, image: &ImageId) -> Result<(), RemoteError> {
         self.manager
-            .reconcile_golden_versioned(image, &self.repositories, &self.versions)
+            .reconcile_golden_versioned(
+                image,
+                &self.repositories,
+                &self.versions,
+                self.workspace_overlay_directory.as_deref(),
+            )
             .await
     }
 
@@ -390,14 +414,18 @@ impl GuestRepositoryManager {
     pub(crate) async fn capture_repositories(
         &self,
         config_provider: Option<&dyn RepositoryConfigProvider>,
-    ) -> Result<BTreeMap<String, WorkspaceRepository>, RemoteError> {
-        let repositories = if let Some(provider) = config_provider {
-            provider.repositories().await?
+    ) -> Result<RepositoryConfigSnapshot, RemoteError> {
+        let config = if let Some(provider) = config_provider {
+            provider.repository_config().await?
         } else {
-            self.repositories.read().await.clone()
+            RepositoryConfigSnapshot {
+                repositories: self.repositories.read().await.clone(),
+                image_definition_directory: None,
+                workspace_overlay_directory: None,
+            }
         };
-        *self.repositories.write().await = repositories.clone();
-        Ok(repositories)
+        *self.repositories.write().await = config.repositories.clone();
+        Ok(config)
     }
 
     /// Creates a workspace seed reconciler and its remote-helper directory.
@@ -464,6 +492,7 @@ impl GuestRepositoryManager {
         image: &ImageId,
         repositories: &BTreeMap<String, WorkspaceRepository>,
         versions: &BTreeMap<String, RepositoryCacheVersion>,
+        overlay: Option<&Path>,
     ) -> Result<(), RemoteError> {
         let _operation = self.reconciliation.lock().await;
         let image = self.store.image(image).map_err(remote_error)?;
@@ -484,7 +513,7 @@ impl GuestRepositoryManager {
                 image.config(),
                 repositories,
                 versions,
-                true,
+                overlay,
             )
             .await?;
             self.store
@@ -533,7 +562,7 @@ impl GuestRepositoryManager {
                 image.config(),
                 repositories,
                 versions,
-                false,
+                None,
             )
             .await?;
             self.store
@@ -552,7 +581,7 @@ impl GuestRepositoryManager {
         image: &ImageConfig,
         repositories: &BTreeMap<String, WorkspaceRepository>,
         versions: &BTreeMap<String, RepositoryCacheVersion>,
-        apply_overlay: bool,
+        overlay: Option<&Path>,
     ) -> Result<()> {
         let managed = managed_versioned_repositories(workspace)?;
         for path in managed
@@ -615,7 +644,7 @@ impl GuestRepositoryManager {
         self.apply_versioned_reconciliation(workspace, image, work)
             .await?;
 
-        if apply_overlay && let Some(overlay) = &self.overlay {
+        if let Some(overlay) = overlay {
             validate_overlay(overlay)?;
             let source = overlay.join(".");
             let output = Command::new(&self.cp)

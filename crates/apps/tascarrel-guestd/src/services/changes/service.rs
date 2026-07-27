@@ -846,11 +846,16 @@ async fn repository_declarations(
         Some(repositories) => repositories
             .capture_repositories(repository_config)
             .await
+            .map(|config| config.repositories)
             .map_err(|error| internal(format!("failed to read repository configuration: {error}"))),
         None => match repository_config {
-            Some(repository_config) => repository_config.repositories().await.map_err(|error| {
-                internal(format!("failed to read repository configuration: {error}"))
-            }),
+            Some(repository_config) => repository_config
+                .repository_config()
+                .await
+                .map(|config| config.repositories)
+                .map_err(|error| {
+                    internal(format!("failed to read repository configuration: {error}"))
+                }),
             None => Ok(BTreeMap::new()),
         },
     }

@@ -60,8 +60,11 @@ use crate::services::processes::ProcessSupervisor;
 /// no-op implementation.
 #[async_trait]
 pub trait ImageInputRefresh: Send + Sync {
-    /// Publishes the latest image input at the service's configured path.
-    async fn refresh_image_input(&self) -> Result<(), Report<ImageServiceError>>;
+    /// Publishes the latest image input and returns its immutable directory.
+    ///
+    /// External development mode returns `None` to use the service's
+    /// configured static directory.
+    async fn refresh_image_input(&self) -> Result<Option<PathBuf>, Report<ImageServiceError>>;
 }
 
 /// Owns workspace image input inspection, building, storage, and durable state.
@@ -195,14 +198,17 @@ impl ImageService {
         input_refresh: &dyn ImageInputRefresh,
         repositories: Option<RepositoryPreparation>,
     ) -> Result<api::BuildImageOutput, Report<ImageServiceError>> {
-        if !repositories
-            .as_ref()
-            .is_some_and(RepositoryPreparation::input_was_refreshed)
-        {
-            input_refresh.refresh_image_input().await?;
-        }
-        self.build_current_input(pods, processes, network_service, repositories)
-            .await
+        let input_directory = self
+            .input_directory(input_refresh, repositories.as_ref())
+            .await?;
+        self.build_current_input(
+            pods,
+            processes,
+            network_service,
+            repositories,
+            input_directory,
+        )
+        .await
     }
 
     async fn build_current_input(
@@ -211,6 +217,7 @@ impl ImageService {
         processes: &ProcessSupervisor,
         network_service: Arc<GuestNetworkService>,
         repositories: Option<RepositoryPreparation>,
+        input_directory: PathBuf,
     ) -> Result<api::BuildImageOutput, Report<ImageServiceError>> {
         if lock(&self.inner.images)
             .values()
@@ -218,9 +225,8 @@ impl ImageService {
         {
             return Err(invalid_request("an image is already generating"));
         }
-        let directory = self.inner.image_definition_directory.clone();
         let limits = self.inner.input_limits;
-        let input = task::spawn_blocking(move || snapshot(&directory, limits))
+        let input = task::spawn_blocking(move || snapshot(&input_directory, limits))
             .await
             .map_err(|error| internal(format!("fingerprint image input task failed: {error}")))?
             .map_err(|error| {
@@ -321,14 +327,11 @@ impl ImageService {
         input_refresh: &dyn ImageInputRefresh,
         repositories: Option<RepositoryPreparation>,
     ) -> Result<ImageForPod, Report<ImageServiceError>> {
-        if !repositories
-            .as_ref()
-            .is_some_and(RepositoryPreparation::input_was_refreshed)
-        {
-            input_refresh.refresh_image_input().await?;
-        }
+        let input_directory = self
+            .input_directory(input_refresh, repositories.as_ref())
+            .await?;
         loop {
-            let input = self.snapshot_input().await?;
+            let input = self.snapshot_input(input_directory.clone()).await?;
             let input_sha256 = api_input(&input).sha256;
             let current = {
                 let images = lock(&self.inner.images);
@@ -367,6 +370,7 @@ impl ImageService {
                     processes,
                     Arc::clone(&network_service),
                     repositories.clone(),
+                    input_directory.clone(),
                 )
                 .await
             {
@@ -438,9 +442,28 @@ impl ImageService {
             .map_err(|error| internal(format!("update image workspace seed: {error}")))
     }
 
-    /// Captures the current host-backed image input.
-    async fn snapshot_input(&self) -> Result<ImageInputSnapshot, Report<ImageServiceError>> {
-        let directory = self.inner.image_definition_directory.clone();
+    /// Resolves one stable image definition directory for the operation.
+    async fn input_directory(
+        &self,
+        input_refresh: &dyn ImageInputRefresh,
+        repositories: Option<&RepositoryPreparation>,
+    ) -> Result<PathBuf, Report<ImageServiceError>> {
+        if let Some(directory) =
+            repositories.and_then(RepositoryPreparation::image_definition_directory)
+        {
+            return Ok(directory.to_owned());
+        }
+        Ok(input_refresh
+            .refresh_image_input()
+            .await?
+            .unwrap_or_else(|| self.inner.image_definition_directory.clone()))
+    }
+
+    /// Captures one immutable host-backed image input.
+    async fn snapshot_input(
+        &self,
+        directory: PathBuf,
+    ) -> Result<ImageInputSnapshot, Report<ImageServiceError>> {
         let limits = self.inner.input_limits;
         task::spawn_blocking(move || snapshot(&directory, limits))
             .await

@@ -1337,22 +1337,36 @@ fn reduce_workspace_list(list: &mut api::WorkspaceList, mutation: &api::Workspac
 
 fn create_default_workspace(root: &Path, name: &WorkspaceName) -> Result<()> {
     let target = root.join(name.as_str());
-    std::fs::create_dir(&target)
-        .with_context(|| format!("create workspace {}", target.display()))?;
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
-    let mut cleanup = WorkspaceCreationCleanup(Some(target.clone()));
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => bail!("workspace {} already exists", target.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect workspace {}", target.display()));
+        }
+    }
+    let staging_name = format!(".workspace-{}-{}", name.as_str(), uuid::Uuid::new_v4());
+    let staging = root.join(&staging_name);
+    std::fs::create_dir(&staging).with_context(|| {
+        format!(
+            "failed to create workspace staging directory {}",
+            staging.display()
+        )
+    })?;
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
+    let mut cleanup = WorkspaceCreationCleanup(Some(staging.clone()));
     write_new_workspace_file(
-        &target.join("config.toml"),
+        &staging.join("config.toml"),
         DEFAULT_WORKSPACE_CONFIG.as_bytes(),
     )?;
-    let image = target.join("image");
+    let image = staging.join("image");
     std::fs::create_dir(&image)?;
     std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755))?;
     write_new_workspace_file(
         &image.join("Dockerfile"),
         DEFAULT_WORKSPACE_DOCKERFILE.as_bytes(),
     )?;
-    let agents = target.join("agents");
+    let agents = staging.join("agents");
     let skills = agents.join("skills");
     std::fs::create_dir(&agents)?;
     std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755))?;
@@ -1362,9 +1376,27 @@ fn create_default_workspace(root: &Path, name: &WorkspaceName) -> Result<()> {
     sync_directory(&skills)?;
     sync_directory(&agents)?;
     sync_directory(&image)?;
-    sync_directory(&target)?;
+    sync_directory(&staging)?;
     sync_directory(root)?;
+    let root_directory = File::open(root)
+        .with_context(|| format!("failed to open workspace root {}", root.display()))?;
+    rustix::fs::renameat_with(
+        &root_directory,
+        staging_name,
+        &root_directory,
+        name.as_str(),
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(io::Error::from)
+    .with_context(|| {
+        format!(
+            "failed to publish workspace {} from {}",
+            target.display(),
+            staging.display()
+        )
+    })?;
     cleanup.0 = None;
+    sync_directory(root)?;
     Ok(())
 }
 
@@ -2988,6 +3020,7 @@ fn bounded_detail(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::symlink;
+    use std::sync::Barrier;
 
     use tempfile::tempdir;
 
@@ -3277,6 +3310,51 @@ mod tests {
 
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("host-owned tascarrel.guest-instance-id"));
+    }
+
+    /// Verifies racing creators expose exactly one complete workspace and no
+    /// construction directory.
+    #[test]
+    fn concurrent_workspace_creation_is_published_atomically() {
+        const CREATORS: usize = 8;
+
+        let directory = tempdir().unwrap();
+        let root = Arc::new(directory.path().to_owned());
+        let workspace = WorkspaceName::new("demo").unwrap();
+        let barrier = Arc::new(Barrier::new(CREATORS));
+        let creators = (0..CREATORS)
+            .map(|_| {
+                let root = Arc::clone(&root);
+                let workspace = workspace.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    create_default_workspace(&root, &workspace)
+                })
+            })
+            .collect::<Vec<_>>();
+        let successes = creators
+            .into_iter()
+            .map(|creator| creator.join().unwrap())
+            .filter(Result::is_ok)
+            .count();
+
+        assert_eq!(successes, 1);
+        assert_eq!(
+            configured_workspace_names(&root).unwrap(),
+            vec![workspace.clone()]
+        );
+        let published = root.join(workspace.as_str());
+        assert!(published.join("config.toml").is_file());
+        assert!(published.join("image/Dockerfile").is_file());
+        assert!(published.join("agents/AGENTS.md").is_file());
+        assert!(std::fs::read_dir(&*root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".workspace-")
+        }));
     }
 
     #[tokio::test]

@@ -22,8 +22,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::task::Context as TaskContext;
 use std::task::Poll;
 use std::task::ready;
@@ -76,6 +74,7 @@ use tascarrel_guest::PodShare;
 use tascarrel_guest::ProcessSupervisor;
 use tascarrel_guest::ProcessSupervisorConfig;
 use tascarrel_guest::RepositoryConfigProvider;
+use tascarrel_guest::RepositoryConfigSnapshot;
 use tascarrel_guest::UsbGuest;
 use tascarrel_guest::WorkspaceCaConfig;
 use tascarrel_guest::WorkspaceConfig;
@@ -124,6 +123,7 @@ use tokio::signal::unix::signal;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tokio::time::timeout;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -147,6 +147,8 @@ enum PodControlListenerError {
     #[error("failed to resolve the pod control identity")]
     Identity,
 }
+
+const DEFAULT_WORKSPACE_INPUT_TRANSFER_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Debug, Parser)]
 #[command(name = "tascarrel-guest", about = "Tascarrel guest pod daemon")]
@@ -184,6 +186,14 @@ struct Args {
     /// (development).
     #[arg(long, env = "TASCARREL_GUEST_UNIX_SOCKET")]
     unix_socket: Option<PathBuf>,
+
+    /// Maximum time to receive one host-published workspace input snapshot.
+    #[arg(
+        long,
+        env = "TASCARREL_GUEST_WORKSPACE_INPUT_TRANSFER_TIMEOUT_SECONDS",
+        default_value_t = DEFAULT_WORKSPACE_INPUT_TRANSFER_TIMEOUT_SECONDS
+    )]
+    workspace_input_transfer_timeout_seconds: u64,
 
     #[arg(
         long,
@@ -379,8 +389,9 @@ struct WorkspaceInput {
     root: PathBuf,
     network_service: Arc<GuestNetworkService>,
     refresh_runtime_input: bool,
-    next_refresh: AtomicU64,
-    publication: Mutex<u64>,
+    published_generation_revision: Mutex<u64>,
+    refresh_operation: Mutex<()>,
+    transfer_timeout: Duration,
 }
 
 impl WorkspaceInput {
@@ -390,37 +401,81 @@ impl WorkspaceInput {
 
     /// Refreshes the published input while retaining a complete cached
     /// generation when the host snapshot is temporarily unavailable.
-    async fn refresh_or_retain_cached(&self) -> Result<(), RemoteError> {
+    async fn refresh_or_retain_cached(&self) -> Result<PathBuf, RemoteError> {
         match self.refresh().await {
-            Ok(()) => Ok(()),
+            Ok(generation) => Ok(generation),
             Err(error) => {
                 let current = self.current();
-                if !current.join("config.toml").is_file() || !current.join("image").is_dir() {
+                let Ok(generation) = self.cached_generation().await else {
                     return Err(error);
-                }
+                };
                 warn!(
                     %error,
                     input = %current.display(),
                     "workspace input refresh failed; continuing with the last published input"
                 );
-                Ok(())
+                Ok(generation)
             }
         }
     }
 
-    async fn refresh(&self) -> Result<(), RemoteError> {
-        let refresh = self.next_refresh.fetch_add(1, Ordering::Relaxed);
+    /// Coalesces concurrent callers around one atomic snapshot publication.
+    async fn refresh(&self) -> Result<PathBuf, RemoteError> {
+        let published_generation_revision_before_wait =
+            *self.published_generation_revision.lock().await;
+        let _operation = self.refresh_operation.lock().await;
+        if *self.published_generation_revision.lock().await
+            > published_generation_revision_before_wait
+        {
+            return self.cached_generation().await;
+        }
+        let temporary = self
+            .root
+            .join(format!(".workspace-input-{}.tar", uuid::Uuid::new_v4()));
+        let snapshot_transfer =
+            match timeout(self.transfer_timeout, self.download_snapshot(&temporary)).await {
+                Ok(result) => result,
+                Err(_) => Err(image_provider_error(format!(
+                    "timed out receiving workspace input snapshot after {:?}",
+                    self.transfer_timeout
+                ))),
+            };
+        if let Err(error) = snapshot_transfer {
+            self.remove_temporary_snapshot(&temporary).await;
+            return Err(error);
+        }
+
+        let root = self.root.clone();
+        let archive = temporary.clone();
+        let published_generation = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+            let generation = workspace_snapshot::publish_snapshot(&archive, &root)?;
+            make_workspace_runtime_inputs_readable(&generation.join("overlay"))?;
+            make_workspace_runtime_inputs_readable(&generation.join("hooks"))?;
+            make_workspace_runtime_inputs_readable(&generation.join("agents"))?;
+            Ok(generation)
+        })
+        .await
+        .map_err(|error| {
+            image_provider_error(format!("workspace publication task failed: {error}"))
+        })?
+        .map_err(image_provider_error);
+        self.remove_temporary_snapshot(&temporary).await;
+        let generation = published_generation?;
+        let mut published_generation_revision = self.published_generation_revision.lock().await;
+        *published_generation_revision = published_generation_revision.saturating_add(1);
+        Ok(generation)
+    }
+
+    /// Streams one host snapshot into a new private archive.
+    async fn download_snapshot(&self, temporary: &Path) -> Result<(), RemoteError> {
         let mut channel = self
             .network_service
             .open_channel(MUX_WORKSPACE_HOST_ENDPOINT)
             .await?;
-        let temporary = self
-            .root
-            .join(format!(".workspace-input-{}.tar", uuid::Uuid::new_v4()));
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
         let mut file = options
-            .open(&temporary)
+            .open(temporary)
             .await
             .map_err(image_provider_error)?;
         let copied = tokio::io::copy(
@@ -433,42 +488,40 @@ impl WorkspaceInput {
         file.sync_all().await.map_err(image_provider_error)?;
         drop(file);
         if copied > workspace_snapshot::MAX_ARCHIVE_BYTES {
-            if let Err(error) = tokio::fs::remove_file(&temporary).await {
-                warn!(path = %temporary.display(), %error, "could not remove oversized workspace input snapshot");
-            }
             return Err(image_provider_error(
                 "workspace input snapshot is too large",
             ));
         }
-        let published = {
-            let mut published_refresh = self.publication.lock().await;
-            if refresh < *published_refresh {
-                Ok(None)
-            } else {
-                let root = self.root.clone();
-                let archive = temporary.clone();
-                tokio::task::spawn_blocking(move || -> Result<PathBuf> {
-                    let generation = workspace_snapshot::publish_snapshot(&archive, &root)?;
-                    make_workspace_runtime_inputs_readable(&generation.join("overlay"))?;
-                    make_workspace_runtime_inputs_readable(&generation.join("hooks"))?;
-                    make_workspace_runtime_inputs_readable(&generation.join("agents"))?;
-                    Ok(generation)
-                })
-                .await
-                .map_err(|error| {
-                    image_provider_error(format!("workspace publication task failed: {error}"))
-                })?
-                .map_err(image_provider_error)
-                .map(|generation| {
-                    *published_refresh = refresh;
-                    Some(generation)
-                })
-            }
-        };
-        if let Err(error) = tokio::fs::remove_file(&temporary).await {
+        Ok(())
+    }
+
+    /// Resolves `current` only when it names one complete direct child
+    /// generation.
+    async fn cached_generation(&self) -> Result<PathBuf, RemoteError> {
+        let current = self.current();
+        if !current.join("config.toml").is_file() || !current.join("image").is_dir() {
+            return Err(image_provider_error("cached workspace input is incomplete"));
+        }
+        let generation = tokio::fs::canonicalize(&current)
+            .await
+            .map_err(image_provider_error)?;
+        let root = tokio::fs::canonicalize(&self.root)
+            .await
+            .map_err(image_provider_error)?;
+        if generation.parent() != Some(root.as_path()) {
+            return Err(image_provider_error(
+                "cached workspace input escaped its storage root",
+            ));
+        }
+        Ok(generation)
+    }
+
+    async fn remove_temporary_snapshot(&self, temporary: &Path) {
+        if let Err(error) = tokio::fs::remove_file(temporary).await
+            && error.kind() != io::ErrorKind::NotFound
+        {
             warn!(path = %temporary.display(), %error, "could not remove workspace input snapshot");
         }
-        published.map(|_| ())
     }
 }
 
@@ -476,26 +529,31 @@ impl WorkspaceInput {
 impl ImageInputRefresh for WorkspaceInput {
     async fn refresh_image_input(
         &self,
-    ) -> Result<(), reportify::Report<tascarrel_guest::ImageServiceError>> {
+    ) -> Result<Option<PathBuf>, reportify::Report<tascarrel_guest::ImageServiceError>> {
         if !self.refresh_runtime_input {
-            return Ok(());
+            return Ok(None);
         }
-        self.refresh_or_retain_cached().await.map_err(|error| {
-            reportify::Report::new(tascarrel_guest::ImageServiceError::Internal(format!(
-                "refresh workspace image input: {error}"
-            )))
-        })
+        self.refresh_or_retain_cached()
+            .await
+            .map(|generation| Some(generation.join("image")))
+            .map_err(|error| {
+                reportify::Report::new(tascarrel_guest::ImageServiceError::Internal(format!(
+                    "failed to refresh workspace image input: {error}"
+                )))
+            })
     }
 }
 
 #[async_trait]
 impl RepositoryConfigProvider for WorkspaceInput {
-    async fn repositories(
-        &self,
-    ) -> Result<BTreeMap<String, tascarrel_guest::WorkspaceRepository>, RemoteError> {
-        self.refresh_or_retain_cached().await?;
-        WorkspaceConfig::load(&self.current().join("config.toml"))
-            .map(|workspace| workspace.repos)
+    async fn repository_config(&self) -> Result<RepositoryConfigSnapshot, RemoteError> {
+        let generation = self.refresh_or_retain_cached().await?;
+        WorkspaceConfig::load(&generation.join("config.toml"))
+            .map(|workspace| RepositoryConfigSnapshot {
+                repositories: workspace.repos,
+                image_definition_directory: Some(generation.join("image")),
+                workspace_overlay_directory: Some(generation.join("overlay")),
+            })
             .map_err(image_provider_error)
     }
 }
@@ -613,6 +671,9 @@ async fn main() -> Result<()> {
     if !Uid::effective().is_root() {
         bail!("tascarrel-guest must run as root so it can manage the pod runtime");
     }
+    if args.workspace_input_transfer_timeout_seconds == 0 {
+        bail!("workspace input transfer timeout must be greater than zero");
+    }
     let network_service = GuestNetworkService::new(GuestNetworkServiceConfig {
         ip: args.ip.clone(),
         nft: args.nft.clone(),
@@ -658,8 +719,9 @@ async fn main() -> Result<()> {
         root: storage.input().root().to_owned(),
         network_service: Arc::clone(&network_service),
         refresh_runtime_input: args.unix_socket.is_none(),
-        next_refresh: AtomicU64::new(1),
-        publication: Mutex::new(0),
+        published_generation_revision: Mutex::new(0),
+        refresh_operation: Mutex::new(()),
+        transfer_timeout: Duration::from_secs(args.workspace_input_transfer_timeout_seconds),
     });
     let mut initial_session = if args.unix_socket.is_none() {
         let device = open_device(&args.device).await;

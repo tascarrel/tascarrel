@@ -16,6 +16,7 @@ pub use control_plane::GuestState;
 pub use repositories::GuestRepositoryManager;
 pub use repositories::PodGitError;
 pub use repositories::RepositoryConfigProvider;
+pub use repositories::RepositoryConfigSnapshot;
 pub use runtime::network::BUILD_NETWORK_NAMESPACE;
 pub use runtime::network::NetworkError;
 pub use runtime::network::NetworkManager;

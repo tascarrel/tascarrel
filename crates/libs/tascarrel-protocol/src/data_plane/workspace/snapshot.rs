@@ -650,7 +650,7 @@ mod tests {
         let archive = directory.path().join("snapshot.tar");
         create_snapshot(&source, &archive).unwrap();
         assert!(archive.metadata().unwrap().len() > 0);
-        publish_snapshot(&archive, &destination).unwrap();
+        let first_generation = publish_snapshot(&archive, &destination).unwrap();
         assert_eq!(
             fs::read(destination.join("current/image/Dockerfile")).unwrap(),
             b"FROM scratch\n"
@@ -683,7 +683,12 @@ mod tests {
 
         fs::write(source.join("overlay/tool"), b"v2\n").unwrap();
         create_snapshot(&source, &archive).unwrap();
-        publish_snapshot(&archive, &destination).unwrap();
+        let second_generation = publish_snapshot(&archive, &destination).unwrap();
+        assert_ne!(first_generation, second_generation);
+        assert_eq!(
+            fs::read(first_generation.join("overlay/tool")).unwrap(),
+            b"v1\n"
+        );
         assert_eq!(
             fs::read(destination.join("current/overlay/tool")).unwrap(),
             b"v2\n"

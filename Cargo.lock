@@ -5153,6 +5153,7 @@ dependencies = [
  "notify",
  "rcgen",
  "reportify",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",

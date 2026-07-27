@@ -261,12 +261,11 @@ impl<'a> InvocationCtx<'a> {
             return Ok(Box::pin(std::future::ready(Ok(None))));
         };
         let repository_config = self.state.repository_config().cloned();
-        let refreshed_input = repository_config.is_some();
         let request_context = self.nested_host_request_context()?;
         let workspace = self.target_workspace()?.clone();
         let host = self.host.clone();
         Ok(Box::pin(async move {
-            let repositories = manager
+            let repository_config = manager
                 .capture_repositories(repository_config.as_deref())
                 .await
                 .map_err(|error| {
@@ -285,9 +284,8 @@ impl<'a> InvocationCtx<'a> {
                 })?;
             RepositoryPreparation::new_versioned(
                 manager,
-                repositories,
+                repository_config,
                 output.repositories.iter().cloned(),
-                refreshed_input,
             )
             .map(Some)
             .map_err(|error| {

@@ -68,7 +68,7 @@ pub struct GuestNetworkServiceConfig {
     pub ip: std::path::PathBuf,
     /// Immutable `nft` executable used to replace the Tascarrel ruleset.
     pub nft: std::path::PathBuf,
-    /// Maximum time to wait for an attached host mux.
+    /// Maximum time to wait for an attached host mux or channel acceptance.
     pub mux_wait_timeout: Duration,
     /// Maximum time to open and complete a semantic DNS exchange.
     pub dns_request_timeout: Duration,
@@ -211,12 +211,21 @@ impl GuestNetworkService {
         &self,
         endpoint: &str,
     ) -> Result<tascarrel_mux::Channel, RemoteError> {
-        self.mux().await?.open(endpoint).await.map_err(|error| {
-            RemoteError::new(
-                ErrorCode::ExecutionFailed,
-                format!("open multiplexed service channel: {error}"),
-            )
-        })
+        let mux = self.mux().await?;
+        timeout(self.mux_wait_timeout, mux.open(endpoint))
+            .await
+            .map_err(|_| {
+                RemoteError::new(
+                    ErrorCode::ExecutionFailed,
+                    format!("timed out opening multiplexed service channel {endpoint}"),
+                )
+            })?
+            .map_err(|error| {
+                RemoteError::new(
+                    ErrorCode::ExecutionFailed,
+                    format!("failed to open multiplexed service channel: {error}"),
+                )
+            })
     }
 
     async fn mux(&self) -> Result<MuxHandle, RemoteError> {
@@ -816,5 +825,35 @@ mod tests {
         let decoded = Message::from_vec(&payload).unwrap();
         assert!(decoded.metadata.truncation);
         assert!(payload.len() <= 512);
+    }
+
+    /// Verifies an accepted host mux cannot leave a logical service open
+    /// pending forever.
+    #[tokio::test]
+    async fn logical_channel_acceptance_is_bounded() {
+        let service = GuestNetworkService::new(GuestNetworkServiceConfig {
+            mux_wait_timeout: Duration::from_millis(50),
+            ..GuestNetworkServiceConfig::default()
+        })
+        .unwrap();
+        let (guest_io, host_io) = tokio::io::duplex(4096);
+        let mux_config = tascarrel_mux::Config {
+            probe_interval: Duration::from_millis(1),
+            ..tascarrel_mux::Config::default()
+        };
+        let (guest_driver, guest_mux, _guest_incoming) =
+            tascarrel_mux::connect(guest_io, tascarrel_mux::Role::Server, mux_config.clone())
+                .unwrap();
+        let (host_driver, _host_mux, _host_incoming) =
+            tascarrel_mux::connect(host_io, tascarrel_mux::Role::Client, mux_config).unwrap();
+        let guest_driver = tokio::spawn(guest_driver.run());
+        let host_driver = tokio::spawn(host_driver.run());
+        service.attach_mux(guest_mux);
+
+        let error = service.open_channel("never-accepted").await.unwrap_err();
+
+        assert!(error.message.contains("timed out opening"));
+        guest_driver.abort();
+        host_driver.abort();
     }
 }

@@ -90,6 +90,7 @@ class BackendStateEntry<T, E, C> implements BackendStateResource<T> {
   private readonly listeners = new Set<Listener>();
   private disconnect: (() => void) | undefined;
   private closeRevision = 0;
+  private connectionRevision = 0;
   private frame: number | undefined;
   public lastObservedAt = Date.now();
 
@@ -158,11 +159,13 @@ class BackendStateEntry<T, E, C> implements BackendStateResource<T> {
 
   private start(): void {
     if (this.disconnect) return;
+    const connectionRevision = ++this.connectionRevision;
     this.publish({ ...this.snapshot, connection: "connecting", connectionAttempt: 1 }, false);
     this.disconnect = this.definition.connect(
       () => this.cursor,
       {
         onEvent: (event) => {
+          if (connectionRevision !== this.connectionRevision) return;
           try {
             const next = this.definition.applyEvent(this.snapshot.value, event);
             this.cursor = next.cursor;
@@ -179,17 +182,24 @@ class BackendStateEntry<T, E, C> implements BackendStateResource<T> {
             }, false);
           }
         },
-        onConnection: (connection, attempt) => this.publish({
-          ...this.snapshot,
-          connection,
-          connectionAttempt: attempt,
-        }, false),
-        onError: (error) => this.publish({ ...this.snapshot, error }, false),
+        onConnection: (connection, attempt) => {
+          if (connectionRevision !== this.connectionRevision) return;
+          this.publish({
+            ...this.snapshot,
+            connection,
+            connectionAttempt: attempt,
+          }, false);
+        },
+        onError: (error) => {
+          if (connectionRevision !== this.connectionRevision) return;
+          this.publish({ ...this.snapshot, error }, false);
+        },
       },
     );
   }
 
   private stop(): void {
+    this.connectionRevision += 1;
     this.disconnect?.();
     this.disconnect = undefined;
     this.snapshot = { ...this.snapshot, connection: "idle", connectionAttempt: 0 };

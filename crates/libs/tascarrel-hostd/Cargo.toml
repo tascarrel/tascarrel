@@ -27,10 +27,11 @@ hyper-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
 jiff.workspace = true
-nix = { version = "0.30.1", features = ["net", "user"] }
+nix = { workspace = true, features = ["net", "user"] }
 notify.workspace = true
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 reportify.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 rustls = "0.23"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
