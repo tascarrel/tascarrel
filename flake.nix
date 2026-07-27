@@ -12,12 +12,17 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    nix-appimage = {
+      url = "github:ralismark/nix-appimage";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
   outputs =
     {
       fenix,
       guest-nixpkgs,
       home-manager,
+      nix-appimage,
       self,
       nixpkgs,
     }:
@@ -138,8 +143,8 @@
         system:
         workspacePackageFor system {
           cargoPackage = "tascarrel-cli";
-          binaryName = "tascarrel";
-          description = "Command-line client for Tascarrel";
+          binaryName = "tascarrelctl";
+          description = "Administrative command-line client for Tascarrel";
         };
 
       terminalNerdFontFor =
@@ -240,10 +245,60 @@
           source = self;
           cargoPackage = "tascarrel-cli";
           binaryName = "tascarrel";
-          description = "Self-contained Tascarrel CLI, host daemon, and guest image";
+          description = "Self-contained Tascarrel server and guest image";
           embeddedPayload = guestPayloadFor system (guestSystemFor system);
           doCheck = false;
         };
+
+      desktopPackageFor =
+        system:
+        let
+          pkgs = pkgsFor system;
+          server = distributionPackageFor system;
+        in
+        (workspacePackageFor system {
+          cargoPackage = "tascarrel-desktop";
+          binaryName = "tascarrel-desktop";
+          description = "Tascarrel desktop application";
+          nativeBuildInputs = [
+            pkgs.autoPatchelfHook
+            pkgs.pkg-config
+            pkgs.wrapGAppsHook3
+          ];
+          buildInputs = [
+            pkgs.gtk3
+            pkgs.libayatana-appindicator
+            pkgs.libsoup_3
+            pkgs.webkitgtk_4_1
+          ];
+          supportedPlatforms = lib.platforms.linux;
+          doCheck = false;
+        }).overrideAttrs
+          (old: {
+            postInstall = (old.postInstall or "") + ''
+              install -Dm755 ${server}/bin/tascarrel "$out/bin/tascarrel"
+              install -Dm644 \
+                crates/apps/tascarrel-desktop/icons/icon.svg \
+                "$out/share/icons/hicolor/scalable/apps/tascarrel.svg"
+              install -Dm644 /dev/stdin \
+                "$out/share/applications/dev.tascarrel.Tascarrel.desktop" <<'EOF'
+              [Desktop Entry]
+              Type=Application
+              Name=Tascarrel
+              Comment=Local-first agentic development environment
+              Exec=tascarrel-desktop
+              Icon=tascarrel
+              Categories=Development;
+              StartupNotify=true
+              StartupWMClass=tascarrel-desktop
+              EOF
+            '';
+            preFixup = (old.preFixup or "") + ''
+              gappsWrapperArgs+=(
+                --set FONTCONFIG_FILE ${pkgs.fontconfig.out}/etc/fonts/fonts.conf
+              )
+            '';
+          });
 
       mkTascarrelNixosSystem =
         {
@@ -330,6 +385,12 @@
           tascarrel-distribution = distribution;
         }
         // lib.optionalAttrs (lib.elem system linuxSystems) {
+          tascarrel-desktop = desktopPackageFor system;
+          tascarrel-desktop-appimage = nix-appimage.lib.${system}.mkAppImage {
+            program = lib.getExe (desktopPackageFor system);
+            pname = "tascarrel-desktop";
+            name = "tascarrel-desktop-${system}.AppImage";
+          };
           tascarrel-guest = guestPackageFor system;
           tascarrel-podctl = podctlPackageFor system;
           tascarrel-podd = poddPackageFor system;
@@ -345,15 +406,12 @@
         system:
         let
           tascarrel = self.packages.${system}.tascarrel;
-          host = (pkgsFor system).writeShellScript "tascarrel-host" ''
-            exec ${lib.getExe tascarrel} host "$@"
-          '';
         in
         {
           default = self.apps.${system}.tascarrel;
           host = {
             type = "app";
-            program = "${host}";
+            program = lib.getExe tascarrel;
             meta.description = "Run the Tascarrel host daemon with its embedded payload";
           };
           tascarrel = {
@@ -368,6 +426,11 @@
           };
         }
         // lib.optionalAttrs (lib.elem system linuxSystems) {
+          desktop = {
+            type = "app";
+            program = lib.getExe self.packages.${system}.tascarrel-desktop;
+            meta.description = "Open Tascarrel Desktop";
+          };
           guest = {
             type = "app";
             program = lib.getExe' self.packages.${system}.tascarrel-guest "tascarrel-guest";
@@ -446,6 +509,18 @@
                 qemu
                 rust-analyzer
               ])
+              ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
+                with pkgs;
+                [
+                  glib
+                  gtk3
+                  libayatana-appindicator
+                  librsvg
+                  libsoup_3
+                  openssl
+                  webkitgtk_4_1
+                ]
+              )
               ++ [ (nightlyToolchainFor system) ];
             RUSTFMT = lib.getExe' (nightlyToolchainFor system) "rustfmt";
           };

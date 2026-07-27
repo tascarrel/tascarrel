@@ -27,7 +27,7 @@ assert evaluatedConfig.services.tascarrel.home == "/home/tascarrel-test/.tascarr
 assert evaluatedConfig.services.tascarrel.runtimePackages == runtimePackages;
 assert evaluatedConfig.home.sessionVariables.TASCARREL_HOME == "/home/tascarrel-test/.tascarrel";
 assert builtins.elem tascarrelPackage evaluatedConfig.home.packages;
-assert service.Service.ExecStart == [ "${lib.getExe tascarrelPackage} host" ];
+assert service.Service.ExecStart == [ (lib.getExe tascarrelPackage) ];
 assert
   service.Service.Environment == [
     "TASCARREL_HOME=/home/tascarrel-test/.tascarrel"

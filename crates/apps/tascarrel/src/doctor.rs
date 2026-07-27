@@ -1,3 +1,9 @@
+//! Host capability inspection for interactive diagnostics and server startup.
+//!
+//! [`inspect`] includes service-manager checks for administrative commands,
+//! while [`inspect_runtime`] limits checks to dependencies required by the
+//! running server.
+
 use std::env;
 use std::fs::OpenOptions;
 use std::fs::{self};
@@ -50,6 +56,12 @@ impl DoctorReport {
             .all(|check| check.status != CheckStatus::Error)
     }
 
+    /// Returns resolved required executables when all required checks passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error summarizing failed checks or incomplete dependency
+    /// resolution.
     pub fn require(self) -> Result<ResolvedDependencies> {
         if !self.is_healthy() {
             let failures = self
@@ -66,11 +78,14 @@ impl DoctorReport {
     }
 }
 
+/// Inspects runtime dependencies and the per-user service manager.
+#[must_use]
 pub fn inspect() -> DoctorReport {
     inspect_with_service_manager(true)
 }
 
 /// Checks only the dependencies needed by an in-process host daemon.
+#[must_use]
 pub fn inspect_runtime() -> DoctorReport {
     inspect_with_service_manager(false)
 }
@@ -354,6 +369,11 @@ fn error_check(name: impl Into<String>, message: impl Into<String>) -> Dependenc
     }
 }
 
+/// Prints a human-readable or JSON diagnostic report.
+///
+/// # Errors
+///
+/// Returns an error when JSON serialization or output fails.
 pub fn print(report: &DoctorReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);

@@ -1,8 +1,10 @@
-//! Host daemon identity types shared by host-owned APIs.
+//! Host daemon identity and process lifecycle types shared by host-owned APIs.
 //!
 //! A host instance identifies one running host daemon process. Host-owned resumable streams include
 //! it in their cursors so consumers can distinguish positions assigned before and after a host
-//! restart.
+//! restart. The server lifecycle is available before the extracted application assets and the
+//! control plane are ready, allowing every client to render startup progress and actionable host
+//! diagnostics.
 
 // Domain Types
 
@@ -11,3 +13,100 @@
 #[json(type = "string")]
 #[rust(type = "crate::ids::HostInstanceId")]
 opaque HostInstanceId
+
+/// Versioned identity and current lifecycle state of one running server.
+record ServerStatus {
+    /// Semantic version of the Tascarrel server executable.
+    server_version: string,
+    /// On-wire protocol version spoken by this server.
+    protocol_version: u16,
+    /// Identifier assigned when this server process started.
+    instance_id: HostInstanceId,
+    /// Current server lifecycle state.
+    state: ServerState,
+}
+
+/// Current lifecycle state of the Tascarrel server.
+#[json(tag = "status")]
+variant ServerState {
+    /// Host checks, payload preparation, or service initialization is in progress.
+    Starting: ServerStarting,
+    /// The control plane and extracted application are available.
+    Ready: ServerReady,
+    /// Startup stopped at one or more actionable problems.
+    Failed: ServerFailure,
+}
+
+/// Progress reported while the server is becoming ready.
+record ServerStarting {
+    /// Current startup phase.
+    phase: ServerStartupPhase,
+    /// Human-readable description of the current work.
+    detail: string,
+    /// Payload extraction progress, when compressed payload bytes are being consumed.
+    payload?: PayloadExtractionProgress,
+}
+
+/// Current startup phase.
+#[json(tag = "type")]
+variant ServerStartupPhase {
+    /// Required host executables and virtualization capabilities are being checked.
+    CheckingHost,
+    /// The embedded payload is being validated.
+    ValidatingPayload,
+    /// The embedded payload is being extracted into its content-addressed state directory.
+    ExtractingPayload,
+    /// Extracted payload assets are being validated and activated.
+    ActivatingPayload,
+    /// Host control-plane services are being initialized.
+    InitializingServices,
+}
+
+/// Progress consuming the compressed embedded payload.
+record PayloadExtractionProgress {
+    /// Compressed payload bytes consumed so far.
+    completed_bytes: u64,
+    /// Total compressed payload bytes to consume.
+    total_bytes: u64,
+}
+
+/// Information available after the server becomes ready.
+record ServerReady {
+    /// Non-fatal host issues that may limit optional functionality.
+    warnings: [ServerIssue],
+}
+
+/// Startup failure retained by the server until a retry is requested.
+record ServerFailure {
+    /// Stable machine-readable category for the startup failure.
+    code: string,
+    /// Human-readable summary of the startup failure.
+    summary: string,
+    /// Problems discovered during the failed startup attempt.
+    issues: [ServerIssue],
+    /// Whether the server can repeat startup without restarting its process.
+    retryable: bool,
+}
+
+/// One host problem or limitation discovered during startup.
+record ServerIssue {
+    /// Stable machine-readable category for this issue.
+    code: string,
+    /// Severity determining whether the issue prevents readiness.
+    severity: ServerIssueSeverity,
+    /// Concise human-readable issue name.
+    title: string,
+    /// Diagnostic detail suitable for display.
+    detail: string,
+    /// Suggested corrective action, when one is known.
+    remediation?: string,
+}
+
+/// Severity of one server startup issue.
+#[json(tag = "type")]
+variant ServerIssueSeverity {
+    /// The issue limits optional functionality without preventing readiness.
+    Warning,
+    /// The issue prevents the server from becoming ready.
+    Error,
+}

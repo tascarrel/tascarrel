@@ -1,3 +1,9 @@
+//! Host server lifecycle and workspace-service initialization.
+//!
+//! [`run_with_startup`] binds the bootstrap HTTP interface before delegating
+//! host checks and payload preparation, then publishes initialized host
+//! services and supervises them until shutdown.
+
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -16,10 +22,14 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use clap::ValueEnum;
+use reportify::Report;
 use tascarrel_api::parse_size_bytes;
+use tascarrel_api::types::host::ServerIssue;
+use tascarrel_api::types::host::ServerStartupPhase;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_vm::Acceleration;
 use tascarrel_vm::Architecture;
+use tokio::net::UnixListener;
 use tokio::signal::unix::SignalKind;
 use tokio::signal::unix::signal;
 use tracing::info;
@@ -47,7 +57,8 @@ use crate::services::secrets::SecretsService;
 use crate::services::secrets::SecretsServiceConfig;
 use crate::services::workspaces::create_private_directory;
 use crate::services::workspaces::lock_file;
-use crate::web::WebServerConfig;
+use crate::startup::StartupFailure;
+use crate::startup::StartupReporter;
 
 const MINIMUM_STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_STATE_DISK_SIZE: &str = "1T";
@@ -63,6 +74,26 @@ pub struct GuestPayload {
     pub initrd: PathBuf,
     pub kernel_append: String,
     pub ui: PathBuf,
+}
+
+/// Options and non-fatal diagnostics produced by one startup preparation.
+#[derive(Clone, Debug)]
+pub struct StartupPreparation {
+    /// Daemon options resolved by the preparation callback.
+    pub options: DaemonOptions,
+    /// Non-fatal host diagnostics to retain after the server becomes ready.
+    pub warnings: Vec<ServerIssue>,
+}
+
+impl StartupPreparation {
+    /// Creates a preparation without non-fatal host diagnostics.
+    #[must_use]
+    pub fn new(options: DaemonOptions) -> Self {
+        Self {
+            options,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -261,14 +292,16 @@ fn git_helper_io(source: io::Error) -> reportify::Report<tascarrel_git::GitError
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
+    if let Err(error) = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("tascarrel_host=info")),
         )
         .with_writer(io::stderr)
         .try_init()
-        .ok();
+    {
+        eprintln!("failed to initialize Tascarrel host tracing: {error}");
+    }
 }
 
 /// Runs the per-user workspace service until it receives a termination
@@ -285,9 +318,6 @@ pub async fn run(args: DaemonOptions) -> Result<()> {
 
 /// Runs the workspace service until an explicit shutdown future resolves.
 ///
-/// This is used by the single-process app mode, whose window lifecycle owns
-/// the daemon lifecycle instead of a service manager or an OS signal.
-///
 /// # Errors
 ///
 /// Returns an error for invalid configuration, unsafe state paths, dependency
@@ -297,57 +327,164 @@ pub async fn run_until_shutdown(
     args: DaemonOptions,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<()> {
+    run_with_startup_until_shutdown(
+        args,
+        |options, _reporter| async move { Ok(StartupPreparation::new(options)) },
+        shutdown,
+    )
+    .await
+}
+
+/// Runs the server with an observable, retryable preparation before host
+/// services initialize.
+///
+/// # Errors
+///
+/// Returns an error when the bootstrap listener, runtime lock, control plane,
+/// or a long-running host service fails.
+pub async fn run_with_startup<P, F>(args: DaemonOptions, prepare: P) -> Result<()>
+where
+    P: Fn(DaemonOptions, StartupReporter) -> F + Send + Sync,
+    F: Future<Output = std::result::Result<StartupPreparation, Report<StartupFailure>>> + Send,
+{
+    let mut signals = ShutdownSignals::new()?;
+    run_with_startup_until_shutdown(args, prepare, signals.wait()).await
+}
+
+/// Runs a server preparation with an explicit shutdown future.
+///
+/// # Errors
+///
+/// Returns an error when bootstrap infrastructure or a ready host service
+/// stops unexpectedly.
+#[tracing::instrument(
+    name = "tascarrel_host.daemon.run_with_startup",
+    level = "info",
+    skip_all,
+    err
+)]
+#[allow(clippy::too_many_lines)] // Keeping lifecycle selects together makes shutdown ordering explicit.
+pub async fn run_with_startup_until_shutdown<P, F>(
+    args: DaemonOptions,
+    prepare: P,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<()>
+where
+    P: Fn(DaemonOptions, StartupReporter) -> F + Send + Sync,
+    F: Future<Output = std::result::Result<StartupPreparation, Report<StartupFailure>>> + Send,
+{
     init_tracing();
-    let prepared = Prepared::new(&args)?;
-    create_private_directory(&prepared.runtime_dir).with_context(|| {
+    let tascarrel_home = TascarrelHome::discover().map_err(|error| anyhow!(error.to_string()))?;
+    let runtime_dir = tascarrel_home.runtime();
+    create_private_directory(&runtime_dir).with_context(|| {
         format!(
             "failed to prepare host runtime directory {}",
-            prepared.runtime_dir.display()
+            runtime_dir.display()
         )
     })?;
     let _host_lock = lock_file(
-        &prepared.runtime_dir.join("host.lock"),
+        &runtime_dir.join("host.lock"),
         "Tascarrel host workspace service",
     )?;
-    let _socket_cleanup = SocketCleanup(prepared.socket.clone());
-    let listener = bind_control_socket(&prepared.socket).with_context(|| {
-        format!(
-            "failed to bind unified host socket {}",
-            prepared.socket.display()
-        )
-    })?;
-    let repository_service = RepositoryService::new(RepositoryServiceConfig::new(
-        prepared.workspace_service.git.clone(),
-        &prepared.workspaces_dir,
-        &prepared.repository_cache_dir,
-    ))
-    .map_err(|error| anyhow!(error.to_string()))
-    .context("start host repository service")?;
-    let workspace_service = WorkspaceService::new(prepared.workspace_service)?;
-    let config_service = ConfigService::open(ConfigServiceConfig::new(&prepared.workspaces_dir))
-        .map_err(|error| anyhow!(error.to_string()))
-        .context("start host configuration service")?;
-    let network_service = NetworkService::new(NetworkServiceConfig {
-        dns_resolver: args.dns_resolver,
-        host_port_host: args.host_port_host,
-        ..NetworkServiceConfig::default()
-    })
-    .map_err(|error| anyhow!(error.to_string()))
-    .context("start host network service")?;
-    let secrets_service = SecretsService::new(SecretsServiceConfig::new(
-        &prepared.workspaces_dir,
-        &prepared.sops,
-    ))
-    .map_err(|error| anyhow!(error.to_string()))
-    .context("start host secrets service")?;
-    let state = HostState::new(
-        workspace_service,
-        config_service,
-        network_service,
-        repository_service.clone(),
-        secrets_service,
-    );
-    let host_control = HostControlService::new(state.clone());
+    let reporter = StartupReporter::new();
+    let web_address = args.web_address.map(validate_web_address).transpose()?;
+    let (web_server, mut web_control) = match web_address {
+        Some(address) => {
+            let (server, control) = crate::web::bind(address, reporter.clone())
+                .await
+                .context("bind Tascarrel bootstrap web server")?;
+            (Some(server), Some(control))
+        }
+        None => (None, None),
+    };
+    let web_enabled = web_server.is_some();
+    let web = async move {
+        match web_server {
+            Some(server) => server.serve().await.context("Tascarrel web server stopped"),
+            None => std::future::pending::<Result<()>>().await,
+        }
+    };
+    tokio::pin!(web, shutdown);
+
+    let initial_options = args;
+    let (initialized, warnings) = loop {
+        reporter.starting(
+            ServerStartupPhase::CheckingHost,
+            "Checking required host capabilities",
+        );
+        let startup = prepare(initial_options.clone(), reporter.clone());
+        tokio::pin!(startup);
+        let preparation = tokio::select! {
+            () = &mut shutdown => {
+                info!("host workspace service shutdown requested during startup");
+                return Ok(());
+            }
+            result = &mut web => return result,
+            result = &mut startup => result,
+        };
+        let preparation = match preparation {
+            Ok(preparation) => preparation,
+            Err(failure) => {
+                reporter.failed(failure.error());
+                if !web_enabled {
+                    bail!("{failure}");
+                }
+                let Some(control) = web_control.as_mut() else {
+                    bail!("Tascarrel web startup control is unavailable");
+                };
+                tokio::select! {
+                    () = &mut shutdown => return Ok(()),
+                    result = &mut web => return result,
+                    () = control.retry_requested() => {}
+                }
+                continue;
+            }
+        };
+
+        reporter.starting(
+            ServerStartupPhase::InitializingServices,
+            "Initializing Tascarrel services",
+        );
+        match Initialized::new(preparation.options) {
+            Ok(initialized) => break (initialized, preparation.warnings),
+            Err(error) => {
+                let failure = StartupFailure::retryable(
+                    "service-initialization-failed",
+                    "Tascarrel services could not be initialized",
+                    format!("{error:#}"),
+                );
+                reporter.failed(&failure);
+                if !web_enabled {
+                    return Err(error);
+                }
+                let Some(control) = web_control.as_mut() else {
+                    return Err(error);
+                };
+                tokio::select! {
+                    () = &mut shutdown => return Ok(()),
+                    result = &mut web => return result,
+                    () = control.retry_requested() => {}
+                }
+            }
+        }
+    };
+
+    let Initialized {
+        prepared,
+        listener,
+        repository_service,
+        state,
+        host_control,
+        _socket_cleanup,
+    } = initialized;
+    if let Some(control) = &web_control {
+        control.make_ready(
+            state.clone(),
+            host_control.clone(),
+            prepared.ui_root.clone(),
+        );
+    }
+    reporter.ready(warnings);
     let workspace_requests = serve_workspace_requests(state.clone());
     info!(
         socket = %prepared.socket.display(),
@@ -360,26 +497,8 @@ pub async fn run_until_shutdown(
             .await
             .context("local host control plane stopped")
     };
-    let web_state = state.clone();
-    let web = async move {
-        match prepared.web {
-            Some(config) => crate::web::serve(config, web_state, host_control)
-                .await
-                .context("Tascarrel web server stopped"),
-            None => {
-                let _host_control = host_control;
-                std::future::pending::<Result<()>>().await
-            }
-        }
-    };
     let repository_refreshes = repository_service.run_background_refreshes();
-    tokio::pin!(
-        broker,
-        web,
-        repository_refreshes,
-        workspace_requests,
-        shutdown
-    );
+    tokio::pin!(broker, repository_refreshes, workspace_requests);
     let result = tokio::select! {
         () = &mut shutdown => {
             info!("host workspace service shutdown requested");
@@ -474,6 +593,19 @@ impl DaemonOptions {
         self
     }
 
+    /// Enables the standard loopback web address unless explicitly configured.
+    #[must_use]
+    pub fn with_default_web_address(mut self) -> Self {
+        self.web_address.get_or_insert(DEFAULT_WEB_ADDRESS);
+        self
+    }
+
+    /// Returns the configured web address.
+    #[must_use]
+    pub const fn web_address(&self) -> Option<SocketAddr> {
+        self.web_address
+    }
+
     /// Overrides the loopback web address used by an installed distribution.
     #[must_use]
     pub fn with_web_address(mut self, address: SocketAddr) -> Self {
@@ -482,14 +614,77 @@ impl DaemonOptions {
     }
 }
 
+struct Initialized {
+    prepared: Prepared,
+    listener: UnixListener,
+    repository_service: RepositoryService,
+    state: HostState,
+    host_control: HostControlService,
+    _socket_cleanup: SocketCleanup,
+}
+
+impl Initialized {
+    /// Builds the host services that become available only after preparation.
+    fn new(args: DaemonOptions) -> Result<Self> {
+        let prepared = Prepared::new(&args)?;
+        let socket_cleanup = SocketCleanup(prepared.socket.clone());
+        let listener = bind_control_socket(&prepared.socket).with_context(|| {
+            format!(
+                "failed to bind unified host socket {}",
+                prepared.socket.display()
+            )
+        })?;
+        let repository_service = RepositoryService::new(RepositoryServiceConfig::new(
+            prepared.workspace_service.git.clone(),
+            &prepared.workspaces_dir,
+            &prepared.repository_cache_dir,
+        ))
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("start host repository service")?;
+        let workspace_service = WorkspaceService::new(prepared.workspace_service.clone())?;
+        let config_service =
+            ConfigService::open(ConfigServiceConfig::new(&prepared.workspaces_dir))
+                .map_err(|error| anyhow!(error.to_string()))
+                .context("start host configuration service")?;
+        let network_service = NetworkService::new(NetworkServiceConfig {
+            dns_resolver: args.dns_resolver,
+            host_port_host: args.host_port_host,
+            ..NetworkServiceConfig::default()
+        })
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("start host network service")?;
+        let secrets_service = SecretsService::new(SecretsServiceConfig::new(
+            &prepared.workspaces_dir,
+            &prepared.sops,
+        ))
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("start host secrets service")?;
+        let state = HostState::new(
+            workspace_service,
+            config_service,
+            network_service,
+            repository_service.clone(),
+            secrets_service,
+        );
+        let host_control = HostControlService::new(state.clone());
+        Ok(Self {
+            prepared,
+            listener,
+            repository_service,
+            state,
+            host_control,
+            _socket_cleanup: socket_cleanup,
+        })
+    }
+}
+
 struct Prepared {
-    runtime_dir: PathBuf,
     socket: PathBuf,
     workspaces_dir: PathBuf,
     repository_cache_dir: PathBuf,
     sops: PathBuf,
     workspace_service: WorkspaceServiceConfig,
-    web: Option<WebServerConfig>,
+    ui_root: Option<PathBuf>,
 }
 
 impl Prepared {
@@ -581,11 +776,8 @@ impl Prepared {
         };
 
         let ui_root = args.ui_dir.clone().map(validate_ui_root).transpose()?;
-        let web_address = args.web_address.map(validate_web_address).transpose()?;
-        let web = web_address.map(|address| WebServerConfig { address, ui_root });
 
         Ok(Self {
-            runtime_dir: runtime_dir.clone(),
             socket,
             workspaces_dir,
             repository_cache_dir,
@@ -605,7 +797,7 @@ impl Prepared {
                     WorkspaceServiceConfig::DEFAULT_MAX_CONCURRENT_MUX_SERVICES,
                 mode,
             },
-            web,
+            ui_root,
         })
     }
 }

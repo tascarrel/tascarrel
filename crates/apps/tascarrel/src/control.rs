@@ -21,14 +21,19 @@ use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
 /// Typed control-plane client connected to one running host daemon.
-pub(crate) struct ControlClient {
+pub struct ControlClient {
     peer: server::Peer,
     connection: JoinHandle<control_plane::Result<()>>,
 }
 
 impl ControlClient {
     /// Connects to the host daemon's local control-plane socket.
-    pub(crate) async fn connect(path: &Path) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket connection or protocol handshake
+    /// fails.
+    pub async fn connect(path: &Path) -> Result<Self> {
         let stream = UnixStream::connect(path)
             .await
             .with_context(|| format!("cannot connect to host daemon at {}", path.display()))?;
@@ -47,7 +52,12 @@ impl ControlClient {
     }
 
     /// Invokes one host-owned typed action.
-    pub(crate) async fn invoke<A>(&self, input: A) -> Result<A::Output>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request cannot be sent, the connection ends,
+    /// or the server rejects the action.
+    pub async fn invoke<A>(&self, input: A) -> Result<A::Output>
     where
         A: HostAction,
     {
@@ -82,7 +92,12 @@ impl ControlClient {
     }
 
     /// Reads the initial event of one host-owned typed subscription.
-    pub(crate) async fn first_event<S>(&self, input: S) -> Result<S::Event>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the subscription cannot be established, the
+    /// connection ends, or the first event is invalid.
+    pub async fn first_event<S>(&self, input: S) -> Result<S::Event>
     where
         S: HostSubscription,
     {

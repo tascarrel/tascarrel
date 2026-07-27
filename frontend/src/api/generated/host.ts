@@ -24,3 +24,96 @@ import * as __schema_workspaces from "./workspaces";
  * A new identifier is generated whenever hostd starts.
  */
  export type HostInstanceId = __sidex_types.Nominal<(string), "::tascarrel_api::host::HostInstanceId">;
+/**
+ * Versioned identity and current lifecycle state of one running server.
+ */
+ export type ServerStatus = { /**
+                                            * Semantic version of the Tascarrel server executable.
+                                            */
+                                                        "serverVersion": __sidex_types.builtins.String, /**
+                                            * On-wire protocol version spoken by this server.
+                                            */
+                                                        "protocolVersion": __sidex_types.builtins.U16, /**
+                                            * Identifier assigned when this server process started.
+                                            */
+                                                        "instanceId": HostInstanceId, /**
+                                            * Current server lifecycle state.
+                                            */
+                                                        "state": ServerState };
+/**
+ * Current lifecycle state of the Tascarrel server.
+ */
+ export type ServerState = (({ "status": "Starting" } & ServerStarting) | ({ "status": "Ready" } & ServerReady) | ({ "status": "Failed" } & ServerFailure));
+/**
+ * Progress reported while the server is becoming ready.
+ */
+ export type ServerStarting = { /**
+                                            * Current startup phase.
+                                            */
+                                                        "phase": ServerStartupPhase, /**
+                                            * Human-readable description of the current work.
+                                            */
+                                                        "detail": __sidex_types.builtins.String, /**
+                                            * Payload extraction progress, when compressed payload bytes are being consumed.
+                                            */
+                                                        "payload"?: PayloadExtractionProgress };
+/**
+ * Current startup phase.
+ */
+ export type ServerStartupPhase = ({ "type": "CheckingHost" } | { "type": "ValidatingPayload" } | { "type": "ExtractingPayload" } | { "type": "ActivatingPayload" } | { "type": "InitializingServices" });
+/**
+ * Progress consuming the compressed embedded payload.
+ */
+ export type PayloadExtractionProgress = { /**
+                                            * Compressed payload bytes consumed so far.
+                                            */
+                                                        "completedBytes": __sidex_types.builtins.U64, /**
+                                            * Total compressed payload bytes to consume.
+                                            */
+                                                        "totalBytes": __sidex_types.builtins.U64 };
+/**
+ * Information available after the server becomes ready.
+ */
+ export type ServerReady = { /**
+                                            * Non-fatal host issues that may limit optional functionality.
+                                            */
+                                                        "warnings": __sidex_types.builtins.Sequence<ServerIssue> };
+/**
+ * Startup failure retained by the server until a retry is requested.
+ */
+ export type ServerFailure = { /**
+                                            * Stable machine-readable category for the startup failure.
+                                            */
+                                                        "code": __sidex_types.builtins.String, /**
+                                            * Human-readable summary of the startup failure.
+                                            */
+                                                        "summary": __sidex_types.builtins.String, /**
+                                            * Problems discovered during the failed startup attempt.
+                                            */
+                                                        "issues": __sidex_types.builtins.Sequence<ServerIssue>, /**
+                                            * Whether the server can repeat startup without restarting its process.
+                                            */
+                                                        "retryable": __sidex_types.builtins.Bool };
+/**
+ * One host problem or limitation discovered during startup.
+ */
+ export type ServerIssue = { /**
+                                            * Stable machine-readable category for this issue.
+                                            */
+                                                        "code": __sidex_types.builtins.String, /**
+                                            * Severity determining whether the issue prevents readiness.
+                                            */
+                                                        "severity": ServerIssueSeverity, /**
+                                            * Concise human-readable issue name.
+                                            */
+                                                        "title": __sidex_types.builtins.String, /**
+                                            * Diagnostic detail suitable for display.
+                                            */
+                                                        "detail": __sidex_types.builtins.String, /**
+                                            * Suggested corrective action, when one is known.
+                                            */
+                                                        "remediation"?: __sidex_types.builtins.String };
+/**
+ * Severity of one server startup issue.
+ */
+ export type ServerIssueSeverity = ({ "type": "Warning" } | { "type": "Error" });

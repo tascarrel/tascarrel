@@ -1,3 +1,9 @@
+//! Installation and content-addressed preparation of the Tascarrel payload.
+//!
+//! The module installs server executables and service definitions, validates
+//! embedded payload metadata, and activates immutable payload generations
+//! below the existing Tascarrel state root.
+
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -11,6 +17,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -49,7 +56,29 @@ pub struct PreparedPayload {
     _lease: File,
 }
 
+/// Observable stage of preparing the embedded distribution payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PayloadPreparationProgress {
+    /// The embedded payload metadata and digest are being checked.
+    Validating,
+    /// Preparation is waiting for exclusive access to payload state.
+    WaitingForLock,
+    /// Compressed payload bytes are being consumed.
+    Extracting {
+        /// Number of compressed bytes consumed so far.
+        completed_bytes: u64,
+        /// Total number of compressed bytes in the payload.
+        total_bytes: u64,
+    },
+    /// Extracted files are being checked and made current.
+    Activating,
+    /// Superseded payload generations are being removed.
+    Pruning,
+}
+
 impl PreparedPayload {
+    /// Returns paths and boot arguments for host service initialization.
+    #[must_use]
     pub fn guest(&self) -> tascarrel_host::daemon::GuestPayload {
         tascarrel_host::daemon::GuestPayload {
             image: self.image.clone(),
@@ -62,6 +91,11 @@ impl PreparedPayload {
 }
 
 impl InstallPaths {
+    /// Discovers the state and per-user server installation paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when required home paths are absent or relative.
     pub fn discover() -> Result<Self> {
         let home = absolute_environment("HOME").ok_or_else(|| {
             anyhow!("HOME must name an absolute directory for a per-user installation")
@@ -81,25 +115,73 @@ impl InstallPaths {
     }
 }
 
-pub fn install(payload: EmbeddedPayload, dependencies: &ResolvedDependencies) -> Result<PathBuf> {
-    validate_embedded_payload(payload)?;
+/// Installs a server executable and registers its per-user service.
+///
+/// # Errors
+///
+/// Returns an error when the executable cannot be copied or the service
+/// definition cannot be installed.
+pub fn install_server(source: &Path, dependencies: &ResolvedDependencies) -> Result<PathBuf> {
     let paths = InstallPaths::discover()?;
-    let current_executable =
-        env::current_exe().context("locate the running tascarrel executable")?;
-    install_binary(&current_executable, &paths.binary)?;
+    install_binary(source, &paths.binary)?;
     service::install(&paths.binary, dependencies)?;
     Ok(paths.binary)
 }
 
+/// Locates `tascarrel` beside the running `tascarrelctl` executable.
+///
+/// # Errors
+///
+/// Returns an error when the current executable cannot be located or its
+/// sibling server is not an executable file.
+pub fn sibling_server_executable() -> Result<PathBuf> {
+    let client = env::current_exe().context("locate the running tascarrelctl executable")?;
+    let directory = client
+        .parent()
+        .ok_or_else(|| anyhow!("tascarrelctl executable has no parent directory"))?;
+    let server = directory.join("tascarrel");
+    let metadata = fs::metadata(&server)
+        .with_context(|| format!("locate Tascarrel server {}", server.display()))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        bail!(
+            "Tascarrel server is not an executable file: {}",
+            server.display()
+        );
+    }
+    Ok(server)
+}
+
 /// Extracts and activates the embedded assets for the running host.
+///
+/// # Errors
+///
+/// Returns an error when validation, extraction, activation, or cleanup fails.
 pub fn prepare(payload: EmbeddedPayload) -> Result<PreparedPayload> {
-    let (paths, payload_root, _lock) = prepare_payload(payload)?;
+    prepare_with_progress(payload, |_| {})
+}
+
+/// Extracts and activates embedded assets while reporting preparation stages.
+///
+/// # Errors
+///
+/// Returns an error when validation, extraction, activation, or cleanup fails.
+pub fn prepare_with_progress(
+    payload: EmbeddedPayload,
+    progress: impl Fn(PayloadPreparationProgress) + Send + Sync + 'static,
+) -> Result<PreparedPayload> {
+    let progress: Arc<dyn Fn(PayloadPreparationProgress) + Send + Sync> = Arc::new(progress);
+    let (paths, payload_root, _lock) = prepare_payload(payload, &progress)?;
     let lease = payload_lease(&payload_root)?;
+    progress(PayloadPreparationProgress::Pruning);
     prune_payloads(&paths, payload.sha256)?;
     prepared_payload(&payload_root, lease)
 }
 
-fn prepare_payload(payload: EmbeddedPayload) -> Result<(InstallPaths, PathBuf, File)> {
+fn prepare_payload(
+    payload: EmbeddedPayload,
+    progress: &Arc<dyn Fn(PayloadPreparationProgress) + Send + Sync>,
+) -> Result<(InstallPaths, PathBuf, File)> {
+    progress(PayloadPreparationProgress::Validating);
     validate_embedded_payload(payload)?;
     let paths = InstallPaths::discover()?;
     create_private_directory(&paths.state)?;
@@ -112,10 +194,11 @@ fn prepare_payload(payload: EmbeddedPayload) -> Result<(InstallPaths, PathBuf, F
         .mode(0o600)
         .open(&lock_path)
         .with_context(|| format!("open installation lock {}", lock_path.display()))?;
+    progress(PayloadPreparationProgress::WaitingForLock);
     lock.lock_exclusive()
         .with_context(|| format!("lock installation at {}", paths.state.display()))?;
 
-    let payload_root = unpack_payload(payload, &paths)?;
+    let payload_root = unpack_payload_with_progress(payload, &paths, progress)?;
     Ok((paths, payload_root, lock))
 }
 
@@ -131,11 +214,16 @@ fn prepared_payload(root: &Path, lease: File) -> Result<PreparedPayload> {
     })
 }
 
-fn unpack_payload(payload: EmbeddedPayload, paths: &InstallPaths) -> Result<PathBuf> {
+fn unpack_payload_with_progress(
+    payload: EmbeddedPayload,
+    paths: &InstallPaths,
+    observer: &Arc<dyn Fn(PayloadPreparationProgress) + Send + Sync>,
+) -> Result<PathBuf> {
     let target = paths.payload(payload.sha256);
     match fs::symlink_metadata(&target) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             if validate_payload_directory(&target).is_ok() {
+                observer(PayloadPreparationProgress::Activating);
                 return Ok(target);
             }
             remove_payload_directory(&target, "incomplete payload")?;
@@ -160,7 +248,20 @@ fn unpack_payload(payload: EmbeddedPayload, paths: &InstallPaths) -> Result<Path
         stderr.lock(),
         payload.size,
         stderr.is_terminal(),
-    );
+    )
+    .with_observer({
+        let observer = Arc::clone(observer);
+        move |completed_bytes, total_bytes| {
+            observer(PayloadPreparationProgress::Extracting {
+                completed_bytes,
+                total_bytes,
+            });
+        }
+    });
+    observer(PayloadPreparationProgress::Extracting {
+        completed_bytes: 0,
+        total_bytes: payload.size,
+    });
     progress.render(true);
     let mut archive = Archive::new(XzDecoder::new(progress));
     // Payload archives are build artifacts; their numeric UID/GID fields must
@@ -170,6 +271,7 @@ fn unpack_payload(payload: EmbeddedPayload, paths: &InstallPaths) -> Result<Path
     let progress = archive.into_inner().into_inner();
     let _ = progress.finish(extracted.is_ok());
     extracted.context("extract embedded Tascarrel payload")?;
+    observer(PayloadPreparationProgress::Activating);
     validate_payload_ownership(&temporary)?;
     validate_payload_directory(&temporary)?;
     sync_payload(&temporary)?;
@@ -533,6 +635,7 @@ fn absolute_environment(name: &str) -> Option<PathBuf> {
 struct ProgressReader<R, W> {
     inner: R,
     output: W,
+    observer: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     position: u64,
     total: u64,
     last_cells: Option<u64>,
@@ -547,11 +650,17 @@ where
         Self {
             inner,
             output,
+            observer: None,
             position: 0,
             total,
             last_cells: None,
             enabled,
         }
+    }
+
+    fn with_observer(mut self, observer: impl Fn(u64, u64) + Send + Sync + 'static) -> Self {
+        self.observer = Some(Arc::new(observer));
+        self
     }
 
     fn render(&mut self, force: bool) {
@@ -581,6 +690,9 @@ where
         if completed {
             self.position = self.total;
         }
+        if let Some(observer) = &self.observer {
+            observer(self.position.min(self.total), self.total);
+        }
         self.render(true);
         if self.enabled {
             let _ = writeln!(self.output);
@@ -599,6 +711,9 @@ where
         self.position = self
             .position
             .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if let Some(observer) = &self.observer {
+            observer(self.position.min(self.total), self.total);
+        }
         self.render(false);
         Ok(read)
     }
@@ -678,9 +793,10 @@ mod tests {
             binary: directory.path().join("bin/tascarrel"),
         };
         let payload = fixture();
+        let observer: Arc<dyn Fn(PayloadPreparationProgress) + Send + Sync> = Arc::new(|_| {});
         validate_embedded_payload(payload).unwrap();
-        let first = unpack_payload(payload, &paths).unwrap();
-        let second = unpack_payload(payload, &paths).unwrap();
+        let first = unpack_payload_with_progress(payload, &paths, &observer).unwrap();
+        let second = unpack_payload_with_progress(payload, &paths, &observer).unwrap();
         assert_eq!(first, second);
         validate_payload_ownership(&first).unwrap();
         assert_eq!(

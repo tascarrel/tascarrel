@@ -53,7 +53,7 @@ in
 
       Service = {
         Type = "simple";
-        ExecStart = "${lib.getExe cfg.package} host";
+        ExecStart = lib.getExe cfg.package;
         Environment = [
           "TASCARREL_HOME=${cfg.home}"
           "TASCARREL_WEB_ADDRESS=${cfg.webAddress}"

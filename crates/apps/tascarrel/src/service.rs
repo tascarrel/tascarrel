@@ -1,3 +1,8 @@
+//! Per-user service-manager integration for the Tascarrel server.
+//!
+//! The public operations install, start, stop, inspect, and read logs from the
+//! `systemd` user service on Linux or `LaunchAgent` on macOS.
+
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
@@ -18,6 +23,12 @@ const LINUX_UNIT: &str = "tascarrel.service";
 #[cfg(target_os = "macos")]
 const MACOS_LABEL: &str = "dev.tascarrel.host";
 
+/// Writes the per-user service definition for a server executable.
+///
+/// # Errors
+///
+/// Returns an error when state paths cannot be discovered or the service
+/// definition cannot be written.
 pub fn install(binary: &Path, dependencies: &ResolvedDependencies) -> Result<()> {
     let tascarrel_home =
         tascarrel_host::TascarrelHome::discover().map_err(|error| anyhow!(error.to_string()))?;
@@ -41,6 +52,12 @@ pub fn install(binary: &Path, dependencies: &ResolvedDependencies) -> Result<()>
     }
 }
 
+/// Starts the installed per-user Tascarrel service.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager is unavailable or
+/// rejects the operation.
 pub fn start() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -88,6 +105,12 @@ pub fn start() -> Result<()> {
     }
 }
 
+/// Stops the installed per-user Tascarrel service.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager is unavailable or
+/// rejects the operation.
 pub fn stop() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -123,6 +146,12 @@ fn reload_linux_user_manager() -> Result<()> {
     )
 }
 
+/// Restarts the installed per-user Tascarrel service.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager is unavailable or
+/// rejects the operation.
 pub fn restart() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -136,7 +165,7 @@ pub fn restart() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        stop().ok();
+        stop()?;
         start()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -145,6 +174,11 @@ pub fn restart() -> Result<()> {
     }
 }
 
+/// Reports whether the installed per-user service is active.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager cannot be queried.
 pub fn status() -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
@@ -169,6 +203,12 @@ pub fn status() -> Result<bool> {
     }
 }
 
+/// Displays recent service logs, optionally following new records.
+///
+/// # Errors
+///
+/// Returns an error when the platform log reader is unavailable or exits
+/// unsuccessfully.
 pub fn logs(follow: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -207,7 +247,7 @@ fn linux_unit(
 ) -> Result<String> {
     Ok(format!(
         "[Unit]\nDescription=Tascarrel host daemon\n\n\
-         [Service]\nType=simple\nExecStart={} host\nRestart=on-failure\n\
+         [Service]\nType=simple\nExecStart={}\nRestart=on-failure\n\
          Environment=TASCARREL_HOME={}\nEnvironment=TASCARREL_QEMU={}\nEnvironment=TASCARREL_GIT={}\nEnvironment=TASCARREL_SOPS={}\n\n\
          [Install]\nWantedBy=default.target\n",
         systemd_quote(binary)?,
@@ -231,7 +271,7 @@ fn macos_plist(
          \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\"><dict>\n\
          <key>Label</key><string>{MACOS_LABEL}</string>\n\
-         <key>ProgramArguments</key><array><string>{}</string><string>host</string></array>\n\
+         <key>ProgramArguments</key><array><string>{}</string></array>\n\
          <key>EnvironmentVariables</key><dict>\n\
          <key>TASCARREL_HOME</key><string>{}</string>\n\
          <key>TASCARREL_QEMU</key><string>{}</string>\n\
@@ -351,7 +391,7 @@ mod tests {
             Path::new("/home/test/tascarrel data"),
         )
         .unwrap();
-        assert!(unit.contains("ExecStart=\"/home/test/bin/tascarrel\" host"));
+        assert!(unit.contains("ExecStart=\"/home/test/bin/tascarrel\""));
         assert!(unit.contains("Environment=TASCARREL_HOME=\"/home/test/tascarrel data\""));
         assert!(unit.contains("\"/opt/QEMU bin/qemu%%system\""));
         assert!(unit.contains("Environment=TASCARREL_SOPS=\"/usr/bin/sops\""));

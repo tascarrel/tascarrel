@@ -79,18 +79,24 @@ jobs:
         include:
           - release_target: x86_64-linux
             rust_target: x86_64-unknown-linux-musl
+            desktop_target: x86_64-unknown-linux-gnu
+            desktop_bundles: deb,rpm
             guest_system: x86_64-linux
             guest_architecture: x86_64
             runner: ubuntu-24.04
             file_pattern: "ELF 64-bit LSB.*x86-64"
           - release_target: aarch64-linux
             rust_target: aarch64-unknown-linux-musl
+            desktop_target: aarch64-unknown-linux-gnu
+            desktop_bundles: deb,rpm
             guest_system: aarch64-linux
             guest_architecture: aarch64
             runner: ubuntu-24.04-arm
             file_pattern: "ELF 64-bit LSB.*ARM aarch64"
           - release_target: aarch64-darwin
             rust_target: aarch64-apple-darwin
+            desktop_target: aarch64-apple-darwin
+            desktop_bundles: dmg
             guest_system: aarch64-linux
             guest_architecture: aarch64
             runner: macos-15
@@ -125,7 +131,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes musl-tools
+          sudo apt-get install --yes \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            musl-tools \
+            patchelf \
+            rpm
           echo "CC=musl-gcc" >> "$GITHUB_ENV"
           case "$RUST_TARGET" in
             x86_64-unknown-linux-musl)
@@ -143,6 +155,9 @@ jobs:
           rustup set profile minimal
           rustup toolchain install 1.97.1 --target "$RUST_TARGET"
 
+      - name: Install Tauri CLI
+        run: cargo +1.97.1 install tauri-cli --version 2.11.4 --locked
+
       - name: Build host release
         env:
           CARGO_INCREMENTAL: "0"
@@ -159,11 +174,13 @@ jobs:
       - name: Verify and package host release
         env:
           BINARY: target/${{ matrix.rust_target }}/release/tascarrel
+          CLIENT: target/${{ matrix.rust_target }}/release/tascarrelctl
           FILE_PATTERN: ${{ matrix.file_pattern }}
           RELEASE_TARGET: ${{ matrix.release_target }}
         run: |
           set -euo pipefail
           test -x "$BINARY"
+          test -x "$CLIENT"
           file "$BINARY" | grep -E "$FILE_PATTERN"
           if [ "${{ runner.os }}" = Linux ]; then
             program_headers=$(readelf --program-headers "$BINARY")
@@ -174,14 +191,67 @@ jobs:
           fi
           "$BINARY" --version
 
-          archive="tascarrel-$RELEASE_TARGET.tar.gz"
+          "$CLIENT" --version
+
+          archive="tascarrel-server-$RELEASE_TARGET.tar.gz"
           mkdir -p dist/package
           cp "$BINARY" dist/package/tascarrel
-          tar -C dist/package -czf "dist/$archive" tascarrel
+          cp "$CLIENT" dist/package/tascarrelctl
+          tar -C dist/package -czf "dist/$archive" tascarrel tascarrelctl
           if [ "${{ runner.os }}" = macOS ]; then
             (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
           else
             (cd dist && sha256sum "$archive" > "$archive.sha256")
+          fi
+
+      - name: Stage the desktop server sidecar
+        env:
+          DESKTOP_TARGET: ${{ matrix.desktop_target }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          sidecars=crates/apps/tascarrel-desktop/binaries
+          mkdir -p "$sidecars"
+          cp "target/$RUST_TARGET/release/tascarrel" \
+            "$sidecars/tascarrel-$DESKTOP_TARGET"
+
+      - name: Build desktop packages
+        working-directory: crates/apps/tascarrel-desktop
+        env:
+          DESKTOP_BUNDLES: ${{ matrix.desktop_bundles }}
+        run: >-
+          cargo +1.97.1 tauri build
+          --config tauri.bundle.conf.json
+          --bundles "$DESKTOP_BUNDLES"
+          --
+          --locked
+
+      - name: Stage desktop packages
+        env:
+          RELEASE_TARGET: ${{ matrix.release_target }}
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = macOS ]; then
+            dmg=$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -type f)
+            test "$(wc -l <<< "$dmg" | tr -d ' ')" -eq 1
+            package="tascarrel-desktop-$RELEASE_TARGET.dmg"
+            cp "$dmg" "dist/$package"
+            (cd dist && shasum -a 256 "$package" > "$package.sha256")
+          else
+            deb=$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f)
+            rpm=$(find target/release/bundle/rpm -maxdepth 1 -name '*.rpm' -type f)
+            test "$(wc -l <<< "$deb" | tr -d ' ')" -eq 1
+            test "$(wc -l <<< "$rpm" | tr -d ' ')" -eq 1
+            deb_archive="tascarrel-desktop-$RELEASE_TARGET.deb"
+            rpm_archive="tascarrel-desktop-$RELEASE_TARGET.rpm"
+            cp "$deb" "dist/$deb_archive"
+            cp "$rpm" "dist/$rpm_archive"
+            (cd dist && sha256sum "$deb_archive" "$rpm_archive" > desktop.sha256)
+            awk -v deb="$deb_archive" '$2 == deb { print }' dist/desktop.sha256 \
+              > "dist/$deb_archive.sha256"
+            awk -v rpm="$rpm_archive" '$2 == rpm { print }' dist/desktop.sha256 \
+              > "dist/$rpm_archive.sha256"
+            rm dist/desktop.sha256
           fi
 
       - name: Upload host release
@@ -189,8 +259,9 @@ jobs:
         with:
           name: tascarrel-release-${{ matrix.release_target }}-${{ github.sha }}
           path: |
-            dist/tascarrel-${{ matrix.release_target }}.tar.gz
-            dist/tascarrel-${{ matrix.release_target }}.tar.gz.sha256
+            dist/tascarrel-server-${{ matrix.release_target }}.tar.gz
+            dist/tascarrel-server-${{ matrix.release_target }}.tar.gz.sha256
+            dist/tascarrel-desktop-${{ matrix.release_target }}.*
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
@@ -214,8 +285,11 @@ jobs:
       - name: Verify release archives
         run: |
           set -euo pipefail
-          test "$(find dist -maxdepth 1 -name 'tascarrel-*.tar.gz' -type f | wc -l)" -eq 3
-          test "$(find dist -maxdepth 1 -name 'tascarrel-*.tar.gz.sha256' -type f | wc -l)" -eq 3
+          test "$(find dist -maxdepth 1 -name 'tascarrel-server-*.tar.gz' -type f | wc -l)" -eq 3
+          test "$(find dist -maxdepth 1 -name 'tascarrel-desktop-*.deb' -type f | wc -l)" -eq 2
+          test "$(find dist -maxdepth 1 -name 'tascarrel-desktop-*.rpm' -type f | wc -l)" -eq 2
+          test "$(find dist -maxdepth 1 -name 'tascarrel-desktop-*.dmg' -type f | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.sha256' -type f | wc -l)" -eq 8
           (cd dist && sha256sum --check ./*.sha256)
 
       - name: Publish release assets

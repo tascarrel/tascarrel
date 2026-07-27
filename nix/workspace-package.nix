@@ -41,11 +41,10 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
 
   src = workspaceSource;
-  # Read the lock file from the filtered Rust source. This keeps Nix-only
-  # changes from rebuilding Cargo dependencies without creating a separately
-  # cached store path that can be collected between evaluations.
+  # Pass the lock contents directly so Nix-only source changes do not rebuild
+  # Cargo dependencies or leave evaluation dependent on a filtered store path.
   cargoLock = {
-    lockFile = "${workspaceSource}/Cargo.lock";
+    lockFileContents = builtins.readFile "${sourceRoot}/Cargo.lock";
     outputHashes = {
       "sidex-0.1.0" = "sha256-3EzJF9DF3IdzwQ5fjRAcz6OOTk0zS7ZPgSHDuCkQoMM=";
     };

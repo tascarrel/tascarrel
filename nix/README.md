@@ -8,11 +8,12 @@ nix build .#packages.x86_64-linux.vm-image
 nix build .#packages.aarch64-linux.vm-image
 ```
 
-`packages.<system>.tascarrel` builds the matching Linux system image, kernel, and
-initrd and packs them into one SHA-256-addressed, xz-compressed tar payload
-embedded in the final Tascarrel binary. `packages.<system>.tascarrel-cli` builds
-the CLI and host daemon without that payload for development, while
-`tascarrel-distribution` is an alias for the complete `tascarrel` package.
+The `packages.<system>.tascarrel` output builds the matching Linux system image,
+kernel, and initrd and packs them into one SHA-256-addressed, xz-compressed tar
+payload embedded in the final Tascarrel binary. The
+`packages.<system>.tascarrel-cli` output builds the administrative client and
+server without that payload for development, while the
+`tascarrel-distribution` output aliases the complete `tascarrel` package.
 Additional assets can be added to the archive without changing the embedding
 scheme.
 
@@ -28,7 +29,18 @@ payload to feed both AArch64 Linux and Apple Silicon macOS releases.
 Linux distributions use a statically linked musl executable; macOS remains one
 executable while linking the platform system libraries.
 
-The `tascarrel host` entrypoint verifies and extracts its embedded payload below
+The native `tascarrel-desktop` Nix package retains Nix store references for use
+with `nix run` and Nix profiles. Build `tascarrel-desktop-appimage` when the
+result must run on Debian, Ubuntu, or another Linux distribution without Nix:
+
+```console
+nix build .#tascarrel-desktop-appimage
+```
+
+This AppImage embeds the desktop application's complete Nix store closure and
+requires FUSE 3 and enabled user namespaces on the target system.
+
+The `tascarrel` server verifies and extracts its embedded payload below
 `$TASCARREL_HOME/state/payloads/<sha256>/`, removes older generations, and starts
 the regular-user host supervisor. The supervisor creates a dedicated VM lazily
 when a typed operation first needs a workspace guest. The `aarch64-darwin` build carries
@@ -53,9 +65,9 @@ or external configuration are rejected. Workspace files are not mounted or
 otherwise exposed to QEMU.
 
 The host supervisor publishes exactly one private typed control-plane socket at
-`$TASCARREL_HOME/state/runtime/control.sock`. The minimal CLI uses it for host-owned
-workspace lifecycle actions; guest-owned UI operations start the selected VM
-lazily through hostd. Persistent state lives below
+`$TASCARREL_HOME/state/runtime/control.sock`. The `tascarrelctl` administrative
+client uses it for host-owned workspace lifecycle actions; guest-owned UI
+operations start the selected VM lazily through hostd. Persistent state lives below
 `$TASCARREL_HOME/state/workspaces/<name>`, and each QEMU virtio-serial socket
 remains private below the Tascarrel runtime directory. Local clients never
 connect directly to a VM chardev.
@@ -96,7 +108,7 @@ therefore reach the next image build without a VM restart. The
 guest validates the OCI result and publishes immutable image and workspace
 generations on its Btrfs state disk.
 
-For development, `tascarrel host --local-binaries <directory>` exposes a
+For development, `tascarrel --local-binaries <directory>` exposes a
 read-only directory containing `tascarrel-guest` and `tascarrel-podd` to the VM.
 The guest mounts it through virtiofs or portable 9p and bind-mounts both
 executables over their image paths for that boot. The files must be executable
@@ -114,7 +126,7 @@ by default, as is arbitrary external UDP.
 
 Pods use the reserved DNS address `192.0.2.53`; TCP and UDP port 53 are both
 captured regardless of the resolver address selected by the workload. Hostd
-uses the host resolver from `/etc/resolv.conf`, or `tascarrel host
+uses the host resolver from `/etc/resolv.conf`, or `tascarrel
 --dns-resolver`. External IPv6 TCP/UDP egress is not yet implemented.
 
 ## Modules and Checks
@@ -124,8 +136,8 @@ package and the `tascarrel-podd` package. Consumers must explicitly enable its
 network-isolation policy and may configure a dedicated data device. The
 packaged appliance supplies these settings automatically.
 
-`nix flake check` builds the packaged components, checks formatting, and boots a
-focused NixOS VM test for this module.
+The `nix flake check` command builds the packaged components, checks formatting,
+and boots a focused NixOS VM test for this module.
 
 ```console
 nix flake check

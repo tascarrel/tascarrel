@@ -2,6 +2,8 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use axum::Json;
@@ -22,15 +24,21 @@ use axum::http::header;
 use axum::http::uri::Authority;
 use axum::middleware;
 use axum::middleware::Next;
+use axum::response::Html;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use axum::response::Sse;
+use axum::response::sse::Event;
+use axum::response::sse::KeepAlive;
 use axum::routing::get;
 use axum::routing::post;
 use futures_util::StreamExt;
+use futures_util::stream;
 use reportify::ErrorExt as _;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
+use tascarrel_api::types::host::ServerState;
+use tascarrel_api::types::host::ServerStatus;
 use tascarrel_api::types::protocol;
 use tascarrel_protocol::ChatAttachmentReadRequest;
 use tascarrel_protocol::ChatAttachmentReadResponse;
@@ -49,37 +57,54 @@ use tascarrel_protocol::WorkspaceName;
 use tascarrel_protocol::control_plane;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_util::io::ReaderStream;
+use tower::ServiceExt as _;
 use tower_http::cors::AllowOrigin;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::services::ServeFile;
 use tracing::debug;
 use tracing::info;
+use tracing::warn;
 
 use crate::HostState;
 use crate::control_plane::HostControlService;
+use crate::startup::StartupReporter;
 
-const FRONTEND_CORS_MAX_AGE: Duration = Duration::from_secs(600);
+const FRONTEND_CORS_MAX_AGE: Duration = Duration::from_mins(10);
 const UI_DOCUMENT_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-store");
 const UI_ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
 const CHAT_ATTACHMENT_UPLOAD_PROOF: &str = "tascarrel-chat-attachment";
+const STARTUP_PAGE: &str = include_str!("startup.html");
 
-#[derive(Clone, Debug)]
-pub struct WebServerConfig {
-    pub address: SocketAddr,
-    pub ui_root: Option<PathBuf>,
+pub(crate) struct WebServer {
+    listener: TcpListener,
+    state: WebState,
+}
+
+pub(crate) struct WebServerControl {
+    retry: mpsc::Receiver<()>,
+    state: WebState,
 }
 
 #[derive(Clone)]
 struct WebState {
-    host: HostState,
-    control: HostControlService,
+    ready: Arc<RwLock<Option<ReadyWebState>>>,
+    retry: mpsc::Sender<()>,
+    status: StartupReporter,
     web_authority: SocketAddr,
 }
 
-impl WebState {
+#[derive(Clone)]
+struct ReadyWebState {
+    host: HostState,
+    control: HostControlService,
+    ui_root: Option<PathBuf>,
+}
+
+impl ReadyWebState {
     fn workspace_service(&self) -> &crate::WorkspaceService {
         self.host.workspaces()
     }
@@ -89,40 +114,114 @@ impl WebState {
     }
 }
 
-/// Serves the extracted frontend and host-owned streaming transports.
+impl WebState {
+    fn ready(&self) -> Option<ReadyWebState> {
+        match self.ready.read() {
+            Ok(ready) => ready.clone(),
+            Err(poisoned) => {
+                warn!(error = %poisoned, "web readiness lock was poisoned while reading");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    fn set_ready(&self, ready: ReadyWebState) {
+        match self.ready.write() {
+            Ok(mut current) => *current = Some(ready),
+            Err(poisoned) => {
+                warn!(error = %poisoned, "web readiness lock was poisoned while writing");
+                *poisoned.into_inner() = Some(ready);
+            }
+        }
+    }
+
+    fn require_ready(&self) -> Result<ReadyWebState, ApiError> {
+        self.ready().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server-starting",
+                "the Tascarrel server is not ready",
+            )
+        })
+    }
+}
+
+impl WebServer {
+    /// Serves the embedded startup document, status API, and ready application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Axum server stops unexpectedly.
+    #[tracing::instrument(name = "tascarrel_host.web.serve", level = "info", skip_all, err)]
+    pub(crate) async fn serve(self) -> anyhow::Result<()> {
+        info!(address = %self.state.web_authority, "Tascarrel bootstrap web interface ready");
+        axum::serve(self.listener, router(self.state)).await?;
+        Ok(())
+    }
+}
+
+impl WebServerControl {
+    /// Publishes the initialized host services to ready-only HTTP routes.
+    pub(crate) fn make_ready(
+        &self,
+        host: HostState,
+        control: HostControlService,
+        ui_root: Option<PathBuf>,
+    ) {
+        self.state.set_ready(ReadyWebState {
+            host,
+            control,
+            ui_root,
+        });
+    }
+
+    /// Waits for the next startup retry requested through the bootstrap page.
+    pub(crate) async fn retry_requested(&mut self) {
+        if self.retry.recv().await.is_none() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Binds the bootstrap listener before payload preparation or host checks.
 ///
 /// # Errors
 ///
-/// Returns an error when the TCP listener cannot be bound or the Axum server
-/// fails.
-pub(crate) async fn serve(
-    config: WebServerConfig,
-    state: HostState,
-    control: HostControlService,
-) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(config.address).await?;
+/// Returns an error when the configured loopback listener cannot be bound.
+#[tracing::instrument(name = "tascarrel_host.web.bind", level = "info", skip(status), err)]
+pub(crate) async fn bind(
+    address: SocketAddr,
+    status: StartupReporter,
+) -> anyhow::Result<(WebServer, WebServerControl)> {
+    let listener = TcpListener::bind(address).await?;
     let web_authority = listener.local_addr()?;
-    info!(address = %web_authority, "Tascarrel web interface ready");
-    axum::serve(
-        listener,
-        router(
-            WebState {
-                host: state,
-                control,
-                web_authority,
-            },
-            config.ui_root,
-        ),
-    )
-    .await?;
-    Ok(())
+    let (retry, retry_requests) = mpsc::channel(1);
+    let state = WebState {
+        ready: Arc::new(RwLock::new(None)),
+        retry,
+        status,
+        web_authority,
+    };
+    Ok((
+        WebServer {
+            listener,
+            state: state.clone(),
+        },
+        WebServerControl {
+            retry: retry_requests,
+            state,
+        },
+    ))
 }
 
-fn router(state: WebState, ui_root: Option<PathBuf>) -> Router {
+fn router(state: WebState) -> Router {
     let network_state = state.clone();
     let cors = frontend_cors(&state);
-    let router = Router::new()
-        .route("/api/health", get(health))
+    Router::new()
+        .route("/api/health", get(server_status))
+        .route("/api/v1/server/status", get(server_status))
+        .route("/api/v1/server/status/events", get(server_status_events))
+        .route("/api/v1/server/retry", post(retry_startup))
         .route("/api/v1/control", get(control_upgrade))
         .route(
             "/api/v1/chat/upload-attachment",
@@ -130,31 +229,125 @@ fn router(state: WebState, ui_root: Option<PathBuf>) -> Router {
         )
         .route("/api/v1/chat/attachment", get(read_chat_attachment))
         .route("/api/v1/files/raw", get(raw_file))
+        .fallback(serve_ui)
         .with_state(state)
-        .layer(cors);
+        .layer(middleware::from_fn(ui_cache_headers))
+        .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            network_state,
+            forward_network_request,
+        ))
+}
 
-    let router = if let Some(ui_root) = ui_root {
-        let index = ui_root.join("index.html");
-        router
-            .fallback_service(ServeDir::new(ui_root).not_found_service(ServeFile::new(index)))
-            .layer(middleware::from_fn(ui_cache_headers))
-    } else {
-        router
+async fn serve_ui(State(state): State<WebState>, request: Request) -> Response {
+    let startup_requested = request.uri().path() == "/startup";
+    let Some(ready) = state.ready().filter(|_| !startup_requested) else {
+        return startup_page();
     };
+    let Some(ui_root) = ready.ui_root else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let index = ui_root.join("index.html");
+    match ServeDir::new(ui_root)
+        .not_found_service(ServeFile::new(index))
+        .oneshot(request)
+        .await
+    {
+        Ok(response) => response.into_response(),
+        Err(error) => match error {},
+    }
+}
 
-    router.layer(middleware::from_fn_with_state(
-        network_state,
-        forward_network_request,
-    ))
+fn startup_page() -> Response {
+    let mut response = Html(STARTUP_PAGE).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, UI_DOCUMENT_CACHE_CONTROL);
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn server_status(State(state): State<WebState>) -> Json<ServerStatus> {
+    Json(state.status.current())
+}
+
+async fn server_status_events(
+    State(state): State<WebState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, axum::Error>>> {
+    let stream = stream::unfold(
+        (state.status.subscribe(), true),
+        |(mut status, initial)| async move {
+            if !initial && status.changed().await.is_err() {
+                return None;
+            }
+            let snapshot = status.borrow_and_update().clone();
+            Some((Event::default().json_data(snapshot), (status, false)))
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn retry_startup(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    validate_same_origin(&headers)?;
+    if !matches!(state.status.current().state, ServerState::Failed(_)) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "server-not-failed",
+            "the Tascarrel server is not waiting for a startup retry",
+        ));
+    }
+    match state.retry.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(StatusCode::ACCEPTED),
+        Err(mpsc::error::TrySendError::Closed(())) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "retry-unavailable",
+            "the Tascarrel startup task is unavailable",
+        )),
+    }
+}
+
+fn validate_same_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::forbidden("invalid-origin", "missing HTTP host"))?;
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok())
+        .filter(|origin| matches!(origin.scheme_str(), Some("http" | "https")))
+        .and_then(|origin| origin.authority().cloned())
+        .ok_or_else(|| ApiError::forbidden("invalid-origin", "missing or invalid HTTP origin"))?;
+    if !origin.as_str().eq_ignore_ascii_case(host) {
+        return Err(ApiError::forbidden(
+            "cross-origin-request",
+            "request origin does not match the Tascarrel server",
+        ));
+    }
+    Ok(())
 }
 
 /// Builds the browser API policy for canonical and explicitly trusted origins.
 fn frontend_cors(state: &WebState) -> CorsLayer {
-    let network = state.network_service().clone();
+    let state = state.clone();
     let web_authority = state.web_authority;
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin, _request| {
-            is_allowed_frontend_origin(origin, web_authority, &network)
+            state.ready().is_some_and(|ready| {
+                is_allowed_frontend_origin(origin, web_authority, ready.network_service())
+            })
         }))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([
@@ -188,7 +381,10 @@ async fn forward_network_request(
     request: Request,
     next: Next,
 ) -> Response {
-    let route = match state
+    let Some(ready) = state.ready() else {
+        return next.run(request).await;
+    };
+    let route = match ready
         .network_service()
         .resolve_http_route(request.headers())
     {
@@ -196,9 +392,9 @@ async fn forward_network_request(
         Ok(None) => return next.run(request).await,
         Err(error) => return network_proxy_error(&error),
     };
-    match state
+    match ready
         .network_service()
-        .forward_http(request, route, state.workspace_service())
+        .forward_http(request, route, ready.workspace_service())
         .await
     {
         Ok(response) => response,
@@ -268,10 +464,6 @@ fn is_hashed_ui_asset(path: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-async fn health() -> Json<Value> {
-    Json(serde_json::json!({ "status": "ok" }))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UploadChatAttachmentQuery {
@@ -291,6 +483,7 @@ async fn upload_chat_attachment(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<tascarrel_api::types::chats::ChatPromptAttachment>, ApiError> {
+    let state = state.require_ready()?;
     if headers
         .get("x-tascarrel-request")
         .and_then(|value| value.to_str().ok())
@@ -426,6 +619,7 @@ async fn read_chat_attachment(
     State(state): State<WebState>,
     Query(input): Query<ReadChatAttachmentQuery>,
 ) -> Result<Response, ApiError> {
+    let state = state.require_ready()?;
     let workspace = WorkspaceName::new(input.workspace)
         .map_err(|error| ApiError::bad_request("invalid-workspace", error.to_string()))?;
     let attachment_id = input
@@ -581,6 +775,7 @@ async fn raw_file(
     State(state): State<WebState>,
     Query(input): Query<RawFileQuery>,
 ) -> Result<Response, ApiError> {
+    let state = state.require_ready()?;
     let workspace = WorkspaceName::new(input.workspace)
         .map_err(|error| ApiError::bad_request("invalid-workspace", error.to_string()))?;
     let pod_id = input
@@ -723,14 +918,16 @@ async fn control_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<WebState>,
 ) -> Result<Response, ApiError> {
-    validate_websocket_origin(&headers, state.web_authority, state.network_service())?;
+    let web_authority = state.web_authority;
+    let state = state.require_ready()?;
+    validate_websocket_origin(&headers, web_authority, state.network_service())?;
     Ok(ws
         .max_message_size(DEFAULT_MAX_FRAME_LEN)
         .max_frame_size(DEFAULT_MAX_FRAME_LEN)
         .on_upgrade(move |socket| control_session(socket, state)))
 }
 
-async fn control_session(socket: WebSocket, state: WebState) {
+async fn control_session(socket: WebSocket, state: ReadyWebState) {
     let client_id = protocol::ClientId::generate();
     if let Err(error) = state
         .control

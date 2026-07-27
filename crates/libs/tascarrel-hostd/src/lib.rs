@@ -13,6 +13,7 @@ pub mod guest;
 pub mod paths;
 pub mod services;
 pub mod socket;
+pub mod startup;
 pub mod web;
 
 pub use authority::WorkspaceAuthority;
@@ -41,3 +42,6 @@ pub use services::workspaces::WorkspaceService;
 pub use services::workspaces::WorkspaceServiceConfig;
 pub use socket::bind_control_socket;
 pub use socket::remove_control_socket;
+pub use startup::StartupFailure;
+pub use startup::StartupReporter;
+pub use startup::server_issue;
