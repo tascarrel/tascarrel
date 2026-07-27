@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: build-release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: false
 
 jobs:
   guest-payload:
@@ -166,7 +166,7 @@ jobs:
           rustup toolchain install 1.97.1 --target "$RUST_TARGET"
 
       - name: Install Tauri CLI
-        run: cargo +1.97.1 install tauri-cli --version 2.11.4 --locked
+        run: npm install --global @tauri-apps/cli@2.11.4
 
       - name: Build host release
         env:
@@ -242,7 +242,7 @@ jobs:
         env:
           DESKTOP_BUNDLES: ${{ matrix.desktop_bundles }}
         run: >-
-          cargo +1.97.1 tauri build
+          tauri build
           --config tauri.bundle.conf.json
           --bundles "$DESKTOP_BUNDLES"
           --
