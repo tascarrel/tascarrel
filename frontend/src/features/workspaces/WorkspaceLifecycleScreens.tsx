@@ -1,9 +1,10 @@
 import { CircleAlert, CircleStop, LoaderCircle, Power, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 
 import type { guest, workspaces } from "../../api/generated/index.ts";
 import type { WorkspaceScreenName } from "../../app/router.tsx";
 import { Button } from "../../components/ui/Button.tsx";
+import { LifecycleScreenFrame } from "../../components/ui/LifecycleScreenFrame.tsx";
 import { WorkspaceVmLog } from "./WorkspaceVmLog.tsx";
 
 export function workspaceScreenForState(
@@ -45,7 +46,7 @@ export function WorkspaceStoppedScreen({
   onStart: () => Promise<void>;
 }) {
   return (
-    <WorkspaceScreenFrame
+    <LifecycleScreenFrame
       icon={<Power aria-hidden="true" className="size-4" />}
       title="Workspace Stopped"
     >
@@ -55,28 +56,26 @@ export function WorkspaceStoppedScreen({
         pendingLabel="Starting…"
         onStart={onStart}
       />
-    </WorkspaceScreenFrame>
+    </LifecycleScreenFrame>
   );
 }
 
 export function WorkspaceStartingScreen({ workspace }: { workspace: workspaces.Workspace }) {
   return (
-    <WorkspaceScreenFrame
+    <LifecycleScreenFrame
       icon={<LoaderCircle aria-hidden="true" className="size-4 animate-spin" />}
       title="Starting Workspace"
-      showLog
-      logGuestInstanceId={guestInstanceId(workspace)}
+      log={<WorkspaceVmLog guestInstanceId={guestInstanceId(workspace)} presentation="screen" />}
     />
   );
 }
 
 export function WorkspaceStoppingScreen({ workspace }: { workspace: workspaces.Workspace }) {
   return (
-    <WorkspaceScreenFrame
+    <LifecycleScreenFrame
       icon={<CircleStop aria-hidden="true" className="size-4" />}
       title="Stopping Workspace"
-      showLog
-      logGuestInstanceId={guestInstanceId(workspace)}
+      log={<WorkspaceVmLog guestInstanceId={guestInstanceId(workspace)} presentation="screen" />}
     />
   );
 }
@@ -92,12 +91,11 @@ export function WorkspaceFailedScreen({
     ? workspace.state.message
     : "No failure is currently recorded for this workspace.";
   return (
-    <WorkspaceScreenFrame
+    <LifecycleScreenFrame
       danger
       icon={<CircleAlert aria-hidden="true" className="size-4" />}
       title="Workspace Failed"
-      showLog
-      logGuestInstanceId={guestInstanceId(workspace)}
+      log={<WorkspaceVmLog guestInstanceId={guestInstanceId(workspace)} presentation="screen" />}
     >
       <p className="mx-auto max-w-xl text-xs leading-5 text-red-200" role="alert">
         {failure}
@@ -110,13 +108,13 @@ export function WorkspaceFailedScreen({
           onStart={onStart}
         />
       </div>
-    </WorkspaceScreenFrame>
+    </LifecycleScreenFrame>
   );
 }
 
 export function WorkspaceDestroyingScreen() {
   return (
-    <WorkspaceScreenFrame
+    <LifecycleScreenFrame
       danger
       icon={<Trash2 aria-hidden="true" className="size-4" />}
       title="Destroying Workspace"
@@ -158,43 +156,6 @@ function WorkspaceStartButton({
       </Button>
       {error ? <p className="mt-3 text-xs text-red-200" role="alert">{error}</p> : null}
     </>
-  );
-}
-
-function WorkspaceScreenFrame({
-  children,
-  danger = false,
-  icon,
-  logGuestInstanceId,
-  showLog = false,
-  title,
-}: {
-  children?: ReactNode;
-  danger?: boolean;
-  icon: ReactNode;
-  logGuestInstanceId?: guest.GuestInstanceId;
-  showLog?: boolean;
-  title: string;
-}) {
-  return (
-    <div className="flex min-h-full items-center justify-center px-6 py-10 sm:px-10 sm:py-14">
-      <div className="w-full max-w-3xl">
-        <section className="text-center">
-          <div className="inline-flex items-center gap-2.5">
-            <span className={danger ? "text-red-300" : "text-accent-text"}>
-              {icon}
-            </span>
-            <h1 className="text-base font-medium tracking-[-0.01em] text-foreground">{title}</h1>
-          </div>
-          {children ? <div className="mt-4">{children}</div> : null}
-        </section>
-        {showLog ? (
-          <div className="mt-7">
-            <WorkspaceVmLog guestInstanceId={logGuestInstanceId} presentation="screen" />
-          </div>
-        ) : null}
-      </div>
-    </div>
   );
 }
 

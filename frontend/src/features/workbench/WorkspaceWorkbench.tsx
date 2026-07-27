@@ -31,6 +31,7 @@ import { ImagesView } from "../images/ImagesView.tsx";
 import { nestedHttpRouteUrl } from "../network/addresses.ts";
 import { NetworkView } from "../network/NetworkView.tsx";
 import { useHttpRoutes } from "../network/state.ts";
+import { isPodStarting, PodStartupScreen } from "../pods/PodStartupScreen.tsx";
 import { usePods } from "../pods/state.ts";
 import { ProcessManager } from "../processes/ProcessManager.tsx";
 import { ProcessTerminal } from "../processes/ProcessTerminal.tsx";
@@ -429,6 +430,9 @@ export function WorkspaceWorkbench({
       />
     </div>
   ) : undefined;
+  const podStartupScreen = selectedPod && isPodStarting(selectedPod)
+    ? <PodStartupScreen pod={selectedPod} workspace={workspace} />
+    : undefined;
 
   const agentView = (
     <div className="flex h-full flex-col overflow-hidden bg-canvas text-foreground">
@@ -511,7 +515,7 @@ export function WorkspaceWorkbench({
         pods={pods}
         selectedPodId={selectedPodId}
         view={route.view}
-        workspaceScreen={podCreationScreen}
+        workspaceScreen={podCreationScreen ?? podStartupScreen}
         workspaceConnection={workspaceConnection === "live" ? podState.connection : workspaceConnection}
         workspaceConnectionAttempt={workspaceConnection === "live"
           ? podState.connectionAttempt
