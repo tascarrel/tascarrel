@@ -103,6 +103,15 @@ struct CuratedClaudeModel {
 
 const CURATED_MODELS: &[CuratedClaudeModel] = &[
     CuratedClaudeModel {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
+        short_name: "Opus 5",
+        minimum_version: Some((2, 1, 219)),
+        efforts: &["low", "medium", "high", "xhigh", "max"],
+        default_effort: Some("xhigh"),
+        context_window: true,
+    },
+    CuratedClaudeModel {
         id: "claude-fable-5",
         display_name: "Claude Fable 5",
         short_name: "Fable 5",
@@ -2912,11 +2921,12 @@ mod tests {
     fn curates_versioned_models_and_native_context_selection() {
         let native = vec![
             model("claude-sonnet-5"),
+            model("claude-opus-5"),
             model("claude-opus-4-8"),
             model("claude-haiku-4-5-20251001"),
             model("claude-future-6"),
         ];
-        let current = curate_models("2.1.215", native.clone());
+        let current = curate_models("2.1.220", native.clone());
         let ids = current
             .iter()
             .map(|model| model.id.as_ref())
@@ -2924,6 +2934,7 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "claude-opus-5",
                 "claude-fable-5",
                 "claude-opus-4-8",
                 "claude-opus-4-7",
@@ -2936,20 +2947,25 @@ mod tests {
             ]
         );
         assert!(
-            curate_models("2.1.168", native)
+            curate_models("2.1.168", native.clone())
                 .iter()
                 .all(|model| model.id.as_ref() != "claude-fable-5")
         );
+        assert!(
+            curate_models("2.1.218", native)
+                .iter()
+                .all(|model| model.id.as_ref() != "claude-opus-5")
+        );
 
         let selection = ChatModelSelection {
-            model: "claude-fable-5".into(),
+            model: "claude-opus-5".into(),
             options: vec![ChatModelOptionSelection {
                 id: "contextWindow".into(),
                 value: ChatModelOptionValue::String("1m".into()),
             }]
             .into(),
         };
-        assert_eq!(native_model_id(&selection), "claude-fable-5[1m]");
+        assert_eq!(native_model_id(&selection), "claude-opus-5[1m]");
     }
 
     fn model(id: &str) -> ChatModel {

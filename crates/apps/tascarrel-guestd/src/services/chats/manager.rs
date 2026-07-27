@@ -73,7 +73,7 @@ use crate::services::chats::title::TitleGenerationService;
 use crate::services::pods::PodService;
 
 const CODEX_VERSION: &str = "0.144.4";
-const CLAUDE_CODE_VERSION: &str = "2.1.215";
+const CLAUDE_CODE_VERSION: &str = "2.1.220";
 const TASCI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const INSTALL_RETRY_DELAY: Duration = Duration::from_secs(30);
 const INSTALL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);

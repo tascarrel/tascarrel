@@ -87,6 +87,8 @@ use crate::services::chats::process::ProcessEnvironment;
 
 const MISSING_BUBBLEWRAP_WARNING: &str = "Codex could not find bubblewrap on PATH.";
 const BUNDLED_BUBBLEWRAP_FALLBACK: &str = "Codex will use the bundled bubblewrap";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+const DEFAULT_CODEX_REASONING_EFFORT: &str = "xhigh";
 
 /// Codex harness adaptor backed by one app-server connection per session.
 #[derive(Clone)]
@@ -710,6 +712,7 @@ async fn list_models(server: &CodexAppServer) -> Result<ArcVec<ChatModel>, Harne
         models.extend(result.data.into_iter().filter_map(normalize_model));
         cursor = result.next_cursor;
         if cursor.is_none() {
+            models.sort_by_key(|model| model.id.as_ref() != DEFAULT_CODEX_MODEL);
             return Ok(models.into());
         }
     }
@@ -1304,6 +1307,11 @@ fn normalize_model(model: NativeModel) -> Option<ChatModel> {
     if model.hidden {
         return None;
     }
+    let default_reasoning_effort = if model.model == DEFAULT_CODEX_MODEL {
+        Some(DEFAULT_CODEX_REASONING_EFFORT.to_owned())
+    } else {
+        model.default_reasoning_effort.clone()
+    };
     let mut options = Vec::new();
     if !model.supported_reasoning_efforts.is_empty() {
         options.push(ChatModelOptionDescriptor::Select(
@@ -1315,7 +1323,7 @@ fn normalize_model(model: NativeModel) -> Option<ChatModel> {
                     .supported_reasoning_efforts
                     .into_iter()
                     .map(|effort| ChatModelOptionChoice {
-                        is_default: model.default_reasoning_effort.as_ref()
+                        is_default: default_reasoning_effort.as_ref()
                             == Some(&effort.reasoning_effort),
                         label: reasoning_label(&effort.reasoning_effort).into(),
                         description: effort.description.map(Into::into),
