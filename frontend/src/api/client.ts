@@ -243,7 +243,6 @@ class ControlConnection {
         `Failed to open the Tascarrel control-plane connection: ${errorMessage(cause)}`,
       );
       this.failInvocations(error);
-      for (const subscription of this.subscriptions) subscription.onError?.(error);
       this.scheduleReconnect();
       return;
     }
@@ -333,7 +332,7 @@ class ControlConnection {
     if (this.socket !== connection) return;
     const error = unavailable("The Tascarrel control-plane connection failed");
     this.failInvocations(error);
-    for (const subscription of this.subscriptions) subscription.onError?.(error);
+    for (const subscription of this.subscriptions) this.reportConnecting(subscription);
   }
 
   private handleClose(connection: WebSocket): void {

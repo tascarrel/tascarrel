@@ -5,6 +5,9 @@ This package contains the Tascarrel workbench and chat interface.
 The frontend uses the v2 control-plane client and a provider-owned state cache. Backend-owned
 state is keyed by its host or guest identity, so every workspace, pod list, chat list, harness
 inventory, and chat detail has one cached replica and at most one physical subscription.
+Control-plane transport interruptions update shared connection state rather than feature error
+state. Presentation shells show a connecting overlay while subscriptions resume; operation-specific
+failures remain visible in their owning feature.
 
 ## Desktop and Mobile Clients
 
