@@ -15,4 +15,5 @@ pub use service::ConfigServiceConfig;
 pub use service::ConfigServiceError;
 pub use service::ConfigSubscription;
 pub(crate) use service::DEFAULT_MAX_CONFIG_BYTES;
+pub(crate) use snapshot::decode_config;
 pub(crate) use snapshot::load_config_file;

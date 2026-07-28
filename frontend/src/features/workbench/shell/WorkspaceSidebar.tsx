@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import type { pods, workspaces } from "../../../api/generated/index.ts";
 import { Badge } from "../../../components/ui/Badge.tsx";
@@ -78,7 +78,7 @@ export function WorkspaceSidebar({
   activeWorkspaceView?: WorkspaceControlView;
   shortcut: ReadonlyArray<string>;
   onSelectWorkspace: (workspace: workspaces.WorkspaceName) => void;
-  onCreateWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
+  onCreateWorkspace: () => void;
   onStartWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onSelectPod: (podId: pods.PodId) => void;
@@ -96,9 +96,6 @@ export function WorkspaceSidebar({
   const [lifecycleError, setLifecycleError] = useState<string>();
   const [pendingWorkspaceAction, setPendingWorkspaceAction] = useState<PendingWorkspaceAction>();
   const [workspaceLifecycleError, setWorkspaceLifecycleError] = useState<string>();
-  const [workspaceCreationOpen, setWorkspaceCreationOpen] = useState(false);
-  const [workspaceName, setWorkspaceName] = useState("");
-  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const selectedWorkspaceState = workspaces.find((workspace) => workspace.name === selectedWorkspace);
   const workspaceControlsAvailable = workspaces.some(
     (workspace) => workspace.name === selectedWorkspace && workspace.state.status === "Running",
@@ -109,23 +106,6 @@ export function WorkspaceSidebar({
   const sidebarPods = pods.toSorted((left, right) =>
     String(right.createdAt).localeCompare(String(left.createdAt)),
   );
-
-  const createWorkspace = async (event: FormEvent) => {
-    event.preventDefault();
-    const name = workspaceName.trim();
-    if (!name || creatingWorkspace) return;
-    setCreatingWorkspace(true);
-    setWorkspaceLifecycleError(undefined);
-    try {
-      await onCreateWorkspace(name as workspaces.WorkspaceName);
-      setWorkspaceName("");
-      setWorkspaceCreationOpen(false);
-    } catch (cause) {
-      setWorkspaceLifecycleError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setCreatingWorkspace(false);
-    }
-  };
 
   const runWorkspaceLifecycle = async (
     workspace: workspaces.Workspace,
@@ -177,12 +157,11 @@ export function WorkspaceSidebar({
               <button
                 className="sidebar-create-button"
                 type="button"
-                aria-label={workspaceCreationOpen ? "Cancel workspace creation" : "Create workspace"}
-                aria-pressed={workspaceCreationOpen}
-                title={workspaceCreationOpen ? "Cancel workspace creation" : "Create workspace"}
-                onClick={() => setWorkspaceCreationOpen((current) => !current)}
+                aria-label="Create workspace"
+                title="Create workspace"
+                onClick={onCreateWorkspace}
               >
-                {workspaceCreationOpen ? <X aria-hidden="true" size={13} /> : <Plus aria-hidden="true" size={13} />}
+                <Plus aria-hidden="true" size={13} />
               </button>
               <ShellPanelToggle
                 side="left"
@@ -206,23 +185,6 @@ export function WorkspaceSidebar({
             onStop={(workspace) => void runWorkspaceLifecycle(workspace, "stop")}
           />
           <WorkspaceResourceAlert workspace={selectedWorkspaceState} />
-          {workspaceCreationOpen ? (
-            <form className="sidebar-create-form" onSubmit={(event) => void createWorkspace(event)}>
-              <label className="sr-only" htmlFor="workspace-name">Workspace name</label>
-              <input
-                id="workspace-name"
-                autoFocus
-                value={workspaceName}
-                placeholder="Workspace name"
-                pattern="[A-Za-z0-9_\-]{1,64}"
-                disabled={creatingWorkspace}
-                onChange={(event) => setWorkspaceName(event.target.value)}
-              />
-              <button type="submit" disabled={creatingWorkspace || !workspaceName.trim()}>
-                {creatingWorkspace ? <LoaderCircle aria-hidden="true" className="animate-spin" size={12} /> : "Create"}
-              </button>
-            </form>
-          ) : null}
           {workspaceLifecycleError ? (
             <p className="workspace-switcher-error" role="alert">{workspaceLifecycleError}</p>
           ) : null}

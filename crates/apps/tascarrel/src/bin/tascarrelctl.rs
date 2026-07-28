@@ -253,6 +253,8 @@ async fn run(cli: Cli) -> ClientResult<i32> {
                         client
                             .invoke(workspaces::CreateWorkspaceAction {
                                 name: api_workspace_name(name),
+                                definition: None,
+                                initial_secrets: None,
                             })
                             .await,
                         ClientError::CreateWorkspace {

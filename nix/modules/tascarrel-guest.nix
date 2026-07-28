@@ -51,6 +51,11 @@ let
     HISTSIZE=10000
     SAVEHIST=10000
     setopt HIST_IGNORE_DUPS SHARE_HISTORY INTERACTIVE_COMMENTS
+    if (( $+commands[mise] )); then
+      fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
+      autoload -Uz compinit
+      compinit
+    fi
     eval "$(${lib.getExe pkgs.starship} init zsh)"
   '';
   tascarrelTerminalShell = pkgs.writeShellScript "tascarrel-terminal-shell" ''

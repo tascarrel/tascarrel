@@ -43,6 +43,8 @@
 //! │   │   │   ├── setup/
 //! │   │   │   └── init/
 //! │   │   └── agents/
+//! │   │       ├── AGENTS.md
+//! │   │       ├── CLAUDE.md -> AGENTS.md
 //! │   │       └── skills/
 //! │   └── .workspace-input-<uuid>.tar?
 //! ├── store/

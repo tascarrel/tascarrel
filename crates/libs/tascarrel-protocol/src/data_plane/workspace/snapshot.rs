@@ -34,6 +34,8 @@ use thiserror::Error;
 pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum number of filesystem entries in one snapshot.
 const MAX_ENTRIES: usize = 100_000;
+const CLAUDE_INSTRUCTIONS_PATH: &str = "agents/CLAUDE.md";
+const CLAUDE_INSTRUCTIONS_TARGET: &str = "AGENTS.md";
 
 /// Workspace snapshot construction or publication error.
 #[derive(Debug, Error)]
@@ -51,9 +53,10 @@ pub enum TransferError {
 
 /// Creates a deterministic tar snapshot containing `config.toml`, `image/`,
 /// and the conventional optional `.env`, `overlay/`, `hooks/{setup,init}/`,
-/// and `agents/{AGENTS.md,skills/}` inputs.
+/// and `agents/{AGENTS.md,CLAUDE.md,skills/}` inputs.
 ///
 /// The destination is replaced atomically and never follows input symlinks.
+/// The exact relative alias `agents/CLAUDE.md -> AGENTS.md` is preserved.
 ///
 /// # Errors
 ///
@@ -353,12 +356,14 @@ fn append_tree<W: Write>(
         let child_relative = relative.join(child.file_name());
         let metadata = fs::symlink_metadata(child.path())?;
         if metadata.file_type().is_symlink() {
-            return Err(TransferError::Unsafe(format!(
-                "input contains symlink {}",
-                child_relative.display()
-            )));
-        }
-        if metadata.is_dir() {
+            append_agent_instruction_alias(
+                builder,
+                &child.path(),
+                &child_relative,
+                &metadata,
+                count,
+            )?;
+        } else if metadata.is_dir() {
             append_tree(builder, root, &child_relative, count)?;
         } else if metadata.is_file() {
             bump(count)?;
@@ -397,6 +402,37 @@ fn append_tree<W: Write>(
             relative.display()
         )));
     }
+    Ok(())
+}
+
+fn append_agent_instruction_alias<W: Write>(
+    builder: &mut Builder<W>,
+    path: &Path,
+    relative: &Path,
+    before: &fs::Metadata,
+    count: &mut usize,
+) -> Result<(), TransferError> {
+    let target = fs::read_link(path)?;
+    if relative != Path::new(CLAUDE_INSTRUCTIONS_PATH)
+        || target != Path::new(CLAUDE_INSTRUCTIONS_TARGET)
+    {
+        return Err(TransferError::Unsafe(format!(
+            "input contains unsupported symlink {}",
+            relative.display()
+        )));
+    }
+    let after = fs::symlink_metadata(path)?;
+    if after.dev() != before.dev() || after.ino() != before.ino() {
+        return Err(TransferError::Unsafe(format!(
+            "input changed while reading {}",
+            relative.display()
+        )));
+    }
+    bump(count)?;
+    let mut header = make_header(0, 0o777, EntryType::Symlink);
+    header.set_link_name(CLAUDE_INSTRUCTIONS_TARGET)?;
+    header.set_cksum();
+    builder.append_data(&mut header, relative, io::empty())?;
     Ok(())
 }
 
@@ -462,6 +498,25 @@ fn extract_snapshot(archive: &Path, destination: &Path) -> Result<(), TransferEr
         let target = destination.join(&path);
         if kind.is_dir() {
             create_real_directories(destination, &target)?;
+            continue;
+        }
+        if kind.is_symlink() {
+            let link = entry.link_name()?.ok_or_else(|| {
+                TransferError::Unsafe(format!("symlink lacks a target {}", path.display()))
+            })?;
+            if path != Path::new(CLAUDE_INSTRUCTIONS_PATH)
+                || link.as_ref() != Path::new(CLAUDE_INSTRUCTIONS_TARGET)
+            {
+                return Err(TransferError::Unsafe(format!(
+                    "unsupported archive symlink {}",
+                    path.display()
+                )));
+            }
+            let parent = target
+                .parent()
+                .ok_or_else(|| TransferError::Unsafe("entry has no parent".to_owned()))?;
+            create_real_directories(destination, parent)?;
+            std::os::unix::fs::symlink(CLAUDE_INSTRUCTIONS_TARGET, &target)?;
             continue;
         }
         if !kind.is_file() {
@@ -642,6 +697,7 @@ mod tests {
         fs::write(source.join("hooks/setup/10-packages"), b"setup\n").unwrap();
         fs::write(source.join("hooks/init/20-agent"), b"init\n").unwrap();
         fs::write(source.join("agents/AGENTS.md"), b"Always test.\n").unwrap();
+        std::os::unix::fs::symlink("AGENTS.md", source.join("agents/CLAUDE.md")).unwrap();
         fs::write(
             source.join("agents/skills/release/SKILL.md"),
             b"---\nname: release\ndescription: Release safely.\n---\n",
@@ -669,6 +725,14 @@ mod tests {
         );
         assert_eq!(
             fs::read(destination.join("current/agents/AGENTS.md")).unwrap(),
+            b"Always test.\n"
+        );
+        assert_eq!(
+            fs::read_link(destination.join("current/agents/CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
+        assert_eq!(
+            fs::read(destination.join("current/agents/CLAUDE.md")).unwrap(),
             b"Always test.\n"
         );
         assert!(
@@ -729,6 +793,11 @@ mod tests {
         fs::create_dir(source.join("agents")).unwrap();
         fs::write(source.join("agents/skills"), b"not a directory").unwrap();
         assert!(create_snapshot(&source, &directory.path().join("three.tar")).is_err());
+
+        fs::remove_file(source.join("agents/skills")).unwrap();
+        fs::create_dir(source.join("agents/skills")).unwrap();
+        std::os::unix::fs::symlink("../config.toml", source.join("agents/CLAUDE.md")).unwrap();
+        assert!(create_snapshot(&source, &directory.path().join("four.tar")).is_err());
     }
 
     /// Publication replaces an incomplete generation left by an interrupted

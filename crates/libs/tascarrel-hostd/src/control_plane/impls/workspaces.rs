@@ -12,6 +12,7 @@ use crate::control_plane::operations::EventSource;
 use crate::control_plane::operations::ExecuteAction;
 use crate::control_plane::operations::OpenSubscription;
 use crate::control_plane::operations::store_event;
+use crate::services::secrets::SecretsServiceError;
 use crate::services::workspaces::UsbDeviceSubscription;
 use crate::services::workspaces::WorkspaceListSubscription;
 use crate::services::workspaces::WorkspaceServiceError;
@@ -43,11 +44,46 @@ macro_rules! implement_action {
     };
 }
 
-implement_action!(api::CreateWorkspaceAction, create);
 implement_action!(api::StartWorkspaceAction, start);
 implement_action!(api::StopWorkspaceAction, stop);
 implement_action!(api::AttachUsbDeviceAction, attach_usb_device);
 implement_action!(api::DetachUsbDeviceAction, detach_usb_device);
+
+#[async_trait]
+impl ExecuteAction for api::CreateWorkspaceAction {
+    async fn check_permissions(
+        &self,
+        context: &InvocationCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        require_host_or_client(&context.require_routing_context()?.caller)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        let initial_secrets = self.initial_secrets.clone().unwrap_or_default();
+        let prepared = context
+            .state()
+            .workspaces()
+            .prepare_create(self)
+            .await
+            .map_err(workspace_error)?;
+        context
+            .state()
+            .secrets()
+            .initialize_workspace_secrets(prepared.staging_directory(), &initial_secrets)
+            .await
+            .map_err(workspace_secret_error)?;
+        context
+            .state()
+            .workspaces()
+            .publish_create(prepared)
+            .await
+            .map_err(workspace_error)
+    }
+}
 
 #[async_trait]
 impl ExecuteAction for api::DestroyWorkspaceAction {
@@ -188,6 +224,18 @@ fn workspace_error(report: Report<WorkspaceServiceError>) -> Report<wire::Operat
         WorkspaceServiceError::InvalidRequest(_) => wire::OperationError::InvalidRequest(details),
         WorkspaceServiceError::Unavailable(_) => wire::OperationError::Unavailable(details),
         WorkspaceServiceError::Internal(_) => wire::OperationError::Internal(details),
+    };
+    report.escalate(error)
+}
+
+fn workspace_secret_error(report: Report<SecretsServiceError>) -> Report<wire::OperationError> {
+    let details = operation_error_details(report.to_string());
+    let error = match report.error() {
+        SecretsServiceError::InvalidRequest => wire::OperationError::InvalidRequest(details),
+        SecretsServiceError::Unavailable => wire::OperationError::Unavailable(details),
+        SecretsServiceError::InvalidConfiguration | SecretsServiceError::Internal => {
+            wire::OperationError::Internal(details)
+        }
     };
     report.escalate(error)
 }

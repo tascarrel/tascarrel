@@ -79,7 +79,7 @@ type WorkbenchShellProps = {
   podListEmptyMessage?: string;
   showPodCount?: boolean;
   onSelectWorkspace: (workspace: workspaces.WorkspaceName) => void;
-  onCreateWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
+  onCreateWorkspace: () => void;
   onStartWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onSelectPod: (podId: pods.PodId) => void;

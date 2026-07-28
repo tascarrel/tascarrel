@@ -211,6 +211,7 @@ impl WorkspaceConfig {
                     path.to_string(),
                     WorkspaceRepository {
                         source: repository.source.to_string(),
+                        branch: repository.branch.map(|branch| branch.to_string()),
                     },
                 )
             })
@@ -291,6 +292,10 @@ impl WorkspaceConfig {
                 || repository.source.starts_with('-')
             {
                 bail!("invalid source for workspace repository {path:?}");
+            }
+            if let Some(branch) = &repository.branch {
+                validate_repository_branch(branch)
+                    .with_context(|| format!("invalid branch for workspace repository {path:?}"))?;
             }
             let path = Path::new(path);
             if repository_paths
@@ -617,10 +622,21 @@ fn validate_relative_path(value: &str, purpose: &str) -> Result<()> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRepository {
     pub source: String,
+    /// Short branch name selected for the managed checkout.
+    pub branch: Option<String>,
 }
 
 fn validate_repository_path(value: &str) -> Result<()> {
     validate_relative_path(value, "repository path")
+}
+
+fn validate_repository_branch(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 1024 || value.starts_with('-') {
+        bail!("repository branch must be a valid short branch name");
+    }
+    tascarrel_git::ReferenceName::new(format!("refs/heads/{value}"))
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// One persistent workspace-level cache mounted into every pod.
@@ -960,13 +976,17 @@ mod tests {
         let config = directory.path().join("config.toml");
         fs::write(
             &config,
-            "[repos.\"src/project\"]\nsource = \"https://example.invalid/project.git\"\n",
+            "[repos.\"src/project\"]\nsource = \"https://example.invalid/project.git\"\nbranch = \"release/next\"\n",
         )
         .unwrap();
         let parsed = WorkspaceConfig::load(&config).unwrap();
         assert_eq!(
             parsed.repos["src/project"].source,
             "https://example.invalid/project.git"
+        );
+        assert_eq!(
+            parsed.repos["src/project"].branch.as_deref(),
+            Some("release/next")
         );
     }
 
@@ -999,6 +1019,10 @@ mod tests {
                 "overlap",
                 "[repos.\"src\"]\nsource = \"https://example.invalid/a.git\"\n\
                  [repos.\"src/nested\"]\nsource = \"https://example.invalid/b.git\"\n",
+            ),
+            (
+                "branch",
+                "[repos.project]\nsource = \"https://example.invalid/a.git\"\nbranch = \"../escape\"\n",
             ),
         ] {
             let path = directory.path().join(format!("{name}.toml"));

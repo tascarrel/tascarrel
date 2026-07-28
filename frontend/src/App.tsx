@@ -9,7 +9,7 @@ import {
   UnavailableWorkspace,
   WorkspaceWorkbench,
 } from "./features/workbench/WorkspaceWorkbench.tsx";
-import { WelcomeScreen } from "./features/workspaces/WelcomeScreen.tsx";
+import { WorkspaceCreationPage } from "./features/workspaces/creation/WorkspaceCreationPage.tsx";
 import { useWorkspaces } from "./features/workspaces/state.ts";
 
 export function App() {
@@ -19,19 +19,37 @@ export function App() {
   const workspaceRouteVisit = useRef<{ handled: boolean; workspace?: string }>({
     handled: false,
   });
+  const lastSelectedWorkspace = useRef<workspaces.WorkspaceName | undefined>(undefined);
+  const pendingCreatedWorkspace = useRef<workspaces.WorkspaceName | undefined>(undefined);
   const availableWorkspaces = workspaceState.value?.workspaces ?? [];
-  const selectedWorkspace = availableWorkspaces.find(
+  const routedWorkspace = availableWorkspaces.find(
     (workspace) => workspace.name === route.workspace,
-  ) ?? availableWorkspaces[0];
+  );
+  const selectedWorkspace = routedWorkspace
+    ?? availableWorkspaces.find((workspace) => workspace.name === lastSelectedWorkspace.current)
+    ?? availableWorkspaces[0];
 
   useEffect(() => {
-    if (route.globalScreen || !selectedWorkspace || route.workspace === selectedWorkspace.name) return;
+    if (routedWorkspace) lastSelectedWorkspace.current = routedWorkspace.name;
+    if (routedWorkspace?.name === pendingCreatedWorkspace.current) {
+      pendingCreatedWorkspace.current = undefined;
+    }
+  }, [routedWorkspace]);
+
+  useEffect(() => {
+    if (
+      route.globalScreen
+      || route.creatingWorkspace
+      || route.workspace === pendingCreatedWorkspace.current
+      || !selectedWorkspace
+      || route.workspace === selectedWorkspace.name
+    ) return;
     void navigate({
       to: "/workspaces/$workspace",
       params: { workspace: selectedWorkspace.name },
       replace: true,
     });
-  }, [navigate, route.globalScreen, route.workspace, selectedWorkspace]);
+  }, [navigate, route.creatingWorkspace, route.globalScreen, route.workspace, selectedWorkspace]);
 
   useEffect(() => {
     if (workspaceRouteVisit.current.workspace !== route.workspace) {
@@ -63,15 +81,24 @@ export function App() {
     });
   };
 
-  const createWorkspace = async (name: workspaces.WorkspaceName) => {
-    await hostApi.execute("workspaces_Create", { name });
-  };
-
-  const createWorkspaceAndOpen = async (name: workspaces.WorkspaceName) => {
-    await createWorkspace(name);
+  const createWorkspaceAndOpen = async (input: workspaces.CreateWorkspaceAction) => {
+    await hostApi.execute("workspaces_Create", input);
+    pendingCreatedWorkspace.current = input.name;
     await navigate({
       to: "/workspaces/$workspace",
-      params: { workspace: name },
+      params: { workspace: input.name },
+    });
+  };
+
+  const openWorkspaceCreation = () => {
+    void navigate({ to: "/workspaces/new" });
+  };
+
+  const cancelWorkspaceCreation = () => {
+    if (!selectedWorkspace) return;
+    void navigate({
+      to: "/workspaces/$workspace",
+      params: { workspace: selectedWorkspace.name },
     });
   };
 
@@ -80,7 +107,11 @@ export function App() {
       return (
         <>
           <Outlet />
-          <WelcomeScreen onCreateWorkspace={createWorkspaceAndOpen} />
+          <WorkspaceCreationPage
+            canCancel={Boolean(selectedWorkspace)}
+            onCancel={cancelWorkspaceCreation}
+            onCreateWorkspace={createWorkspaceAndOpen}
+          />
         </>
       );
     }
@@ -95,7 +126,10 @@ export function App() {
     );
   }
 
-  if (workspaceState.ready && availableWorkspaces.length === 0) {
+  if (
+    route.creatingWorkspace
+    || (workspaceState.ready && availableWorkspaces.length === 0)
+  ) {
     return (
       <>
         <Outlet />
@@ -103,7 +137,11 @@ export function App() {
           connection={workspaceState.connection}
           attempt={workspaceState.connectionAttempt}
         />
-        <WelcomeScreen onCreateWorkspace={createWorkspaceAndOpen} />
+        <WorkspaceCreationPage
+          canCancel={availableWorkspaces.length > 0}
+          onCancel={cancelWorkspaceCreation}
+          onCreateWorkspace={createWorkspaceAndOpen}
+        />
       </>
     );
   }
@@ -120,7 +158,7 @@ export function App() {
           workspaceConnection={workspaceState.connection}
           workspaceConnectionAttempt={workspaceState.connectionAttempt}
           onSelectWorkspace={selectWorkspace}
-          onCreateWorkspace={createWorkspace}
+          onCreateWorkspace={openWorkspaceCreation}
           onStartWorkspace={async (workspace) => {
             await hostApi.execute("workspaces_Start", { workspace });
           }}
@@ -138,7 +176,7 @@ export function App() {
           connectionAttempt={workspaceState.connectionAttempt}
           error={workspaceState.error}
           onSelectWorkspace={selectWorkspace}
-          onCreateWorkspace={createWorkspace}
+          onCreateWorkspace={openWorkspaceCreation}
           onStartWorkspace={async (workspace) => {
             await hostApi.execute("workspaces_Start", { workspace });
           }}

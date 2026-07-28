@@ -7,6 +7,7 @@
   "scripts": {
     "generate:types": "cd ../crates/libs/tascarrel-api && nix run 'github:silitics/sidex/53f5e11480ebf471ba37a97fa2a683be1e2bf235' -- generate ts ../../../frontend/src/api/generated",
     "dev": "vite --host 127.0.0.1",
+    "test": "node --experimental-strip-types --test src/features/workspaces/creation/model.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1"

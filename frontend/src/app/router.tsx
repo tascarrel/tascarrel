@@ -15,6 +15,7 @@ export type WorkbenchRoute = {
   workspace?: string;
   pod?: string;
   chat?: string;
+  creatingWorkspace?: boolean;
   creatingPod?: boolean;
   globalScreen?: GlobalScreenName;
   screen?: WorkspaceScreenName;
@@ -41,6 +42,11 @@ const indexRoute = createRoute({
 const globalScreenRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/screens/$screen",
+  component: emptyRouteComponent,
+});
+const createWorkspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workspaces/new",
   component: emptyRouteComponent,
 });
 const workspaceRoute = createRoute({
@@ -117,6 +123,7 @@ const podOverviewRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   globalScreenRoute,
+  createWorkspaceRoute,
   workspaceRoute,
   workspaceScreenRoute,
   workspacesScreenRoute,
@@ -150,6 +157,9 @@ export function useWorkbenchRoute(): WorkbenchRoute {
   if (globalScreen && isGlobalScreenName(globalScreen.screen)) {
     return { globalScreen: globalScreen.screen, view: "agent" };
   }
+
+  const createWorkspace = matchRoute({ to: "/workspaces/new" });
+  if (createWorkspace) return { creatingWorkspace: true, view: "agent" };
 
   const screen = matchRoute({ to: "/workspaces/$workspace/screens/$screen" })
     ?? matchRoute({ to: "/workspace/$workspace/screens/$screen" });

@@ -400,6 +400,8 @@ record WorkspaceCacheConfig {
 record WorkspaceRepositoryConfig {
     /// Upstream repository source used by the host daemon.
     source: string,
+    /// Short branch name checked out in workspace seeds, or the upstream default when omitted.
+    branch?: string,
     /// Complete Git publication policy replacing the workspace policy for this repository.
     git?: WorkspaceGitConfig,
 }

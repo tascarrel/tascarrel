@@ -2,15 +2,21 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_api::ArcStr;
 use tascarrel_api::types::config;
 use tascarrel_api::types::secrets as api;
+use tascarrel_api::types::workspaces;
 use tascarrel_api::types::workspaces::WorkspaceName;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::MAX_WORKSPACE_ENVIRONMENT_FAILURE_BYTES;
@@ -31,8 +37,14 @@ use super::sops::SopsSnapshot;
 use crate::services::config::ConfigService;
 use crate::services::config::ConfigServiceError;
 use crate::services::config::ConfigSubscription;
+use crate::services::config::DEFAULT_MAX_CONFIG_BYTES;
+use crate::services::config::load_config_file;
 use crate::services::workspaces::WorkspaceEnvironmentRequest;
 use crate::services::workspaces::WorkspaceEnvironmentRequests;
+
+const MAX_INITIAL_SECRETS: usize = 16;
+const MAX_INITIAL_SECRET_VALUE_BYTES: usize = 64 * 1024;
+const MAX_SSH_PUBLIC_KEY_BYTES: u64 = 64 * 1024;
 
 /// Resolves, inventories, and mutates workspace secret-provider instances.
 #[derive(Clone)]
@@ -55,6 +67,7 @@ impl SecretsService {
             inner: Arc::new(SecretsServiceInner {
                 workspaces_directory: config.workspaces_directory,
                 sops_executable: config.sops_executable,
+                default_ssh_directory: config.default_ssh_directory,
                 command_timeout: config.command_timeout,
                 max_document_bytes: config.max_document_bytes,
                 max_environment_requests: config.max_environment_requests,
@@ -62,6 +75,94 @@ impl SecretsService {
                 provider_snapshots: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Encrypts initial provider values inside an unpublished workspace tree.
+    ///
+    /// The default SSH public key is selected from `id_ed25519.pub` and then
+    /// `id_rsa.pub`. A decrypting round trip verifies that the corresponding
+    /// private key is usable by hostd before the caller publishes the tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a secret or provider is invalid, no supported
+    /// default SSH key is available, or SOPS cannot encrypt and decrypt the
+    /// resulting document.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(secret_count = initial_secrets.len())
+    )]
+    pub(crate) async fn initialize_workspace_secrets(
+        &self,
+        workspace_directory: &Path,
+        initial_secrets: &[workspaces::WorkspaceCreationSecret],
+    ) -> Result<(), Report<SecretsServiceError>> {
+        if initial_secrets.is_empty() {
+            return Ok(());
+        }
+        if initial_secrets.len() > MAX_INITIAL_SECRETS {
+            return Err(SecretsServiceError::invalid_request(format!(
+                "at most {MAX_INITIAL_SECRETS} initial secrets may be supplied"
+            )));
+        }
+        let pending = prepare_initial_providers(
+            workspace_directory,
+            initial_secrets,
+            &self.inner.sops_executable,
+            self.inner.command_timeout,
+            self.inner.max_document_bytes,
+        )?;
+
+        let ssh_directory = self
+            .inner
+            .default_ssh_directory
+            .as_ref()
+            .ok_or_else(|| {
+                SecretsServiceError::unavailable(
+                    "HOME is unavailable; hostd cannot locate a default SOPS SSH key",
+                )
+            })?
+            .clone();
+        let recipient =
+            tokio::task::spawn_blocking(move || default_sops_ssh_recipient(&ssh_directory))
+                .await
+                .map_err(|error| {
+                    SecretsServiceError::internal("SSH public-key discovery task failed")
+                        .message(error.to_string())
+                })??;
+        let provider_files = pending.keys().cloned().collect::<Vec<_>>();
+        let sops_configuration = render_sops_configuration(&provider_files, &recipient);
+        let configuration_directory = workspace_directory.to_owned();
+        tokio::task::spawn_blocking(move || {
+            write_new_private_file(
+                &configuration_directory.join(".sops.yaml"),
+                sops_configuration.as_bytes(),
+            )
+        })
+        .await
+        .map_err(|error| {
+            SecretsServiceError::internal("SOPS configuration write task failed")
+                .message(error.to_string())
+        })??;
+
+        for pending_provider in pending.values() {
+            pending_provider
+                .provider
+                .store(&pending_provider.values)
+                .await?;
+            let snapshot = pending_provider.provider.load().await.map_err(|report| {
+                report.message(
+                    "the default SSH private key could not decrypt the initial SOPS document",
+                )
+            })?;
+            if snapshot.values != pending_provider.values {
+                return Err(SecretsServiceError::internal(
+                    "SOPS initial-secret verification returned different values",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Reveals one named secret through the currently configured provider.
@@ -636,6 +737,210 @@ impl SecretsService {
     }
 }
 
+struct PendingInitialProvider {
+    provider: SopsProvider,
+    values: BTreeMap<String, String>,
+}
+
+fn prepare_initial_providers(
+    workspace_directory: &Path,
+    initial_secrets: &[workspaces::WorkspaceCreationSecret],
+    sops_executable: &Path,
+    command_timeout: Duration,
+    max_document_bytes: u64,
+) -> Result<BTreeMap<String, PendingInitialProvider>, Report<SecretsServiceError>> {
+    let workspace_config = load_config_file(
+        &workspace_directory.join("config.toml"),
+        DEFAULT_MAX_CONFIG_BYTES,
+    )
+    .map_err(|error| {
+        SecretsServiceError::invalid_request(
+            "workspace config.toml is not valid for initial secrets",
+        )
+        .message(error.to_string())
+    })?;
+    let configured_providers = workspace_config
+        .secrets
+        .as_ref()
+        .and_then(|secrets| secrets.providers.as_ref())
+        .ok_or_else(|| {
+            SecretsServiceError::invalid_request(
+                "initial secrets require configured SOPS providers",
+            )
+        })?;
+
+    let mut pending = BTreeMap::<String, PendingInitialProvider>::new();
+    for secret in initial_secrets {
+        let provider_name = secret.provider_name.as_ref();
+        let secret_name = secret.secret_name.as_ref();
+        validate_initial_secret(provider_name, secret_name, secret.value.as_ref())?;
+        let provider_config = configured_providers.get(provider_name).ok_or_else(|| {
+            SecretsServiceError::invalid_request(format!(
+                "initial secret provider {provider_name:?} is not configured"
+            ))
+        })?;
+        let provider = match provider_config {
+            config::WorkspaceSecretProviderConfig::Sops(sops) => SopsProvider::new(
+                workspace_directory.to_owned(),
+                sops.file.as_deref(),
+                sops_executable.to_owned(),
+                command_timeout,
+                max_document_bytes,
+            )?,
+        };
+        let pending_provider =
+            pending
+                .entry(provider.cache_identity())
+                .or_insert_with(|| PendingInitialProvider {
+                    provider,
+                    values: BTreeMap::new(),
+                });
+        if pending_provider
+            .values
+            .insert(secret_name.to_owned(), secret.value.to_string())
+            .is_some()
+        {
+            return Err(SecretsServiceError::invalid_request(format!(
+                "initial secret {provider_name}.{secret_name} is duplicated"
+            )));
+        }
+    }
+    Ok(pending)
+}
+
+fn validate_initial_secret(
+    provider_name: &str,
+    secret_name: &str,
+    value: &str,
+) -> Result<(), Report<SecretsServiceError>> {
+    validate_provider_name(provider_name)?;
+    validate_secret_name(secret_name)?;
+    if value.is_empty() {
+        return Err(SecretsServiceError::invalid_request(
+            "initial secret values must not be empty",
+        ));
+    }
+    if value.len() > MAX_INITIAL_SECRET_VALUE_BYTES {
+        return Err(SecretsServiceError::invalid_request(format!(
+            "initial secret values must not exceed {MAX_INITIAL_SECRET_VALUE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn default_sops_ssh_recipient(ssh_directory: &Path) -> Result<String, Report<SecretsServiceError>> {
+    for key_name in ["id_ed25519", "id_rsa"] {
+        let private_key = ssh_directory.join(key_name);
+        let public_key = ssh_directory.join(format!("{key_name}.pub"));
+        if !std::fs::metadata(&private_key).is_ok_and(|metadata| metadata.is_file()) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&public_key) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > MAX_SSH_PUBLIC_KEY_BYTES {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&public_key) else {
+            continue;
+        };
+        if let Some(recipient) = parse_sops_ssh_recipient(&contents) {
+            return Ok(recipient);
+        }
+    }
+    Err(SecretsServiceError::unavailable(format!(
+        "no usable default SOPS SSH key found in {}; expected matching id_ed25519(.pub) or id_rsa(.pub) files",
+        ssh_directory.display()
+    )))
+}
+
+fn parse_sops_ssh_recipient(contents: &str) -> Option<String> {
+    for line in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut fields = line.split_ascii_whitespace();
+        let (Some(key_type), Some(encoded)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if !matches!(key_type, "ssh-ed25519" | "ssh-rsa") {
+            continue;
+        }
+        let Ok(decoded) = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded))
+        else {
+            continue;
+        };
+        let Some(encoded_key_type) = ssh_blob_first_field(&decoded) else {
+            continue;
+        };
+        if encoded_key_type != key_type.as_bytes() {
+            continue;
+        }
+        return Some(format!("{key_type} {encoded}"));
+    }
+    None
+}
+
+fn ssh_blob_first_field(blob: &[u8]) -> Option<&[u8]> {
+    let length = u32::from_be_bytes(blob.get(..4)?.try_into().ok()?);
+    let length = usize::try_from(length).ok()?;
+    blob.get(4..4_usize.checked_add(length)?)
+}
+
+fn render_sops_configuration(provider_files: &[String], recipient: &str) -> String {
+    let mut configuration = String::from("creation_rules:\n");
+    for file in provider_files {
+        configuration.push_str("  - path_regex: '");
+        configuration.push('^');
+        for character in file.chars() {
+            if matches!(
+                character,
+                '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+            ) {
+                configuration.push('\\');
+            }
+            configuration.push(character);
+        }
+        configuration.push('$');
+        configuration.push_str("'\n    age: '");
+        configuration.push_str(&recipient.replace('\'', "''"));
+        configuration.push_str("'\n");
+    }
+    configuration
+}
+
+fn write_new_private_file(path: &Path, contents: &[u8]) -> Result<(), Report<SecretsServiceError>> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            SecretsServiceError::unavailable("failed to create SOPS configuration")
+                .message(error.to_string())
+        })?;
+    file.write_all(contents).map_err(|error| {
+        SecretsServiceError::unavailable("failed to write SOPS configuration")
+            .message(error.to_string())
+    })?;
+    file.sync_all().map_err(|error| {
+        SecretsServiceError::unavailable("failed to synchronize SOPS configuration")
+            .message(error.to_string())
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        SecretsServiceError::internal("SOPS configuration path has no parent directory")
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            SecretsServiceError::unavailable("failed to synchronize workspace configuration")
+                .message(error.to_string())
+        })
+}
+
 /// Filesystem and subprocess bounds for [`SecretsService`].
 #[derive(Clone, Debug)]
 pub struct SecretsServiceConfig {
@@ -643,6 +948,12 @@ pub struct SecretsServiceConfig {
     pub workspaces_directory: PathBuf,
     /// Host `sops` executable or executable name.
     pub sops_executable: PathBuf,
+    /// User SSH directory searched for the default SOPS recipient.
+    ///
+    /// This defaults to `$HOME/.ssh` when `HOME` is an absolute path. The
+    /// directory is required only when creating a workspace with initial
+    /// secrets.
+    pub default_ssh_directory: Option<PathBuf>,
     /// Maximum duration of one SOPS command.
     pub command_timeout: Duration,
     /// Maximum encrypted or decrypted document size.
@@ -667,6 +978,10 @@ impl SecretsServiceConfig {
         Self {
             workspaces_directory: workspaces_directory.into(),
             sops_executable: sops_executable.into(),
+            default_ssh_directory: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(".ssh")),
             command_timeout: Duration::from_secs(30),
             max_document_bytes: tascarrel_api::MAX_WORKSPACE_CONFIG_BYTES,
             max_environment_requests: Self::DEFAULT_MAX_ENVIRONMENT_REQUESTS,
@@ -703,6 +1018,15 @@ impl SecretsServiceConfig {
         if !self.sops_executable.is_absolute() && self.sops_executable.components().count() != 1 {
             return Err(SecretsServiceError::invalid_configuration(
                 "SOPS executable must be absolute or a bare program name",
+            ));
+        }
+        if self
+            .default_ssh_directory
+            .as_ref()
+            .is_some_and(|directory| !directory.is_absolute())
+        {
+            return Err(SecretsServiceError::invalid_configuration(
+                "default SSH directory must be absolute",
             ));
         }
         Ok(())
@@ -930,6 +1254,7 @@ fn bounded_failure(message: &str) -> String {
 struct SecretsServiceInner {
     workspaces_directory: PathBuf,
     sops_executable: PathBuf,
+    default_ssh_directory: Option<PathBuf>,
     command_timeout: Duration,
     max_document_bytes: u64,
     max_environment_requests: usize,
@@ -952,6 +1277,104 @@ mod tests {
 
     use super::*;
     use crate::services::config::ConfigServiceConfig;
+
+    /// Initial creation encrypts provider values and emits only the normalized
+    /// public SSH recipient into the SOPS policy.
+    #[tokio::test]
+    async fn initial_workspace_secrets_are_encrypted_with_the_default_ssh_key() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join(".workspace-demo-staging");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(
+            workspace.join("config.toml"),
+            "[secrets.providers.services]\nkind = \"sops\"\nfile = \"secrets.json\"\n",
+        )
+        .unwrap();
+        let ssh_directory = root.path().join("ssh");
+        fs::create_dir(&ssh_directory).unwrap();
+        fs::write(ssh_directory.join("id_ed25519"), "test-private-key").unwrap();
+        let mut public_key_blob = Vec::from(11_u32.to_be_bytes());
+        public_key_blob.extend_from_slice(b"ssh-ed25519");
+        public_key_blob.extend_from_slice(&32_u32.to_be_bytes());
+        public_key_blob.extend_from_slice(&[7_u8; 32]);
+        let encoded_public_key = base64::engine::general_purpose::STANDARD.encode(public_key_blob);
+        fs::write(
+            ssh_directory.join("id_ed25519.pub"),
+            format!("ssh-ed25519 {encoded_public_key} user@example\n"),
+        )
+        .unwrap();
+        let executable = root.path().join("fake-sops");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nset -eu\ntest -f .sops.yaml\noperation=$1\nshift\n\
+             while [ \"$#\" -gt 1 ]; do shift; done\ncase \"$operation\" in\n\
+             encrypt) base64 ;;\ndecrypt) base64 -d ;;\n*) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut service_config = SecretsServiceConfig::new(root.path(), &executable);
+        service_config.default_ssh_directory = Some(ssh_directory);
+        let service = SecretsService::new(service_config).unwrap();
+        let values = vec![
+            workspaces::WorkspaceCreationSecret {
+                provider_name: "services".into(),
+                secret_name: "GITHUB_TOKEN".into(),
+                value: "github_pat_read_only_example".into(),
+            },
+            workspaces::WorkspaceCreationSecret {
+                provider_name: "services".into(),
+                secret_name: "GITLAB_TOKEN".into(),
+                value: "glpat-read-only-example".into(),
+            },
+        ];
+
+        service
+            .initialize_workspace_secrets(&workspace, &values)
+            .await
+            .unwrap();
+
+        let encrypted = fs::read(workspace.join("secrets.json")).unwrap();
+        assert!(
+            !encrypted
+                .windows("github_pat_read_only_example".len())
+                .any(|bytes| bytes == b"github_pat_read_only_example")
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join(".sops.yaml")).unwrap(),
+            format!(
+                "creation_rules:\n  - path_regex: '^secrets\\.json$'\n    age: 'ssh-ed25519 {encoded_public_key}'\n"
+            ),
+        );
+        assert_eq!(
+            fs::metadata(workspace.join(".sops.yaml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0,
+        );
+        let provider = SopsProvider::new(
+            workspace,
+            Some("secrets.json"),
+            executable,
+            Duration::from_secs(5),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(
+            provider.load().await.unwrap().values,
+            BTreeMap::from([
+                (
+                    "GITHUB_TOKEN".to_owned(),
+                    "github_pat_read_only_example".to_owned(),
+                ),
+                (
+                    "GITLAB_TOKEN".to_owned(),
+                    "glpat-read-only-example".to_owned(),
+                ),
+            ]),
+        );
+    }
 
     /// A delayed guest still receives the complete resolved environment before
     /// the host releases its one-shot mux channel.

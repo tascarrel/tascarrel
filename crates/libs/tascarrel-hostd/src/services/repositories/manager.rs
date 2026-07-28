@@ -1839,6 +1839,11 @@ fn load_workspace_config(config: &Path) -> HostRepositoryResult<HostWorkspaceCon
             .unwrap_or_default()
             .into_iter()
             .map(|(path, repository)| {
+                if let Some(branch) = repository.branch.as_deref() {
+                    validate_branch(branch).map_err(|_| {
+                        invalid_configuration(format!("invalid branch for repository {path:?}"))
+                    })?;
+                }
                 let policy = repository
                     .git
                     .as_ref()
@@ -2050,10 +2055,19 @@ fn validate_branch(branch: &str) -> HostRepositoryResult<()> {
         || branch.ends_with('.')
         || branch.contains("..")
         || branch.contains("@{")
+        || branch.contains("//")
         || branch.bytes().any(|byte| {
             byte <= b' '
                 || byte == 0x7f
                 || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        || branch.split('/').any(|component| {
+            component.is_empty()
+                || component.starts_with('.')
+                || component
+                    .as_bytes()
+                    .get(component.len().saturating_sub(5)..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".lock"))
         })
     {
         return Err(invalid_request("invalid Git branch"));
@@ -2245,6 +2259,34 @@ mod tests {
         test_io(fs::write(&config, ""), "clear repository configuration")?;
         assert!(!manager.source_is_currently_configured(source)?);
         assert!(!manager.source_is_currently_configured_for_path("src/tascarrel", source)?);
+        Ok(())
+    }
+
+    /// Verifies configured checkout branches use the same safe Git reference
+    /// rules as interactive repository operations.
+    #[test]
+    fn repository_configuration_rejects_invalid_checkout_branches() -> HostRepositoryResult<()> {
+        let temporary = test_io(tempfile::tempdir(), "create temporary directory")?;
+        let config = temporary.path().join("config.toml");
+        test_io(
+            fs::write(
+                &config,
+                "[repos.project]\n\
+                 source = 'https://example.invalid/project.git'\n\
+                 branch = 'release//next'\n",
+            ),
+            "write repository configuration",
+        )?;
+
+        let Err(error) = load_workspace_config(&config) else {
+            return Err(invalid_request(
+                "invalid checkout branch passed repository configuration",
+            ));
+        };
+        assert!(matches!(
+            error.error(),
+            HostRepositoryError::InvalidConfiguration
+        ));
         Ok(())
     }
 

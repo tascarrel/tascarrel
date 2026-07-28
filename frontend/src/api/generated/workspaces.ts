@@ -21,12 +21,20 @@ import * as __schema_secrets from "./secrets";
 import * as __schema_store from "./store";
 import * as __schema_workspaces from "./workspaces";
 /**
- * Creates one stopped workspace using the host's default development configuration.
+ * Creates one stopped workspace from a supplied or default development definition.
  */
  export type CreateWorkspaceAction = { /**
                                             * Name to assign to the workspace.
                                             */
-                                                        "name": WorkspaceName };
+                                                        "name": WorkspaceName, /**
+                                            * Initial configuration files, or the minimal Tascarrel definition when omitted.
+                                            */
+                                                        "definition"?: WorkspaceCreationDefinition, /**
+                                            * Initial provider values encrypted by hostd before the workspace is published.
+                                            * Values are confidential request data. Every referenced provider must be configured as a
+                                            * SOPS provider in the supplied `config.toml`.
+                                            */
+                                                        "initialSecrets"?: __sidex_types.builtins.Sequence<WorkspaceCreationSecret> };
 /**
  * Result of creating one workspace.
  */
@@ -148,6 +156,32 @@ import * as __schema_workspaces from "./workspaces";
  * Names contain 1-64 ASCII letters, digits, `_`, or `-`.
  */
  export type WorkspaceName = __sidex_types.Nominal<__sidex_types.builtins.String, "::tascarrel_api::workspaces::WorkspaceName">;
+/**
+ * Complete generated input used to initialize a new workspace.
+ */
+ export type WorkspaceCreationDefinition = { /**
+                                            * UTF-8 contents to write to the workspace's `config.toml`.
+                                            */
+                                                        "configToml": __sidex_types.builtins.String, /**
+                                            * UTF-8 contents to write to the workspace image's root `Dockerfile`.
+                                            */
+                                                        "dockerfile": __sidex_types.builtins.String, /**
+                                            * UTF-8 contents to write to the workspace instruction overlay's `AGENTS.md`.
+                                            */
+                                                        "agentsMd": __sidex_types.builtins.String };
+/**
+ * One confidential provider value supplied while creating a workspace.
+ */
+ export type WorkspaceCreationSecret = { /**
+                                            * Configured SOPS provider receiving the value.
+                                            */
+                                                        "providerName": __sidex_types.builtins.String, /**
+                                            * Name to assign within the provider document.
+                                            */
+                                                        "secretName": __sidex_types.builtins.String, /**
+                                            * Plaintext value retained only long enough for hostd to encrypt and verify the document.
+                                            */
+                                                        "value": __sidex_types.builtins.String };
 /**
  * Identifies one physical USB connection observed by the host daemon;
  * disconnecting and reconnecting may assign a new identifier.

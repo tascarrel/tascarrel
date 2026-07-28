@@ -82,6 +82,7 @@ use crate::HostRepositoryManager;
 use crate::WorkspaceAuthority;
 use crate::control_plane::HostControlService;
 use crate::services::config::DEFAULT_MAX_CONFIG_BYTES;
+use crate::services::config::decode_config;
 use crate::services::config::load_config_file;
 use crate::services::network::NetworkPolicy;
 
@@ -91,17 +92,37 @@ const MINIMUM_DATA_DISK_BYTES: u64 = 256 * 1024 * 1024;
 const LOCAL_BINARIES_MOUNT_TAG: &str = "tascarrel-binaries";
 const LOCAL_BINARIES_KERNEL_PARAMETER: &str = "tascarrel.local-binaries=1";
 const GUEST_INSTANCE_KERNEL_PARAMETER: &str = "tascarrel.guest-instance-id";
-const DEFAULT_WORKSPACE_CONFIG: &str = "[features]\ndocker = true\n";
-const DEFAULT_WORKSPACE_DOCKERFILE: &str = r"FROM debian:stable-slim
+const DEFAULT_WORKSPACE_CONFIG: &str = "";
+const DEFAULT_WORKSPACE_DOCKERFILE: &str = r"FROM docker.io/library/debian:trixie
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git starship zsh \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        openssh-client \
+        procps \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-ENV SHELL=/usr/bin/zsh
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 WORKDIR /workspace
+";
+const DEFAULT_WORKSPACE_AGENTS: &str = r"This workspace contains multiple repositories. AGENTS.md files in repositories
+ALWAYS take priority over the instructions in this file. The user's explicit
+instructions ALWAYS take priority over the instructions in any AGENTS.md. If
+you encounter a conflict, point it out to the user.
+
+Find the repositories relevant to a user's request, then work within them. Use
+the other repositories as additional context when required.
+
+When starting an HTTP dev server (e.g., Vite, Astro) expose it through:
+
+`podctl http publish --title TITLE PORT`
+
+Choose a short title (4 words max) that describes what's running.
 ";
 const WORKSPACE_STORE_HISTORY_LIMIT: NonZeroUsize =
     NonZeroUsize::new(256).expect("the workspace store history limit is non-zero");
@@ -526,22 +547,34 @@ impl WorkspaceService {
             .ok_or_else(|| internal("workspace environment request stream was already taken"))
     }
 
-    /// Creates a workspace with the default host development configuration.
-    pub async fn create(
+    /// Prepares a complete workspace in an unpublished staging directory.
+    pub(crate) async fn prepare_create(
         &self,
         input: api::CreateWorkspaceAction,
-    ) -> Result<api::CreateWorkspaceOutput, Report<WorkspaceServiceError>> {
+    ) -> Result<PreparedWorkspaceCreation, Report<WorkspaceServiceError>> {
         let name = runtime_name(&input.name)?;
+        let definition = workspace_creation_definition(input.definition)?;
         let WorkspaceMode::Managed(managed) = &self.inner.config.mode else {
             return Err(invalid_request(
                 "workspaces cannot be created while hostd uses an external guest",
             ));
         };
         let root = managed.workspaces_dir.clone();
-        let created_name = name.clone();
-        tokio::task::spawn_blocking(move || create_default_workspace(&root, &created_name))
+        tokio::task::spawn_blocking(move || prepare_workspace(&root, name, &definition))
             .await
             .map_err(|error| internal(format!("workspace creation task failed: {error}")))?
+            .map_err(|error| internal(error.to_string()))
+    }
+
+    /// Atomically publishes one prepared workspace and its stopped state.
+    pub(crate) async fn publish_create(
+        &self,
+        prepared: PreparedWorkspaceCreation,
+    ) -> Result<api::CreateWorkspaceOutput, Report<WorkspaceServiceError>> {
+        let name = prepared.name.clone();
+        tokio::task::spawn_blocking(move || prepared.publish())
+            .await
+            .map_err(|error| internal(format!("workspace publication task failed: {error}")))?
             .map_err(|error| internal(error.to_string()))?;
         publish_workspace_state(
             &self.inner.states,
@@ -1335,7 +1368,91 @@ fn reduce_workspace_list(list: &mut api::WorkspaceList, mutation: &api::Workspac
     }
 }
 
-fn create_default_workspace(root: &Path, name: &WorkspaceName) -> Result<()> {
+#[derive(Clone)]
+struct WorkspaceCreationDefinition {
+    config_toml: String,
+    dockerfile: String,
+    agents_md: String,
+}
+
+fn default_workspace_creation_definition() -> WorkspaceCreationDefinition {
+    WorkspaceCreationDefinition {
+        config_toml: DEFAULT_WORKSPACE_CONFIG.to_owned(),
+        dockerfile: DEFAULT_WORKSPACE_DOCKERFILE.to_owned(),
+        agents_md: DEFAULT_WORKSPACE_AGENTS.to_owned(),
+    }
+}
+
+fn workspace_creation_definition(
+    definition: Option<api::WorkspaceCreationDefinition>,
+) -> Result<WorkspaceCreationDefinition, Report<WorkspaceServiceError>> {
+    let definition = definition.map_or_else(default_workspace_creation_definition, |definition| {
+        WorkspaceCreationDefinition {
+            config_toml: definition.config_toml.to_string(),
+            dockerfile: definition.dockerfile.to_string(),
+            agents_md: definition.agents_md.to_string(),
+        }
+    });
+    let max_bytes = tascarrel_api::MAX_WORKSPACE_CONFIG_BYTES;
+    if u64::try_from(definition.config_toml.len()).map_or(true, |length| length > max_bytes) {
+        return Err(invalid_request(format!(
+            "workspace config.toml exceeds {max_bytes} bytes"
+        )));
+    }
+    if definition.dockerfile.trim().is_empty() {
+        return Err(invalid_request("workspace Dockerfile must not be empty"));
+    }
+    if u64::try_from(definition.dockerfile.len()).map_or(true, |length| length > max_bytes) {
+        return Err(invalid_request(format!(
+            "workspace Dockerfile exceeds {max_bytes} bytes"
+        )));
+    }
+    if definition.agents_md.trim().is_empty() {
+        return Err(invalid_request("workspace AGENTS.md must not be empty"));
+    }
+    if u64::try_from(definition.agents_md.len()).map_or(true, |length| length > max_bytes) {
+        return Err(invalid_request(format!(
+            "workspace AGENTS.md exceeds {max_bytes} bytes"
+        )));
+    }
+    let config = decode_config(&definition.config_toml)
+        .map_err(|error| invalid_request(error.to_string()))?;
+    if let Some(vm) = config.vm {
+        if vm.cores == Some(0) {
+            return Err(invalid_request(
+                "workspace VM cores must be greater than zero",
+            ));
+        }
+        if let Some(memory) = vm.memory {
+            parse_memory_mib(&memory).map_err(|error| invalid_request(error.to_string()))?;
+        }
+        if let Some(disk) = vm.disk {
+            let bytes =
+                parse_size_bytes(&disk).map_err(|error| invalid_request(error.to_string()))?;
+            if bytes < MINIMUM_DATA_DISK_BYTES {
+                return Err(invalid_request(
+                    "workspace VM disk must be at least 256 MiB",
+                ));
+            }
+        }
+    }
+    Ok(definition)
+}
+
+#[cfg(test)]
+fn create_workspace(
+    root: &Path,
+    name: &WorkspaceName,
+    definition: &WorkspaceCreationDefinition,
+) -> Result<()> {
+    prepare_workspace(root, name.clone(), definition)?.publish()
+}
+
+fn prepare_workspace(
+    root: &Path,
+    name: WorkspaceName,
+    definition: &WorkspaceCreationDefinition,
+) -> Result<PreparedWorkspaceCreation> {
     let target = root.join(name.as_str());
     match std::fs::symlink_metadata(&target) {
         Ok(_) => bail!("workspace {} already exists", target.display()),
@@ -1354,23 +1471,22 @@ fn create_default_workspace(root: &Path, name: &WorkspaceName) -> Result<()> {
         )
     })?;
     std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
-    let mut cleanup = WorkspaceCreationCleanup(Some(staging.clone()));
+    let cleanup = WorkspaceCreationCleanup(Some(staging.clone()));
     write_new_workspace_file(
         &staging.join("config.toml"),
-        DEFAULT_WORKSPACE_CONFIG.as_bytes(),
+        definition.config_toml.as_bytes(),
     )?;
     let image = staging.join("image");
     std::fs::create_dir(&image)?;
     std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755))?;
-    write_new_workspace_file(
-        &image.join("Dockerfile"),
-        DEFAULT_WORKSPACE_DOCKERFILE.as_bytes(),
-    )?;
+    write_new_workspace_file(&image.join("Dockerfile"), definition.dockerfile.as_bytes())?;
     let agents = staging.join("agents");
     let skills = agents.join("skills");
     std::fs::create_dir(&agents)?;
     std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755))?;
-    write_new_workspace_file(&agents.join("AGENTS.md"), b"")?;
+    write_new_workspace_file(&agents.join("AGENTS.md"), definition.agents_md.as_bytes())?;
+    std::os::unix::fs::symlink("AGENTS.md", agents.join("CLAUDE.md"))
+        .context("create agents/CLAUDE.md instruction alias")?;
     std::fs::create_dir(&skills)?;
     std::fs::set_permissions(&skills, std::fs::Permissions::from_mode(0o755))?;
     sync_directory(&skills)?;
@@ -1378,26 +1494,14 @@ fn create_default_workspace(root: &Path, name: &WorkspaceName) -> Result<()> {
     sync_directory(&image)?;
     sync_directory(&staging)?;
     sync_directory(root)?;
-    let root_directory = File::open(root)
-        .with_context(|| format!("failed to open workspace root {}", root.display()))?;
-    rustix::fs::renameat_with(
-        &root_directory,
+    Ok(PreparedWorkspaceCreation {
+        name,
+        root: root.to_owned(),
         staging_name,
-        &root_directory,
-        name.as_str(),
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(io::Error::from)
-    .with_context(|| {
-        format!(
-            "failed to publish workspace {} from {}",
-            target.display(),
-            staging.display()
-        )
-    })?;
-    cleanup.0 = None;
-    sync_directory(root)?;
-    Ok(())
+        staging,
+        target,
+        cleanup,
+    })
 }
 
 fn write_new_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1428,6 +1532,46 @@ impl Drop for WorkspaceCreationCleanup {
         {
             warn!(path = %path.display(), %error, "failed to clean incomplete workspace creation");
         }
+    }
+}
+
+/// A complete workspace tree that is not yet visible to inventory watchers.
+pub(crate) struct PreparedWorkspaceCreation {
+    name: WorkspaceName,
+    root: PathBuf,
+    staging_name: String,
+    staging: PathBuf,
+    target: PathBuf,
+    cleanup: WorkspaceCreationCleanup,
+}
+
+impl PreparedWorkspaceCreation {
+    /// Returns the real staging directory available for host-owned setup.
+    pub(crate) fn staging_directory(&self) -> &Path {
+        &self.staging
+    }
+
+    /// Publishes the staging directory under its final workspace name.
+    fn publish(mut self) -> Result<()> {
+        let root_directory = File::open(&self.root)
+            .with_context(|| format!("failed to open workspace root {}", self.root.display()))?;
+        rustix::fs::renameat_with(
+            &root_directory,
+            &self.staging_name,
+            &root_directory,
+            self.name.as_str(),
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)
+        .with_context(|| {
+            format!(
+                "failed to publish workspace {} from {}",
+                self.target.display(),
+                self.staging.display()
+            )
+        })?;
+        self.cleanup.0 = None;
+        sync_directory(&self.root)
     }
 }
 
@@ -3321,15 +3465,17 @@ mod tests {
         let directory = tempdir().unwrap();
         let root = Arc::new(directory.path().to_owned());
         let workspace = WorkspaceName::new("demo").unwrap();
+        let definition = default_workspace_creation_definition();
         let barrier = Arc::new(Barrier::new(CREATORS));
         let creators = (0..CREATORS)
             .map(|_| {
                 let root = Arc::clone(&root);
                 let workspace = workspace.clone();
+                let definition = definition.clone();
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    create_default_workspace(&root, &workspace)
+                    create_workspace(&root, &workspace, &definition)
                 })
             })
             .collect::<Vec<_>>();
@@ -3348,6 +3494,10 @@ mod tests {
         assert!(published.join("config.toml").is_file());
         assert!(published.join("image/Dockerfile").is_file());
         assert!(published.join("agents/AGENTS.md").is_file());
+        assert_eq!(
+            std::fs::read_link(published.join("agents/CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
         assert!(std::fs::read_dir(&*root).unwrap().all(|entry| {
             !entry
                 .unwrap()
@@ -3355,6 +3505,134 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".workspace-")
         }));
+    }
+
+    #[test]
+    fn prepared_workspace_is_hidden_and_cleaned_when_setup_fails() {
+        let directory = tempdir().unwrap();
+        let workspace = WorkspaceName::new("demo").unwrap();
+        let definition = default_workspace_creation_definition();
+        let prepared = prepare_workspace(directory.path(), workspace.clone(), &definition).unwrap();
+        let staging = prepared.staging_directory().to_owned();
+
+        assert!(staging.join("config.toml").is_file());
+        assert!(
+            configured_workspace_names(directory.path())
+                .unwrap()
+                .is_empty()
+        );
+        drop(prepared);
+
+        assert!(!staging.exists());
+        assert!(
+            configured_workspace_names(directory.path())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn workspace_creation_writes_the_supplied_definition() {
+        let directory = tempdir().unwrap();
+        let workspace = WorkspaceName::new("custom").unwrap();
+        let definition = WorkspaceCreationDefinition {
+            config_toml: "[features]\ndocker = true\n".to_owned(),
+            dockerfile: "FROM docker.io/library/debian:trixie\n".to_owned(),
+            agents_md: "Always inspect repository instructions.\n".to_owned(),
+        };
+
+        create_workspace(directory.path(), &workspace, &definition).unwrap();
+
+        let root = directory.path().join(workspace.as_str());
+        assert_eq!(
+            std::fs::read_to_string(root.join("config.toml")).unwrap(),
+            definition.config_toml
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("image/Dockerfile")).unwrap(),
+            definition.dockerfile
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("agents/AGENTS.md")).unwrap(),
+            definition.agents_md
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("agents/CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("agents/CLAUDE.md")).unwrap(),
+            definition.agents_md
+        );
+    }
+
+    #[test]
+    fn workspace_creation_rejects_invalid_definitions() {
+        let invalid_config = api::WorkspaceCreationDefinition {
+            config_toml: "[features]\ndocker = \"yes\"\n".into(),
+            dockerfile: "FROM docker.io/library/debian:trixie\n".into(),
+            agents_md: "Use repository instructions.\n".into(),
+        };
+        let empty_dockerfile = api::WorkspaceCreationDefinition {
+            config_toml: "".into(),
+            dockerfile: " \n".into(),
+            agents_md: "Use repository instructions.\n".into(),
+        };
+        let empty_agents = api::WorkspaceCreationDefinition {
+            config_toml: "".into(),
+            dockerfile: "FROM docker.io/library/debian:trixie\n".into(),
+            agents_md: " \n".into(),
+        };
+
+        assert!(workspace_creation_definition(Some(invalid_config)).is_err());
+        assert!(workspace_creation_definition(Some(empty_dockerfile)).is_err());
+        assert!(workspace_creation_definition(Some(empty_agents)).is_err());
+    }
+
+    #[test]
+    fn workspace_creation_accepts_the_assistant_config_shape() {
+        let definition = api::WorkspaceCreationDefinition {
+            config_toml: r#"[vm]
+cores = 8
+memory = "16G"
+disk = "200G"
+
+[features]
+docker = true
+virtualization = true
+
+[nix]
+daemon = true
+
+[repos."product/api"]
+source = "git@github.com:example/api.git"
+branch = "release/next"
+
+[env]
+GH_TOKEN = "tascarrel-github-read-token"
+
+[secrets.providers.services]
+kind = "sops"
+file = "secrets.json"
+
+[network]
+default = "deny"
+allow-hosts = ["api.github.com", "deb.debian.org", "github.com"]
+host-ports = [3000, "5432:15432"]
+
+[[network.secret-injection]]
+host = "api.github.com"
+methods = ["GET", "HEAD", "POST"]
+header = "authorization"
+placeholder = "tascarrel-github-read-token"
+secret = "services.GITHUB_TOKEN"
+"#
+            .into(),
+            dockerfile: "FROM docker.io/library/debian:trixie\n".into(),
+            agents_md: "Use `nix` to run ad-hoc tools that are not installed.\n".into(),
+        };
+
+        workspace_creation_definition(Some(definition)).unwrap();
     }
 
     #[tokio::test]

@@ -285,9 +285,9 @@ fn check_acceleration(checks: &mut Vec<DependencyCheck>, _qemu: Option<&Path>) {
     let path = Path::new("/dev/kvm");
     match OpenOptions::new().read(true).write(true).open(path) {
         Ok(_) => checks.push(ok_check("KVM access", "read/write access to /dev/kvm")),
-        Err(error) => checks.push(error_check(
+        Err(error) => checks.push(warning_check(
             "KVM access",
-            format!("cannot open /dev/kvm read/write: {error}"),
+            format!("cannot open /dev/kvm read/write: {error}; using TCG will remain available"),
         )),
     }
 }

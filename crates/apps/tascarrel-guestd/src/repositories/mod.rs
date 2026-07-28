@@ -128,17 +128,20 @@ struct CheckoutMarker {
     schema_version: u32,
     checkout_schema: u32,
     source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     cache_id: RepositoryCacheId,
     cache_version: u64,
     cache_updated_at: Timestamp,
 }
 
 impl CheckoutMarker {
-    fn new(source: &str, cache: &RepositoryCacheVersion) -> Self {
+    fn new(source: &str, branch: Option<&str>, cache: &RepositoryCacheVersion) -> Self {
         Self {
             schema_version: CHECKOUT_MARKER_SCHEMA,
             checkout_schema: CHECKOUT_SCHEMA,
             source_id: source_id(source),
+            branch: branch.map(str::to_owned),
             cache_id: cache.cache_id.clone(),
             cache_version: cache.version,
             cache_updated_at: cache.updated_at,
@@ -596,7 +599,8 @@ impl GuestRepositoryManager {
             let version = versions
                 .get(path)
                 .ok_or_else(|| anyhow::anyhow!("host cache version is missing for {path}"))?;
-            let expected = CheckoutMarker::new(&repository.source, version);
+            let expected =
+                CheckoutMarker::new(&repository.source, repository.branch.as_deref(), version);
             let checkout = workspace.join(path);
             let existing = managed.get(path);
             let action = if let Some(existing) = existing {
@@ -609,6 +613,7 @@ impl GuestRepositoryManager {
                     bail!("host cache version regressed for managed repository {path}");
                 } else if existing.cache_version < expected.cache_version
                     || existing.checkout_schema != CHECKOUT_SCHEMA
+                    || existing.branch != expected.branch
                 {
                     ReconciliationAction::Fetch
                 } else {
@@ -672,6 +677,7 @@ impl GuestRepositoryManager {
                 ReconciliationAction::Clone => {
                     self.clone_repository(
                         &work.repository.source,
+                        work.repository.branch.as_deref(),
                         &checkout,
                         image,
                         Some(&work.version),
@@ -683,6 +689,7 @@ impl GuestRepositoryManager {
                 ReconciliationAction::Fetch => {
                     self.fetch_repository(
                         &work.repository.source,
+                        work.repository.branch.as_deref(),
                         &checkout,
                         image,
                         Some(&work.version),
@@ -703,7 +710,11 @@ impl GuestRepositoryManager {
             }
             write_checkout_marker(
                 &checkout,
-                &CheckoutMarker::new(&work.repository.source, &work.version),
+                &CheckoutMarker::new(
+                    &work.repository.source,
+                    work.repository.branch.as_deref(),
+                    &work.version,
+                ),
                 image.user().uid(),
                 image.user().gid(),
             )
@@ -751,6 +762,7 @@ impl GuestRepositoryManager {
     async fn fetch_repository(
         &self,
         source: &str,
+        branch: Option<&str>,
         checkout: &Path,
         image: &ImageConfig,
         cache: Option<&RepositoryCacheVersion>,
@@ -771,13 +783,14 @@ impl GuestRepositoryManager {
         let default_branch = self
             .run_transport(source, cache, &mut child, "guest Git fetch")
             .await?;
-        self.checkout_default_branch(checkout, image, default_branch.as_ref())
+        self.checkout_selected_branch(checkout, image, branch, default_branch.as_ref())
             .await
     }
 
     async fn clone_repository(
         &self,
         source: &str,
+        branch: Option<&str>,
         destination: &Path,
         image: &ImageConfig,
         cache: Option<&RepositoryCacheVersion>,
@@ -789,9 +802,11 @@ impl GuestRepositoryManager {
             .uid(image.user().uid())
             .gid(image.user().gid())
             .kill_on_drop(true);
-        self.run_transport(source, cache, &mut child, "guest Git clone")
+        let default_branch = self
+            .run_transport(source, cache, &mut child, "guest Git clone")
             .await?;
-        Ok(())
+        self.checkout_selected_branch(destination, image, branch, default_branch.as_ref())
+            .await
     }
 
     async fn run_transport(
@@ -877,15 +892,20 @@ impl GuestRepositoryManager {
         Ok(default_branch)
     }
 
-    /// Resets a managed checkout to the cached default branch or current
-    /// upstream.
-    async fn checkout_default_branch(
+    /// Resets a managed checkout to its configured branch, cached default
+    /// branch, or current upstream.
+    async fn checkout_selected_branch(
         &self,
         checkout: &Path,
         image: &ImageConfig,
+        configured_branch: Option<&str>,
         default_branch: Option<&ReferenceName>,
     ) -> Result<()> {
-        let Some(default_branch) = default_branch else {
+        let configured_reference = configured_branch
+            .map(|branch| ReferenceName::new(format!("refs/heads/{branch}")))
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let Some(selected_branch) = configured_reference.as_ref().or(default_branch) else {
             let upstream = self
                 .git_command(
                     checkout,
@@ -904,10 +924,10 @@ impl GuestRepositoryManager {
                 .await?;
             return success(&output, "reset managed repository to refreshed upstream");
         };
-        let branch = default_branch
+        let branch = selected_branch
             .as_str()
             .strip_prefix("refs/heads/")
-            .ok_or_else(|| anyhow::anyhow!("host default branch is not a branch"))?;
+            .ok_or_else(|| anyhow::anyhow!("selected repository branch is not a branch"))?;
         let upstream = format!("refs/remotes/origin/{branch}");
         let output = self
             .git_command(
@@ -917,7 +937,7 @@ impl GuestRepositoryManager {
             )
             .output()
             .await?;
-        success(&output, "check out the refreshed upstream default branch")
+        success(&output, "check out the selected upstream branch")
     }
 
     fn git_command<const N: usize>(
@@ -949,7 +969,13 @@ impl GuestRepositoryManager {
             let Some(version) = versions.get(path) else {
                 return Ok(false);
             };
-            if managed.get(path) != Some(&CheckoutMarker::new(&repository.source, version)) {
+            if managed.get(path)
+                != Some(&CheckoutMarker::new(
+                    &repository.source,
+                    repository.branch.as_deref(),
+                    version,
+                ))
+            {
                 return Ok(false);
             }
         }
@@ -1336,7 +1362,11 @@ mod tests {
             version: 7,
             updated_at: Timestamp::now(),
         };
-        let marker = CheckoutMarker::new("https://example.invalid/tascarrel.git", &version);
+        let marker = CheckoutMarker::new(
+            "https://example.invalid/tascarrel.git",
+            Some("main"),
+            &version,
+        );
         write_checkout_marker(
             &checkout,
             &marker,
@@ -1346,12 +1376,21 @@ mod tests {
 
         let managed = managed_versioned_repositories(&workspace)?;
         assert_eq!(managed.get("src/tascarrel"), Some(&marker));
+        assert_ne!(
+            managed.get("src/tascarrel"),
+            Some(&CheckoutMarker::new(
+                "https://example.invalid/tascarrel.git",
+                Some("release"),
+                &version,
+            ))
+        );
         let mut advanced = version.clone();
         advanced.version += 1;
         assert_ne!(
             managed.get("src/tascarrel"),
             Some(&CheckoutMarker::new(
                 "https://example.invalid/tascarrel.git",
+                Some("main"),
                 &advanced,
             ))
         );

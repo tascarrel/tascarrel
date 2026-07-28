@@ -465,6 +465,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Upstream repository source used by the host daemon.
                                             */
                                                         "source": __sidex_types.builtins.String, /**
+                                            * Short branch name checked out in workspace seeds, or the upstream default when omitted.
+                                            */
+                                                        "branch"?: __sidex_types.builtins.String, /**
                                             * Complete Git publication policy replacing the workspace policy for this repository.
                                             */
                                                         "git"?: WorkspaceGitConfig };

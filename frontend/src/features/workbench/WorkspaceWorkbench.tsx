@@ -82,7 +82,7 @@ export function WorkspaceWorkbench({
   workspaceConnection: WorkspaceConnection;
   workspaceConnectionAttempt: number;
   onSelectWorkspace: (workspace: workspaces.WorkspaceName) => void;
-  onCreateWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
+  onCreateWorkspace: () => void;
   onStartWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
 }) {
@@ -700,7 +700,7 @@ export function UnavailableWorkspace({
   connectionAttempt: number;
   error?: Error;
   onSelectWorkspace: (workspace: workspaces.WorkspaceName) => void;
-  onCreateWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
+  onCreateWorkspace: () => void;
   onStartWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
 }) {

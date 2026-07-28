@@ -272,7 +272,7 @@ pub(crate) fn load_config_file(
 }
 
 /// Decodes the generated TOML shape and rejects unknown fields.
-fn decode_config(text: &str) -> Result<api::WorkspaceConfig, Report<ConfigLoadError>> {
+pub(crate) fn decode_config(text: &str) -> Result<api::WorkspaceConfig, Report<ConfigLoadError>> {
     let mut unknown = BTreeSet::new();
     let deserializer =
         toml::Deserializer::parse(text).map_err(|_| ConfigLoadError::Decode.report())?;
