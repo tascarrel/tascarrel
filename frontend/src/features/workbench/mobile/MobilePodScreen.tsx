@@ -37,7 +37,7 @@ export function MobilePodScreen({
 
   return (
     <div className="mobile-client-content min-h-0 flex-1 overflow-y-auto pt-4">
-      <div className="mx-auto grid max-w-2xl gap-6">
+      <div className="mx-auto grid w-full min-w-0 max-w-2xl gap-6">
         <section className="rounded-2xl border border-ui-border bg-surface/70 p-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">

@@ -206,7 +206,7 @@ function MobileRepositoryChanges({
 
   return (
     <div className="mobile-client-content h-full min-h-0 overflow-y-auto pt-4">
-      <div className="mx-auto max-w-2xl">
+      <div className="mx-auto w-full min-w-0 max-w-2xl">
         {repositories.length > 1 ? (
           <label className="relative block">
             <span className="sr-only">Repository</span>
@@ -215,7 +215,7 @@ function MobileRepositoryChanges({
               className="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-subtle"
             />
             <select
-              className="h-12 w-full appearance-none rounded-xl border border-ui-border-strong bg-surface pl-10 pr-10 text-sm text-foreground outline-none focus:border-accent/50"
+              className="h-12 w-full min-w-0 max-w-full appearance-none rounded-xl border border-ui-border-strong bg-surface pl-10 pr-10 text-sm text-foreground outline-none focus:border-accent/50"
               value={entry.target.path}
               onChange={(event) => onSelectRepository(event.target.value)}
             >

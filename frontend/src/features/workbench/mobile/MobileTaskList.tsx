@@ -31,35 +31,6 @@ export function mobileChatSummary(summary: chats.ChatSummary): MobileChatSummary
   };
 }
 
-export function MobileChatSection({
-  title,
-  chats: sectionChats,
-  podTitles,
-  onSelect,
-}: {
-  title: string;
-  chats: readonly MobileChatSummary[];
-  podTitles: ReadonlyMap<pods.PodId, string>;
-  onSelect: (podId: pods.PodId, chatId: chats.ChatId) => void;
-}) {
-  const id = `mobile-${title.toLowerCase().replaceAll(" ", "-")}`;
-  return (
-    <section aria-labelledby={id}>
-      <MobileSectionHeading id={id} title={title} count={sectionChats.length} />
-      <div className="mt-3 grid gap-2">
-        {sectionChats.map((chat) => (
-          <MobileChatRow
-            chat={chat}
-            key={chat.id}
-            podTitle={podTitles.get(chat.podId)}
-            onClick={() => onSelect(chat.podId, chat.id)}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export function MobileChatRow({
   chat,
   podTitle,
@@ -71,7 +42,7 @@ export function MobileChatRow({
 }) {
   return (
     <button
-      className={`flex min-h-16 w-full items-center gap-3 rounded-2xl border p-3.5 text-left transition active:bg-surface-raised ${
+      className={`flex min-h-16 w-full min-w-0 max-w-full items-center gap-3 overflow-hidden rounded-2xl border p-3.5 text-left transition active:bg-surface-raised ${
         chat.status === "needs-input" || chat.attention
           ? "border-amber-500/25 bg-amber-500/[0.05]"
           : chat.status === "failed"
@@ -112,7 +83,7 @@ export function MobilePodRow({
 }) {
   return (
     <button
-      className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-ui-border bg-surface/70 p-3.5 text-left transition active:bg-surface-raised"
+      className="flex min-h-16 w-full min-w-0 max-w-full items-center gap-3 overflow-hidden rounded-2xl border border-ui-border bg-surface/70 p-3.5 text-left transition active:bg-surface-raised"
       type="button"
       onClick={onClick}
     >
@@ -129,7 +100,7 @@ export function MobilePodRow({
         <span className="block truncate text-sm font-medium text-foreground">
           {pod.title || "Untitled task"}
         </span>
-        <span className="mt-1 block text-[11px] text-subtle">
+        <span className="mt-1 block truncate text-[11px] text-subtle">
           {pod.status.status}
           {changeSummary?.changedFileCount
             ? ` · ${changeSummary.changedFileCount} changed`

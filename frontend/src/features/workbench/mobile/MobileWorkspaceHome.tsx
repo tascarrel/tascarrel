@@ -34,7 +34,7 @@ export function MobileWorkspaceHome({
       </header>
 
       <div className="mobile-client-content min-h-0 flex-1 overflow-y-auto pt-5">
-        <div className="mx-auto max-w-2xl">
+        <div className="mx-auto w-full min-w-0 max-w-2xl">
           <div className="mb-5">
             <h1 className="text-xl font-semibold tracking-tight text-foreground">Workspaces</h1>
             <p className="mt-1 text-sm leading-6 text-muted">
@@ -67,7 +67,7 @@ export function MobileWorkspaceHome({
           <div className="grid gap-3">
             {availableWorkspaces.map((workspace) => (
               <button
-                className="flex min-h-20 w-full items-center gap-3 rounded-2xl border border-ui-border bg-surface/70 p-4 text-left transition active:bg-surface-raised"
+                className="flex min-h-20 w-full min-w-0 max-w-full items-center gap-3 overflow-hidden rounded-2xl border border-ui-border bg-surface/70 p-4 text-left transition active:bg-surface-raised"
                 type="button"
                 key={workspace.name}
                 onClick={() => onSelectWorkspace(workspace.name)}
@@ -122,7 +122,7 @@ function MobileWorkspaceActivity({
   }
 
   return (
-    <section aria-label={`Activity in ${workspace}`}>
+    <section className="min-w-0 max-w-full" aria-label={`Activity in ${workspace}`}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-foreground">{workspace}</h2>

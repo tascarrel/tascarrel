@@ -137,14 +137,12 @@ export function MobileWorkbenchShell({
     />
   ) : (
     <MobileWorkspaceScreen
-      workspace={selectedWorkspace}
       pods={workspacePods}
       chats={workspaceChats}
       podChangeSummaries={podChangeSummaries}
       approvalsView={approvalsView}
       onCreatePod={onCreatePod}
       onSelectPod={onSelectPod}
-      onSelectChat={onSelectChat}
     />
   );
 
@@ -185,7 +183,7 @@ export function MobileWorkbenchShell({
       </header>
       {error && !workspaceScreen && !route.chat && !creatingChat ? (
         <p
-          className="mobile-client-horizontal border-b border-red-500/20 bg-red-500/5 py-2.5 text-xs leading-5 text-red-200"
+          className="mobile-client-horizontal break-all border-b border-red-500/20 bg-red-500/5 py-2.5 text-xs leading-5 text-red-200"
           role="alert"
         >
           {error}

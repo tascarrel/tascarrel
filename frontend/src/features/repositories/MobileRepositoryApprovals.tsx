@@ -140,7 +140,7 @@ function MobileRepositoryApprovalCard({
   );
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-amber-500/25 bg-amber-500/[0.04]">
+    <article className="min-w-0 max-w-full overflow-hidden rounded-2xl border border-amber-500/25 bg-amber-500/[0.04]">
       <div className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
