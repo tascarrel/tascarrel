@@ -25,8 +25,6 @@ export function MobileWorkspaceScreen({
   onCreatePod: () => void;
   onSelectPod: (podId: pods.PodId) => void;
 }) {
-  const runningPods = workspacePods.filter((pod) => pod.status.status === "Running");
-
   return (
     <div className="mobile-client-content min-h-0 flex-1 overflow-y-auto pt-4">
       <div className="mx-auto grid w-full min-w-0 max-w-2xl gap-6">
@@ -40,11 +38,11 @@ export function MobileWorkspaceScreen({
         <section className="min-w-0" aria-labelledby="mobile-pods-title">
           <MobileSectionHeading
             id="mobile-pods-title"
-            title="Running Tasks"
-            count={runningPods.length}
+            title="Tasks"
+            count={workspacePods.length}
           />
           <div className="mt-3 grid min-w-0 gap-2">
-            {runningPods.map((pod) => (
+            {workspacePods.map((pod) => (
               <MobilePodRow
                 key={pod.id}
                 pod={pod}
@@ -59,9 +57,9 @@ export function MobileWorkspaceScreen({
                 onClick={() => onSelectPod(pod.id)}
               />
             ))}
-            {!runningPods.length ? (
+            {!workspacePods.length ? (
               <div className="rounded-2xl border border-dashed border-ui-border p-6 text-center text-sm leading-6 text-subtle">
-                No tasks are running. Start a new task above.
+                No tasks yet. Start a new task above.
               </div>
             ) : null}
           </div>

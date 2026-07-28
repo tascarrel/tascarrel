@@ -13,8 +13,8 @@ feature components. The desktop workbench provides the multi-panel development e
 mobile client focuses on starting tasks, monitoring chats, resolving input requests, approving
 repository publications, starting and stopping task pods, and reviewing individual changed-file diffs.
 Its workspace index subscribes to every running workspace and collects active chats and unblock
-requests into one live attention view. Within a workspace, the client lists only running task pods;
-users open a pod before choosing or starting a chat.
+requests into one live attention view. Within a workspace, users open a task pod before choosing or
+starting a chat.
 
 Code editing, terminals, arbitrary file browsing, network configuration, image management, and
 advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless
