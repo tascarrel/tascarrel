@@ -1,4 +1,4 @@
-import { ArrowUp, CircleStop, Paperclip } from "lucide-react";
+import { ArrowUp, ChevronDown, CircleStop, Paperclip } from "lucide-react";
 import {
   type ChangeEvent,
   type ClipboardEvent,
@@ -13,12 +13,14 @@ import {
 } from "react";
 
 import type { chats, config } from "../../../api/generated/index.ts";
+import { useMobileLayout } from "../../../app/layout.ts";
 import { Button } from "../../../components/ui/Button.tsx";
 import {
   fuzzySearch,
   type FuzzySearchItem,
 } from "../../../components/ui/FuzzySearch.tsx";
 import { KeyboardShortcut } from "../../../components/ui/KeyboardShortcut.tsx";
+import { Popover } from "../../../components/ui/Popover.tsx";
 import { SelectControl } from "../../../components/ui/SelectControl.tsx";
 import {
   loadChatComposerDraft,
@@ -103,6 +105,7 @@ export function ChatComposer({
   onPromptEmptyChange?: (empty: boolean) => void;
   onError: (cause: unknown) => void;
 }) {
+  const mobileLayout = useMobileLayout();
   const [restoredDraft] = useState(() => loadChatComposerDraft(draftId));
   const [text, setText] = useState(restoredDraft?.text ?? initialText);
   const [attachments, setAttachments] = useState<chats.ChatPromptAttachment[]>(
@@ -190,7 +193,10 @@ export function ChatComposer({
 
     const previousScrollTop = input.scrollTop;
     const cursorAtEnd = input.selectionEnd === input.value.length;
-    const maxHeight = Math.min(TEXTAREA_MAX_HEIGHT, window.innerHeight * 0.25);
+    const maxHeight = Math.min(
+      mobileLayout ? MOBILE_TEXTAREA_MAX_HEIGHT : TEXTAREA_MAX_HEIGHT,
+      window.innerHeight * 0.25,
+    );
 
     input.style.height = "0px";
     input.style.height = `${Math.min(input.scrollHeight, maxHeight)}px`;
@@ -198,7 +204,7 @@ export function ChatComposer({
     if (input.scrollHeight > maxHeight) {
       input.scrollTop = cursorAtEnd ? input.scrollHeight : previousScrollTop;
     }
-  }, [text]);
+  }, [mobileLayout, text]);
 
   const submit = async (deliveryMode = mode, submittedText = text) => {
     if (
@@ -296,7 +302,7 @@ export function ChatComposer({
       );
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !mobileLayout) {
       event.preventDefault();
       void submit("WhenIdle");
       return;
@@ -444,24 +450,26 @@ export function ChatComposer({
   );
   const attachButton = (kind: "icon" | "text" = "text") => (
     <Button
+      aria-label={kind === "icon" ? "Attach files" : undefined}
       size={kind === "icon" ? "icon" : "small"}
       disabled={!attachmentUploader || sending}
       title={attachmentUploader ? "Attach files" : "Attachments are not available in this host"}
       onClick={() => fileInput.current?.click()}
     >
-      <Paperclip className="size-3.5" />
+      <Paperclip aria-hidden="true" className="size-3.5" />
       {kind === "text" ? "Add files" : null}
     </Button>
   );
   const interruptButton = (label = false) => onInterrupt ? (
     <Button
+      aria-label={label ? undefined : "Interrupt active turn"}
       className="rounded-xl"
       size={label ? "default" : "icon"}
       disabled={!interrupting}
       title="Interrupt active turn"
       onClick={() => void onInterrupt().catch(onError)}
     >
-      <CircleStop className="size-4" />
+      <CircleStop aria-hidden="true" className="size-4" />
       {label ? "Stop" : null}
     </Button>
   ) : null;
@@ -470,20 +478,30 @@ export function ChatComposer({
     label = submitLabel,
     tone = "primary",
     arrow = true,
+    iconOnly = false,
   }: {
     deliveryMode?: chats.ChatPromptMode;
     label?: string;
     tone?: "primary" | "neutral" | "danger";
     arrow?: boolean;
+    iconOnly?: boolean;
   } = {}) => (
     <Button
-      className={`rounded-xl px-3.5 text-sm font-semibold ${sending ? "animate-pulse" : ""}`}
-      variant={tone === "primary" ? "primary" : tone === "danger" ? "danger" : "muted"}
+      aria-label={iconOnly ? label : undefined}
+      className={`rounded-xl text-sm font-semibold ${
+        iconOnly ? "size-9 p-0" : "px-3.5"
+      } ${sending ? "animate-pulse" : ""}`}
+      variant={
+        tone === "primary" ? "primary" : tone === "danger" ? "danger" : "muted"
+      }
       disabled={sendDisabled}
-      title={`${label} (Enter)`}
+      title={`${label}${mobileLayout ? "" : " (Enter)"}`}
       onClick={() => void submit(deliveryMode)}
     >
-      <>{label === "Send" ? null : label}{arrow ? <ArrowUp className="size-3.5" /> : null}</>
+      <>
+        {iconOnly || label === "Send" ? null : label}
+        {arrow ? <ArrowUp aria-hidden="true" className="size-3.5" /> : null}
+      </>
     </Button>
   );
   const deliveryControl = (compact = false) => showDeliveryMode ? (
@@ -497,6 +515,41 @@ export function ChatComposer({
       onChange={(nextMode) => setMode(nextMode as chats.ChatPromptMode)}
     />
   ) : null;
+
+  if (mobileLayout) {
+    return (
+      <div
+        className="rounded-2xl border border-ui-border-strong bg-surface shadow-[0_14px_45px_rgb(0_0_0/0.5)] transition focus-within:border-accent/50 focus-within:shadow-[0_14px_45px_rgb(0_0_0/0.6),0_0_0_1px_var(--color-accent-soft)]"
+        {...frameEvents}
+      >
+        {filePicker}
+        {disabledBanner}
+        {attachmentTray}
+        {messageInput("compact")}
+        <div className="flex min-w-0 items-center gap-1.5 border-t border-ui-border px-2.5 py-2">
+          <div
+            className="flex min-w-0 flex-1 items-center gap-1"
+            role="group"
+            aria-label="Message options"
+          >
+            {attachButton("icon")}
+            <ModelSettingsMenu
+              compact
+              harness={harness}
+              preferences={modelPreferences}
+              selection={model}
+              disabled={modelLocked || sending}
+              onChange={setModel}
+            />
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {interrupting ? interruptButton() : null}
+            {sendButton({ deliveryMode: "WhenIdle", iconOnly: true })}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (layout === "compact") {
     return (
@@ -744,6 +797,7 @@ function AttachmentTray({
 
 function ModelSettingsMenu({
   align = "left",
+  compact = false,
   harness,
   preferences,
   selection,
@@ -751,25 +805,41 @@ function ModelSettingsMenu({
   onChange,
 }: {
   align?: "left" | "right";
+  compact?: boolean;
   harness?: chats.ChatHarness;
   preferences?: config.WorkspaceChatModelPreferences;
   selection?: chats.ChatModelSelection;
   disabled: boolean;
   onChange: (selection: chats.ChatModelSelection | undefined) => void;
 }) {
-  const model = harness?.models.find((candidate) => candidate.id === selection?.model) ?? harness?.models[0];
+  const model =
+    harness?.models.find((candidate) => candidate.id === selection?.model) ??
+    harness?.models[0];
+  const modelName =
+    model?.shortName ?? model?.displayName ?? selection?.model ?? "Default";
   return (
-    <details className="group/model relative">
-      <summary className="cursor-pointer list-none rounded-lg px-2.5 py-1.5 text-xs text-muted transition hover:bg-surface-raised hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <span className="text-subtle">Model </span>
-        {model?.shortName ?? model?.displayName ?? selection?.model ?? "Default"}
-      </summary>
-      <div className={`absolute bottom-[calc(100%+0.5rem)] z-30 min-w-72 rounded-xl border border-ui-border-strong bg-surface-raised p-3 shadow-2xl shadow-black/60 ${
-        align === "right" ? "right-0" : "left-0"
-      }`}>
-        <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-subtle">
-          Model configuration
-        </p>
+    <Popover.Root>
+      <Popover.Trigger
+        aria-label={`Model settings, currently ${modelName}`}
+        className={`flex h-9 min-w-0 items-center gap-1.5 rounded-lg border border-ui-border/70 bg-surface px-2.5 text-xs text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground ${
+          compact ? "max-w-[min(11rem,42vw)]" : ""
+        }`}
+        title="Model settings"
+      >
+        {compact ? null : <span className="text-subtle">Model</span>}
+        <span className="min-w-0 truncate">{modelName}</span>
+        <ChevronDown
+          aria-hidden="true"
+          className="size-3.5 shrink-0 text-subtle"
+        />
+      </Popover.Trigger>
+      <Popover.Content
+        align={align === "right" ? "end" : "start"}
+        className="!overflow-y-auto"
+        side="top"
+        title="Model Configuration"
+        titleClassName="mb-3 block text-[10px] uppercase tracking-[0.14em] text-subtle"
+      >
         <ModelControls
           harness={harness}
           preferences={preferences}
@@ -777,12 +847,13 @@ function ModelSettingsMenu({
           disabled={disabled}
           onChange={onChange}
         />
-      </div>
-    </details>
+      </Popover.Content>
+    </Popover.Root>
   );
 }
 
 const LARGE_PASTE_CHARACTERS = 4 * 1024;
+const MOBILE_TEXTAREA_MAX_HEIGHT = 144;
 const TEXTAREA_MAX_HEIGHT = 256;
 
 function timestampForName(): string {

@@ -257,9 +257,15 @@ diffs-container {
 }
 
 .mobile-client .chat-composer-footer {
+  max-height: none;
   padding-right: max(12px, env(safe-area-inset-right));
   padding-bottom: calc(12px + env(safe-area-inset-bottom));
   padding-left: max(12px, env(safe-area-inset-left));
+}
+
+.mobile-client .chat-composer-content {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .mobile-client .chat-composer-footer textarea {

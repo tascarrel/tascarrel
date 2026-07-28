@@ -198,7 +198,7 @@ function ComposerFooter({
           <ArrowDown aria-hidden="true" className="size-4" />
         </Button>
       ) : null}
-      <div className="mx-auto max-h-[calc(45dvh-3.25rem)] max-w-4xl overflow-y-auto">{children}</div>
+      <div className="chat-composer-content mx-auto max-h-[calc(45dvh-3.25rem)] max-w-4xl overflow-y-auto">{children}</div>
     </footer>
   );
 }
