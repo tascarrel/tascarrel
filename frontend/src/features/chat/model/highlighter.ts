@@ -36,17 +36,10 @@ import yaml from "shiki/langs/yaml.mjs";
 import {
   createCssVariablesTheme,
   createHighlighterCore,
-  type LanguageRegistration,
 } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
-import sidexGrammarSource from "./sidex.tmLanguage.json?raw";
-
-const sidex = {
-  ...(JSON.parse(sidexGrammarSource) as object),
-  name: "sidex",
-  aliases: ["Sidex"],
-} as LanguageRegistration;
+import { SIDEX_LANGUAGE } from "../../../components/ui/sidexLanguage.ts";
 
 const languages = [
   bash,
@@ -76,7 +69,7 @@ const languages = [
   ruby,
   rust,
   scss,
-  sidex,
+  SIDEX_LANGUAGE,
   sql,
   swift,
   toml,

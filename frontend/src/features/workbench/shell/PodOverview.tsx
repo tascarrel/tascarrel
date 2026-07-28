@@ -2,6 +2,8 @@ import { Box } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { pods, workspaces } from "../../../api/generated/index.ts";
+import { Badge, type BadgeTone } from "../../../components/ui/Badge.tsx";
+import { SidebarTabs, SidebarTabsPanel } from "../../../components/ui/SidebarTabs.tsx";
 import { ShellPlaceholder } from "./ShellPlaceholder.tsx";
 
 export function PodOverview({
@@ -24,31 +26,88 @@ export function PodOverview({
   }
   const failure = pod.status.status === "Failed" ? pod.status : undefined;
   return (
-    <div className="pod-overview">
-      <div className="pod-overview-heading">
-        <div><span>Pod</span><h1>{pod.title || "Untitled pod"}</h1><p>{workspace}</p></div>
-        <span className="pod-overview-health" data-failed={failure ? true : undefined}>
-          {pod.status.status}
-        </span>
-      </div>
-      {failure ? (
-        <section className="pod-overview-failure" role="alert">
-          <h2>Pod operation failed</h2>
-          <pre>{failure.message}</pre>
-          <p>{new Date(String(failure.failedAt)).toLocaleString()}</p>
-        </section>
-      ) : null}
-      <div className="pod-overview-metadata">
-        <div><span>Workspace</span><strong>{workspace}</strong></div>
-        <div><span>Pod ID</span><strong>{pod.id}</strong></div>
-        <div><span>Status</span><strong>{pod.status.status}</strong></div>
-        <div><span>Created</span><strong>{new Date(String(pod.createdAt)).toLocaleString()}</strong></div>
-      </div>
-      <section className="pod-overview-section">
-        <h2>Workspace Pod</h2>
-        <p>Agent chats associated with this pod are available in the Agent view.</p>
-      </section>
-      {processView ? <div className="mx-auto mt-7 max-w-[900px]">{processView}</div> : null}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-canvas text-foreground">
+      <SidebarTabs
+        ariaLabel="Pod sections"
+        defaultValue="overview"
+        items={[
+          {
+            value: "overview",
+            label: "Overview",
+          },
+          ...(processView
+            ? [{
+                value: "processes",
+                label: "Processes",
+              }]
+            : []),
+        ]}
+      >
+        <SidebarTabsPanel contentClassName="max-w-5xl" value="overview">
+          <section aria-labelledby="pod-overview-title">
+            <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-foreground" id="pod-overview-title">
+                  {pod.title || "Untitled pod"}
+                </h2>
+                <p className="mt-1 text-xs leading-5 text-subtle">
+                  Pod details and current lifecycle state.
+                </p>
+              </div>
+              <Badge size="xs" tone={podStatusTone(pod.status.status)}>
+                {pod.status.status}
+              </Badge>
+            </header>
+
+            {failure ? (
+              <div className="mb-6 border-l-2 border-red-400 bg-red-500/5 px-4 py-3 text-red-200" role="alert">
+                <h3 className="text-xs font-semibold">Pod operation failed</h3>
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[10px] leading-5">{failure.message}</pre>
+                <p className="mt-2 text-[10px] text-red-300">
+                  {new Date(String(failure.failedAt)).toLocaleString()}
+                </p>
+              </div>
+            ) : null}
+
+            <dl className="grid gap-x-10 gap-y-5 text-xs sm:grid-cols-2">
+              <PodDetail label="Workspace" value={workspace ?? "—"} />
+              <PodDetail label="Created" value={new Date(String(pod.createdAt)).toLocaleString()} />
+              <PodDetail className="sm:col-span-2" label="Pod ID" value={pod.id} />
+            </dl>
+          </section>
+        </SidebarTabsPanel>
+
+        {processView ? (
+          <SidebarTabsPanel contentClassName="max-w-6xl" value="processes">
+            {processView}
+          </SidebarTabsPanel>
+        ) : null}
+      </SidebarTabs>
     </div>
   );
+}
+
+function PodDetail({
+  className,
+  label,
+  value,
+}: {
+  className?: string;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className={`min-w-0 ${className ?? ""}`}>
+      <dt className="text-subtle">{label}</dt>
+      <dd className="mt-1.5 min-w-0 break-all font-mono text-[11px] text-muted">{value}</dd>
+    </div>
+  );
+}
+
+function podStatusTone(status: pods.PodState["status"]): BadgeTone {
+  if (status === "Running") return "success";
+  if (status === "Failed") return "danger";
+  if (status === "Stopping" || status === "Destroying") return "warning";
+  if (status === "Stopped") return "muted";
+  return "primary";
 }

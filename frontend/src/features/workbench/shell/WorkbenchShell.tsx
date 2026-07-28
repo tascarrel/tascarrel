@@ -27,6 +27,7 @@ import {
   type GlobalCommandDefinition,
   useGlobalCommands,
 } from "../../../components/ui/GlobalCommandPalette.tsx";
+import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
 import { PodOverview } from "./PodOverview.tsx";
 import { ResizableDock } from "./ResizableDock.tsx";
 import { ShellPlaceholder } from "./ShellPlaceholder.tsx";
@@ -62,6 +63,8 @@ type WorkbenchShellProps = {
   selectedWorkspace?: workspaces.WorkspaceName;
   usbEnabled: boolean;
   pods: readonly pods.Pod[];
+  podChangeSummaries: ReadonlyMap<pods.PodId, PodChangeSummary>;
+  podChangeSummariesVerified: boolean;
   selectedPodId?: pods.PodId;
   view: WorkbenchMode;
   workspaceConnection: "idle" | "connecting" | "live" | "reconnecting";
@@ -107,6 +110,7 @@ type WorkbenchShellProps = {
   onArchiveAgent: (agentId: string) => void;
   terminalView: ReactNode;
   terminalTabs: TerminalWorkbenchTab[];
+  terminalTabsReady: boolean;
   activeTerminalId?: string;
   onSelectTerminal: (terminalId: string) => void;
   onNewTerminal: () => void;
@@ -191,6 +195,8 @@ export function WorkbenchShell({
   selectedWorkspace,
   usbEnabled,
   pods,
+  podChangeSummaries,
+  podChangeSummariesVerified,
   selectedPodId,
   view,
   workspaceConnection,
@@ -236,6 +242,7 @@ export function WorkbenchShell({
   onArchiveAgent,
   terminalView,
   terminalTabs,
+  terminalTabsReady,
   activeTerminalId,
   onSelectTerminal,
   onNewTerminal,
@@ -252,13 +259,14 @@ export function WorkbenchShell({
   const layout = layoutTarget
     ? storedLayouts.layoutsByTarget[layoutTarget] ?? storedLayouts.defaultLayout
     : storedLayouts.defaultLayout;
+  const terminalPanelTarget = layoutTarget ?? "default";
+  const handledTerminalPanelTarget = useRef<string | undefined>(undefined);
   const [webPreviews, setWebPreviews] = useState(INITIAL_WEB_PREVIEWS);
   const [publishedPreviewUrls, setPublishedPreviewUrls] = useState<Record<string, string>>({});
   const [activeWebPreviewId, setActiveWebPreviewId] = useState<string>();
   const [webPreviewRevisions, setWebPreviewRevisions] = useState<Record<string, number>>({});
   const nextWebPreviewNumber = useRef(1);
   const presentation = MODE_PRESENTATION[mode];
-  const ModeIcon = presentation.icon;
   const publishedWebPreviewIds = useMemo(
     () => new Set(publishedWebPreviews.map((preview) => preview.id)),
     [publishedWebPreviews],
@@ -342,6 +350,32 @@ export function WorkbenchShell({
   }, [availableWebPreviews]);
 
   useEffect(() => {
+    if (!layout.terminalOpen) {
+      handledTerminalPanelTarget.current = undefined;
+      return;
+    }
+    if (
+      !terminalTabsReady
+      || handledTerminalPanelTarget.current === terminalPanelTarget
+    ) return;
+    handledTerminalPanelTarget.current = terminalPanelTarget;
+    const runningTerminal = terminalTabs.find((terminal) => terminal.status === "running");
+    if (!runningTerminal) {
+      onNewTerminal();
+    } else if (runningTerminal.id !== activeTerminalId) {
+      onSelectTerminal(runningTerminal.id);
+    }
+  }, [
+    activeTerminalId,
+    layout.terminalOpen,
+    onNewTerminal,
+    onSelectTerminal,
+    terminalPanelTarget,
+    terminalTabs,
+    terminalTabsReady,
+  ]);
+
+  useEffect(() => {
     const availableIds = new Set(availableWebPreviewIds);
     setWebPreviewRevisions((current) => {
       const entries = Object.entries(current).filter(([id]) => availableIds.has(id));
@@ -379,6 +413,7 @@ export function WorkbenchShell({
     updateLayout({ terminalOpen: true });
   };
   const addTerminal = () => {
+    handledTerminalPanelTarget.current = terminalPanelTarget;
     onNewTerminal();
     updateLayout({ terminalOpen: true });
   };
@@ -544,6 +579,8 @@ export function WorkbenchShell({
             selectedWorkspace={selectedWorkspace}
             usbEnabled={usbEnabled}
             pods={pods}
+            podChangeSummaries={podChangeSummaries}
+            podChangeSummariesVerified={podChangeSummariesVerified}
             podListEmptyMessage={podListEmptyMessage}
             showPodCount={showPodCount}
             selectedPodId={selectedPodId}
@@ -595,59 +632,54 @@ export function WorkbenchShell({
                   value={mode}
                   onValueChange={navigateToMode}
                 />
-                <ShellTabStrip
-                  label={`${presentation.label} tabs`}
-                  action={mode === "agent"
-                    ? <ShellTabAction label="New agent" onClick={onNewAgent} />
-                    : mode === "code"
-                      ? <ShellTabAction label="New code session" onClick={onNewCodeSession} />
-                      : undefined}
-                >
-                  {mode === "agent" ? (
-                    <>
-                      {agentTabs.map((tab) => (
+                {mode === "agent" || mode === "code" ? (
+                  <ShellTabStrip
+                    label={`${presentation.label} tabs`}
+                    action={mode === "agent"
+                      ? <ShellTabAction label="New agent" onClick={onNewAgent} />
+                      : <ShellTabAction label="New code session" onClick={onNewCodeSession} />}
+                  >
+                    {mode === "agent" ? (
+                      <>
+                        {agentTabs.map((tab) => (
+                          <ShellTab
+                            active={!creatingAgent && selectedAgentId === tab.id}
+                            attention={tab.attention}
+                            aria-label={tab.attention ? `${tab.title} · Needs attention` : tab.title}
+                            closeLabel={`Archive ${tab.title || "untitled agent"}`}
+                            title={tab.attention ? `${tab.title} · Needs attention` : tab.title}
+                            key={tab.id}
+                            onClose={() => onArchiveAgent(tab.id)}
+                            onClick={() => onSelectAgent(tab.id)}
+                          >
+                            <AgentTabStatus status={tab.status} />
+                            <span className="shell-tab-title">{tab.title || "Untitled agent"}</span>
+                          </ShellTab>
+                        ))}
+                        {creatingAgent ? (
+                          <ShellTab active>
+                            <span className="shell-tab-title">New agent</span>
+                          </ShellTab>
+                        ) : null}
+                      </>
+                    ) : (
+                      codeTabs.map((tab) => (
                         <ShellTab
-                          active={!creatingAgent && selectedAgentId === tab.id}
-                          attention={tab.attention}
-                          aria-label={tab.attention ? `${tab.title} · Needs attention` : tab.title}
-                          closeLabel={`Archive ${tab.title || "untitled agent"}`}
-                          title={tab.attention ? `${tab.title} · Needs attention` : tab.title}
-                          key={tab.id}
-                          onClose={() => onArchiveAgent(tab.id)}
-                          onClick={() => onSelectAgent(tab.id)}
+                          active={selectedCodeFolder === tab.folder}
+                          failure={tab.status === "failed"}
+                          closeLabel={tab.closeable ? `Close ${tab.title}` : undefined}
+                          title={tab.folder}
+                          key={tab.folder}
+                          onClose={tab.closeable ? () => onCloseCodeSession(tab.folder) : undefined}
+                          onClick={() => onSelectCodeSession(tab.folder)}
                         >
-                          <AgentTabStatus status={tab.status} />
-                          <span className="shell-tab-title">{tab.title || "Untitled agent"}</span>
+                          <CodeTabStatus status={tab.status} />
+                          <span className="shell-tab-title">{tab.title}</span>
                         </ShellTab>
-                      ))}
-                      {creatingAgent ? (
-                        <ShellTab active>
-                          <span className="shell-tab-title">New agent</span>
-                        </ShellTab>
-                      ) : null}
-                    </>
-                  ) : mode === "code" ? (
-                    codeTabs.map((tab) => (
-                      <ShellTab
-                        active={selectedCodeFolder === tab.folder}
-                        failure={tab.status === "failed"}
-                        closeLabel={tab.closeable ? `Close ${tab.title}` : undefined}
-                        title={tab.folder}
-                        key={tab.folder}
-                        onClose={tab.closeable ? () => onCloseCodeSession(tab.folder) : undefined}
-                        onClick={() => onSelectCodeSession(tab.folder)}
-                      >
-                        <CodeTabStatus status={tab.status} />
-                        <span className="shell-tab-title">{tab.title}</span>
-                      </ShellTab>
-                    ))
-                  ) : (
-                    <ShellTab active>
-                      <ModeIcon aria-hidden="true" size={13} />
-                      <span className="shell-tab-title">{presentation.label}</span>
-                    </ShellTab>
-                  )}
-                </ShellTabStrip>
+                      ))
+                    )}
+                  </ShellTabStrip>
+                ) : null}
                 </header>
               ) : null}
 

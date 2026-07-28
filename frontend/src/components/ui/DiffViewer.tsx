@@ -1,6 +1,5 @@
 import {
   Component,
-  type CSSProperties,
   type ErrorInfo,
   lazy,
   memo,
@@ -8,21 +7,9 @@ import {
   Suspense,
 } from "react";
 
-const PatchDiff = lazy(() =>
-  import("@pierre/diffs/react").then((module) => ({ default: module.PatchDiff })),
+const UnifiedDiffContent = lazy(() =>
+  import("./UnifiedDiffContent.tsx").then((module) => ({ default: module.UnifiedDiffContent })),
 );
-
-const diffStyle: CSSProperties & Record<string, string> = {
-  "--diffs-bg": "var(--color-surface)",
-  "--diffs-bg-context": "var(--color-surface-raised)",
-  "--diffs-bg-context-gutter": "var(--color-surface)",
-  "--diffs-bg-separator": "var(--color-surface-raised)",
-  "--diffs-fg": "var(--color-foreground)",
-  "--diffs-fg-number": "var(--color-subtle)",
-  "--diffs-added-dark": "var(--syntax-token-inserted)",
-  "--diffs-deleted-dark": "var(--syntax-token-deleted)",
-  "--diffs-modified-dark": "var(--color-accent-text)",
-};
 
 export const DiffViewer = memo(function DiffViewer({
   patch,
@@ -35,23 +22,9 @@ export const DiffViewer = memo(function DiffViewer({
 
   return (
     <DiffErrorBoundary key={normalizedPatch} patch={patch}>
-      <div className="overflow-hidden rounded-xl border border-ui-border bg-surface-raised">
-        <Suspense fallback={<pre className="overflow-x-auto p-3 text-xs leading-5 text-muted">{patch}</pre>}>
-          <PatchDiff
-            patch={normalizedPatch}
-            disableWorkerPool
-            style={diffStyle}
-            options={{
-              theme: "github-dark",
-              diffStyle: "unified",
-              diffIndicators: "bars",
-              overflow: "scroll",
-              lineDiffType: "word-alt",
-              disableBackground: true,
-            }}
-          />
-        </Suspense>
-      </div>
+      <Suspense fallback={<pre className="overflow-x-auto p-3 text-xs leading-5 text-muted">{patch}</pre>}>
+        <UnifiedDiffContent patch={normalizedPatch} />
+      </Suspense>
     </DiffErrorBoundary>
   );
 });

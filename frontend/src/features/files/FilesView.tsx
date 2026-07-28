@@ -9,14 +9,31 @@ import {
   LoaderCircle,
   RefreshCw,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { guestApi } from "../../api/client.ts";
 import { workspaceFileUrl } from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
+import { SegmentedControl } from "../../components/ui/SegmentedControl.tsx";
+
+const SyntaxHighlightedFile = lazy(() =>
+  import("../../components/ui/SyntaxHighlightedFile.tsx").then((module) => ({
+    default: module.SyntaxHighlightedFile,
+  })),
+);
+
+const MarkdownContent = lazy(() =>
+  import("../chat/index.ts").then((module) => ({ default: module.MarkdownContent })),
+);
 
 const DEFAULT_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MARKDOWN_REPRESENTATIONS = [
+  { value: "source", label: "Source" },
+  { value: "rendered", label: "Rendered" },
+] as const;
+
+type MarkdownRepresentation = typeof MARKDOWN_REPRESENTATIONS[number]["value"];
 
 type DirectoryLoad = {
   entries?: readonly files.FileEntry[];
@@ -252,7 +269,10 @@ function FilePreview({
   size?: files.FileEntry["size"];
 }) {
   const [preview, setPreview] = useState<Preview>({ status: "loading" });
+  const [markdownRepresentation, setMarkdownRepresentation] =
+    useState<MarkdownRepresentation>("source");
   const url = workspaceFileUrl(workspace, podId, path);
+  const markdown = isMarkdownPath(String(path));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -276,13 +296,23 @@ function FilePreview({
             </p>
           ) : null}
         </div>
-        <a
-          className="inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ui-border/70 bg-surface px-2.5 text-xs font-medium text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
-          download={fileName(String(path))}
-          href={workspaceFileUrl(workspace, podId, path, true)}
-        >
-          <Download aria-hidden="true" className="size-3.5" /> Download
-        </a>
+        <div className="flex shrink-0 items-center gap-2">
+          {markdown ? (
+            <SegmentedControl
+              label="Markdown representation"
+              options={MARKDOWN_REPRESENTATIONS}
+              value={markdownRepresentation}
+              onValueChange={setMarkdownRepresentation}
+            />
+          ) : null}
+          <a
+            className="inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ui-border/70 bg-surface px-2.5 text-xs font-medium text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
+            download={fileName(String(path))}
+            href={workspaceFileUrl(workspace, podId, path, true)}
+          >
+            <Download aria-hidden="true" className="size-3.5" /> Download
+          </a>
+        </div>
       </header>
       <div className="min-h-0 flex-1 overflow-auto">
         {preview.status === "loading" ? (
@@ -294,7 +324,7 @@ function FilePreview({
             {preview.message}
           </p>
         ) : preview.status === "image" ? (
-          <div className="flex min-h-full items-center justify-center p-6">
+          <div className="flex h-full min-h-0 items-center justify-center overflow-hidden p-6">
             <img className="max-h-full max-w-full object-contain" src={url} alt={String(path)} />
           </div>
         ) : preview.status === "binary" ? (
@@ -302,12 +332,24 @@ function FilePreview({
             <FileQuestion aria-hidden="true" className="size-8" />
             This file does not have a text preview. Download it to inspect its contents.
           </div>
+        ) : markdown && markdownRepresentation === "rendered" ? (
+          <Suspense fallback={<p className="p-4 text-xs text-subtle">Rendering Markdown…</p>}>
+            <div className="min-h-full px-6 py-4">
+              <MarkdownContent content={preview.text} workspacePath={String(path)} />
+            </div>
+          </Suspense>
         ) : (
-          <pre className="m-0 min-w-max p-4 font-mono text-[11px] leading-5 text-muted">{preview.text}</pre>
+          <Suspense fallback={<FilePreviewFallback text={preview.text} />}>
+            <SyntaxHighlightedFile contents={preview.text} name={String(path)} />
+          </Suspense>
         )}
       </div>
     </section>
   );
+}
+
+function FilePreviewFallback({ text }: { text: string }) {
+  return <pre className="m-0 min-w-max p-4 font-mono text-[11px] leading-5 text-muted">{text}</pre>;
 }
 
 type Preview =
@@ -356,6 +398,10 @@ function looksBinary(bytes: Uint8Array, path: string): boolean {
   if (/\.(?:pdf|zip|gz|xz|zst|tar|wasm|woff2?|ttf|exe|bin)$/i.test(path)) return true;
   const sample = bytes.subarray(0, Math.min(bytes.length, 8 * 1024));
   return sample.includes(0);
+}
+
+function isMarkdownPath(path: string): boolean {
+  return /\.(?:md|markdown|mdown|mkd)$/i.test(path);
 }
 
 function fileIcon(kind: files.FileKind) {

@@ -35,7 +35,11 @@ export function ChangesView({
 }) {
   const statusState = useRepositoryStatuses(workspace);
   const repositories = useMemo(
-    () => (statusState.value?.repositories ?? []).filter((entry) => entry.target.podId === pod.id),
+    () => (statusState.value?.repositories ?? []).filter((entry) =>
+      entry.target.podId === pod.id
+        && entry.state.status === "Ready"
+        && entry.state.working.dirty
+    ),
     [pod.id, statusState.value?.repositories],
   );
   const [selectedPath, setSelectedPath] = useState<string>();
@@ -50,15 +54,6 @@ export function ChangesView({
   return (
     <div className="grid h-full min-h-0 grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)] overflow-hidden bg-canvas text-foreground">
       <section className="flex min-h-0 flex-col border-r border-ui-border" aria-label="Pod repositories">
-        <header className="border-b border-ui-border px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <h1 className="flex items-center gap-2 text-xs font-semibold">
-              <GitBranch aria-hidden="true" className="size-3.5 text-accent-text" /> Changes
-            </h1>
-            <span className="text-[10px] text-subtle">{connectionLabel(statusState.connection)}</span>
-          </div>
-          <p className="mt-1 truncate text-[10px] text-subtle">{pod.title}</p>
-        </header>
         {statusState.error ? (
           <p className="border-b border-red-500/20 bg-red-500/5 px-3 py-2 text-[10px] text-red-200" role="alert">
             {statusState.error.message}
@@ -75,7 +70,7 @@ export function ChangesView({
           ))}
           {!repositories.length ? (
             <div className="rounded-lg border border-dashed border-ui-border p-4 text-center text-[11px] leading-5 text-subtle">
-              {statusState.ready ? "No repositories are configured for this pod." : "Loading repositories…"}
+              {statusState.ready ? "No repositories have changes." : "Loading repository changes…"}
             </div>
           ) : null}
         </div>
@@ -85,7 +80,7 @@ export function ChangesView({
         <RepositoryChanges workspace={workspace} entry={selected} />
       ) : (
         <div className="flex min-h-0 items-center justify-center p-8 text-center text-xs text-subtle">
-          Select a repository to inspect its working changes.
+          {statusState.ready ? "No repository changes to inspect." : "Loading repository changes…"}
         </div>
       )}
     </div>
@@ -308,7 +303,7 @@ function RepositoryChanges({
               );
             })}
           </aside>
-          <div className="min-h-0 overflow-auto p-3">
+          <div className="min-h-0 overflow-auto">
             <ChangeSetResult load={displayed} set={displayedSet} selectedFile={selectedFile} />
           </div>
         </div>
@@ -415,13 +410,6 @@ function formatBytes(value: string | number): string {
 
 function positiveCount(value: string | number): boolean {
   return Number(value) > 0;
-}
-
-function connectionLabel(connection: "idle" | "connecting" | "live" | "reconnecting"): string {
-  if (connection === "live") return "Live";
-  if (connection === "idle") return "Paused";
-  if (connection === "connecting") return "Connecting…";
-  return "Reconnecting…";
 }
 
 function errorMessage(cause: unknown): string {

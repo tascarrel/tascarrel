@@ -1,4 +1,4 @@
-import { Copy, FileText, LoaderCircle, Play, Send, Trash2 } from "lucide-react";
+import { FileText, LoaderCircle, Play, Send, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { guestApi } from "../../api/client.ts";
@@ -6,7 +6,6 @@ import type { pods, processes, workspaces } from "../../api/generated/index.ts";
 import { Badge } from "../../components/ui/Badge.tsx";
 import { Button } from "../../components/ui/Button.tsx";
 import { SelectControl } from "../../components/ui/SelectControl.tsx";
-import { ProcessTerminal } from "./ProcessTerminal.tsx";
 import { useProcessLog, useProcesses } from "./state.ts";
 
 export function ProcessManager({
@@ -29,20 +28,18 @@ export function ProcessManager({
 
   const selectedProcess = podProcesses.find((process) => process.id === selectedId);
   return (
-    <section className="overflow-hidden rounded-xl border border-ui-border bg-surface/30" aria-labelledby="process-manager-title">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-ui-border px-4 py-3">
+    <section aria-labelledby="process-manager-title">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-xs font-semibold text-foreground" id="process-manager-title">Supervised Processes</h2>
-          <p className="mt-1 text-[11px] text-subtle">Run commands and inspect retained output for this pod.</p>
+          <h2 className="text-sm font-semibold text-foreground" id="process-manager-title">Processes</h2>
+          <p className="mt-1 text-xs leading-5 text-subtle">Run commands and inspect retained output for this pod.</p>
         </div>
-        <div className="flex gap-2">
-          <Button size="small" variant="primary" onClick={() => setCreating((current) => !current)}>
-            <Play aria-hidden="true" className="size-3.5" /> {creating ? "Cancel" : "Run process"}
-          </Button>
-        </div>
+        <Button size="small" variant="primary" onClick={() => setCreating((current) => !current)}>
+          <Play aria-hidden="true" className="size-3.5" /> {creating ? "Cancel" : "Run process"}
+        </Button>
       </header>
       {actionError || processState.error ? (
-        <p className="border-b border-red-500/20 bg-red-500/5 px-4 py-2 text-xs text-red-200" role="alert">
+        <p className="mt-5 border-l-2 border-red-400 bg-red-500/5 px-4 py-3 text-xs text-red-200" role="alert">
           {actionError ?? processState.error?.message}
         </p>
       ) : null}
@@ -57,8 +54,8 @@ export function ProcessManager({
           onError={(cause) => setActionError(errorMessage(cause))}
         />
       ) : null}
-      <div className="grid min-h-72 md:grid-cols-[16rem_minmax(0,1fr)]">
-        <div className="max-h-[32rem] overflow-y-auto border-b border-ui-border p-2 md:border-r md:border-b-0">
+      <div className="mt-6 grid min-h-72 gap-6 md:grid-cols-[16rem_minmax(0,1fr)]">
+        <div className="max-h-[32rem] overflow-y-auto">
           {podProcesses.map((process) => (
             <button
               className="mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-muted hover:bg-surface-raised data-[selected=true]:bg-surface-raised data-[selected=true]:text-foreground"
@@ -145,7 +142,7 @@ function SpawnProcessForm({
   };
 
   return (
-    <form className="grid gap-3 border-b border-ui-border bg-canvas/50 p-4" onSubmit={(event) => void submit(event)}>
+    <form className="mt-6 grid gap-4" onSubmit={(event) => void submit(event)}>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField label="Title" value={title} onChange={setTitle} />
         <TextField label="Executable" value={executable} onChange={setExecutable} />
@@ -187,7 +184,6 @@ function ProcessDetails({
 }) {
   const [signal, setSignal] = useState<processes.ProcessSignal["type"]>("Terminate");
   const [pending, setPending] = useState(false);
-  const [snapshot, setSnapshot] = useState<string>();
   const running = process.status.status === "Starting" || process.status.status === "Running";
   const removable = process.status.status === "Exited" || process.status.status === "Failed";
   const run = async (operation: () => Promise<void>) => {
@@ -203,7 +199,7 @@ function ProcessDetails({
 
   return (
     <div className="flex min-h-0 flex-col overflow-hidden">
-      <div className="border-b border-ui-border px-4 py-3">
+      <div>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 className="truncate text-xs font-semibold text-foreground">{process.title}</h3>
@@ -227,14 +223,6 @@ function ProcessDetails({
                 </Button>
               </>
             ) : null}
-            {process.terminal ? (
-              <Button size="small" disabled={pending} onClick={() => void run(async () => {
-                const output = await guestApi(workspace).execute("processes_SnapshotTerminal", { processId: process.id });
-                setSnapshot(output.snapshot.replaceAll("\u001b", "␛"));
-              })}>
-                <Copy aria-hidden="true" className="size-3.5" /> Snapshot
-              </Button>
-            ) : null}
             {removable ? (
               <Button size="small" variant="danger" disabled={pending} onClick={() => void run(async () => {
                 await guestApi(workspace).execute("processes_Remove", { processId: process.id });
@@ -245,18 +233,8 @@ function ProcessDetails({
           </div>
         </div>
         {process.status.status === "Failed" ? <p className="mt-2 text-xs text-red-200">{process.status.message}</p> : null}
-        {snapshot !== undefined ? (
-          <details className="mt-3 rounded-lg border border-ui-border bg-canvas/60 p-2">
-            <summary className="cursor-pointer text-[11px] text-muted">ANSI terminal snapshot</summary>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-subtle">{snapshot || "Empty terminal snapshot."}</pre>
-          </details>
-        ) : null}
       </div>
-      {process.terminal ? (
-        <ProcessTerminal workspace={workspace} process={process} />
-      ) : (
-        <ProcessLog workspace={workspace} process={process} />
-      )}
+      <ProcessLog workspace={workspace} process={process} />
     </div>
   );
 }
@@ -269,13 +247,14 @@ function ProcessLog({
   process: processes.Process;
 }) {
   const logState = useProcessLog(workspace, process.id);
+  const logLabel = process.terminal ? "Sanitized terminal log" : "Process log";
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-ui-border bg-canvas">
       <div className="flex items-center justify-between border-b border-ui-border px-4 py-2 text-[10px] text-subtle">
-        <span className="flex items-center gap-1.5"><FileText aria-hidden="true" className="size-3" /> Process log</span>
+        <span className="flex items-center gap-1.5"><FileText aria-hidden="true" className="size-3" /> {logLabel}</span>
         <span>{logState.connection}</span>
       </div>
-      <pre className="m-0 min-h-52 flex-1 overflow-auto bg-canvas p-4 font-mono text-[11px] leading-5 text-muted" role="log" aria-label={`Process log for ${process.title}`}>
+      <pre className="m-0 min-h-52 flex-1 overflow-auto bg-canvas p-4 font-mono text-[11px] leading-5 text-muted" role="log" aria-label={`${logLabel} for ${process.title}`}>
         {logState.value?.length
           ? logState.value.map((line) => `${line.source.type === "Stderr" ? "[stderr] " : ""}${line.content}${line.truncated ? " …" : ""}`).join("\n")
           : logState.ready ? "No retained process output." : "Loading process output…"}

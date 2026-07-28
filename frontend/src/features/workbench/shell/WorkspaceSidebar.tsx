@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Bell,
   FolderGit2,
   Layers3,
@@ -19,6 +20,7 @@ import { ConfirmDialog } from "../../../components/ui/ConfirmDialog.tsx";
 import { CountBadge } from "../../../components/ui/CountBadge.tsx";
 import { IconButtonGroup } from "../../../components/ui/IconButtonGroup.tsx";
 import { TascarrelLogo } from "../../../components/ui/TascarrelLogo.tsx";
+import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
 import {
   WorkspaceSwitcher,
   type PendingWorkspaceAction,
@@ -35,6 +37,8 @@ export function WorkspaceSidebar({
   selectedWorkspace,
   usbEnabled,
   pods,
+  podChangeSummaries,
+  podChangeSummariesVerified,
   podListEmptyMessage,
   showPodCount,
   selectedPodId,
@@ -62,6 +66,8 @@ export function WorkspaceSidebar({
   selectedWorkspace?: workspaces.WorkspaceName;
   usbEnabled: boolean;
   pods: readonly pods.Pod[];
+  podChangeSummaries: ReadonlyMap<pods.PodId, PodChangeSummary>;
+  podChangeSummariesVerified: boolean;
   podListEmptyMessage?: string;
   showPodCount: boolean;
   selectedPodId?: pods.PodId;
@@ -244,8 +250,15 @@ export function WorkspaceSidebar({
           </SidebarSectionOverline>
           {sidebarPods.map((pod) => {
             const selected = pod.id === selectedPodId;
+            const changeSummary = podChangeSummaries.get(pod.id);
+            const changesLabel = changeSummary
+              ? podChangesLabel(changeSummary)
+              : undefined;
             const pending = pendingPodId === pod.id;
             const attention = attentionPodIds.has(pod.id);
+            const attentionLabel = attention
+              ? selected && agentNeedsInput ? "Needs input" : "Needs attention"
+              : undefined;
             const running = pod.status.status === "Running";
             const starting = pod.status.status === "Creating"
               || pod.status.status === "Building"
@@ -254,10 +267,11 @@ export function WorkspaceSidebar({
             const statusLabel = pod.status.status === "Failed"
               ? `Failed: ${pod.status.message}`
               : pod.status.status;
-            const label = `${pod.title || "Untitled pod"} · ${statusLabel}${attention ? " · Needs attention" : ""}`;
+            const label = `${pod.title || "Untitled pod"} · ${statusLabel}${attentionLabel ? ` · ${attentionLabel}` : ""}${changesLabel ? ` · ${changesLabel}` : ""}`;
             return (
               <div
                 className={`pod-tab-row ${selected ? "pod-tab-row-active" : ""} ${attention ? "pod-tab-row-attention" : ""} ${selected && agentNeedsInput ? "pod-tab-row-needs-input" : ""} ${pending ? "pod-tab-row-pending" : ""} ${running ? "" : "pod-tab-row-subdued"} ${starting ? "pod-tab-row-starting" : ""}`}
+                data-actions={pod.status.status !== "Destroying" ? true : undefined}
                 key={pod.id}
               >
                 <button
@@ -265,7 +279,7 @@ export function WorkspaceSidebar({
                   type="button"
                   aria-current={selected ? "true" : undefined}
                   aria-label={label}
-                  title={pod.title || "Untitled pod"}
+                  title={label}
                   onClick={() => onSelectPod(pod.id)}
                 >
                   <span className="pod-tab-copy">
@@ -280,9 +294,19 @@ export function WorkspaceSidebar({
                       <span>{pod.title || "Untitled pod"}</span>
                     </span>
                   </span>
-                  {selected && agentNeedsInput ? (
-                    <span className="pod-attention">
-                      <Bell aria-hidden="true" size={11} /> Needs input
+                  {changeSummary && changeSummary.changedFileCount > 0 && !attention ? (
+                    <CountBadge
+                      aria-hidden="true"
+                      className="pod-change-count"
+                      count={changeSummary.changedFileCount}
+                      size="xs"
+                      tone={changeSummary.conflictCount > 0 ? "danger" : "muted"}
+                      title={changesLabel}
+                    />
+                  ) : null}
+                  {attentionLabel ? (
+                    <span className="pod-attention" aria-hidden="true" title={attentionLabel}>
+                      <Bell aria-hidden="true" size={11} />
                     </span>
                   ) : null}
                 </button>
@@ -367,11 +391,17 @@ export function WorkspaceSidebar({
       </aside>
       <ConfirmDialog
         confirmLabel="Destroy pod"
-        description={`Destroy ${destroyTarget?.title || "this pod"} and all of its persistent resources? This cannot be undone.`}
+        description={destroyTarget ? (
+          <DestroyPodWarning
+            pod={destroyTarget}
+            summary={podChangeSummaries.get(destroyTarget.id)}
+            verified={podChangeSummariesVerified}
+          />
+        ) : null}
         destructive
         open={Boolean(destroyTarget)}
         pending={destroyTarget ? pendingPodId === destroyTarget.id : false}
-        title="Destroy Pod?"
+        title={destroyTarget ? <DestroyPodTitle pod={destroyTarget} /> : "Destroy pod"}
         onOpenChange={(open) => {
           if (!open) setDestroyTarget(undefined);
         }}
@@ -381,6 +411,130 @@ export function WorkspaceSidebar({
       />
     </>
   );
+}
+
+function podChangesLabel(summary: PodChangeSummary): string {
+  const details: string[] = [];
+  if (summary.changedFileCount > 0) {
+    const files = `${summary.changedFileCount} changed ${summary.changedFileCount === 1 ? "file" : "files"}`;
+    const repositories = `${summary.dirtyRepositoryCount} ${summary.dirtyRepositoryCount === 1 ? "repository" : "repositories"}`;
+    const conflicts = summary.conflictCount > 0
+      ? `, including ${summary.conflictCount} ${summary.conflictCount === 1 ? "conflict" : "conflicts"}`
+      : "";
+    details.push(`${files} in ${repositories}${conflicts}`);
+  }
+  if (summary.unpushedCommitCount > 0) {
+    details.push(
+      `${summary.unpushedCommitCount} unpushed ${summary.unpushedCommitCount === 1 ? "commit" : "commits"}`,
+    );
+  }
+  return details.join(" · ");
+}
+
+function DestroyPodTitle({ pod }: { pod: pods.Pod }) {
+  return (
+    <span className="flex min-w-0 items-center gap-3">
+      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-red-500/10 text-red-300">
+        <Trash2 aria-hidden="true" className="size-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-xs font-medium text-red-300">Destroy pod</span>
+        <span className="mt-0.5 block truncate text-lg font-semibold text-foreground">
+          {pod.title || "Untitled pod"}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+function DestroyPodWarning({
+  pod,
+  summary,
+  verified,
+}: {
+  pod: pods.Pod;
+  summary?: PodChangeSummary;
+  verified: boolean;
+}) {
+  const hasLocalWork = Boolean(
+    summary?.changedFileCount || summary?.unpushedCommitCount,
+  );
+  const statusWarnings = repositoryStatusWarnings(summary, verified);
+  return (
+    <span className="block">
+      <span className="block break-all font-mono text-[10px] leading-4 text-subtle">
+        {pod.id}
+      </span>
+
+      {hasLocalWork ? (
+        <span className="mt-4 block rounded-xl border border-amber-500/25 bg-amber-500/[0.07] p-4 text-amber-100">
+          <span className="flex items-center gap-2 text-xs font-semibold text-amber-200">
+            <AlertTriangle aria-hidden="true" className="size-4 shrink-0" />
+            Local work will be lost
+          </span>
+          <span className="mt-3 grid grid-cols-2 gap-4">
+            {summary?.changedFileCount ? (
+              <span className="block">
+                <strong className="block text-xl font-semibold leading-none tabular-nums text-amber-100">
+                  {summary.changedFileCount}
+                </strong>
+                <span className="mt-1.5 block text-[11px] leading-4 text-amber-200/75">
+                  uncommitted file {summary.changedFileCount === 1 ? "change" : "changes"}
+                </span>
+              </span>
+            ) : null}
+            {summary?.unpushedCommitCount ? (
+              <span className="block">
+                <strong className="block text-xl font-semibold leading-none tabular-nums text-amber-100">
+                  {summary.unpushedCommitCount}
+                </strong>
+                <span className="mt-1.5 block text-[11px] leading-4 text-amber-200/75">
+                  unpushed {summary.unpushedCommitCount === 1 ? "commit" : "commits"}
+                </span>
+              </span>
+            ) : null}
+          </span>
+          {summary?.conflictCount ? (
+            <span className="mt-3 block text-[11px] leading-4 text-red-300">
+              Includes {summary.conflictCount} unresolved {summary.conflictCount === 1 ? "conflict" : "conflicts"}.
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+
+      {statusWarnings.length > 0 ? (
+        <span className="mt-3 block border-l-2 border-amber-400 bg-amber-500/[0.05] px-3 py-2.5 text-xs leading-5 text-amber-200">
+          {statusWarnings.join(" ")}
+        </span>
+      ) : null}
+
+      <span className="mt-4 block text-xs leading-5 text-muted">
+        This permanently deletes the pod and all of its persistent resources.
+        <strong className="ml-1 font-semibold text-red-300">This cannot be undone.</strong>
+      </span>
+    </span>
+  );
+}
+
+function repositoryStatusWarnings(
+  summary: PodChangeSummary | undefined,
+  verified: boolean,
+): string[] {
+  const warnings: string[] = [];
+  if (!verified) {
+    warnings.push("Repository status is not current, so local work could not be fully verified.");
+  }
+  if (summary?.repositoryWithoutUpstreamCount) {
+    warnings.push(
+      `Push status is unavailable for ${summary.repositoryWithoutUpstreamCount} ${summary.repositoryWithoutUpstreamCount === 1 ? "repository" : "repositories"} without an upstream.`,
+    );
+  }
+  if (summary?.inspectionFailureCount) {
+    warnings.push(
+      `${summary.inspectionFailureCount} ${summary.inspectionFailureCount === 1 ? "repository could" : "repositories could"} not be inspected.`,
+    );
+  }
+  return warnings;
 }
 
 function PodLifecycleControls({

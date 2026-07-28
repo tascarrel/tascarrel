@@ -1,5 +1,6 @@
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { LoaderCircle } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Button } from "./Button.tsx";
 
@@ -14,8 +15,8 @@ export function ConfirmDialog({
   onConfirm,
 }: {
   open: boolean;
-  title: string;
-  description: string;
+  title: ReactNode;
+  description: ReactNode;
   confirmLabel: string;
   pending?: boolean;
   destructive?: boolean;
@@ -32,7 +33,11 @@ export function ConfirmDialog({
       <AlertDialog.Portal>
         <AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm transition-opacity data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <AlertDialog.Viewport className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4">
-          <AlertDialog.Popup className="w-full max-w-md rounded-2xl border border-ui-border-strong bg-surface-raised p-5 text-foreground shadow-2xl shadow-black/70 outline-none transition-[transform,opacity] data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0">
+          <AlertDialog.Popup
+            className={`w-full max-w-md rounded-2xl border bg-surface-raised p-5 text-foreground shadow-2xl shadow-black/70 outline-none transition-[transform,opacity] data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 ${
+              destructive ? "border-red-500/25" : "border-ui-border-strong"
+            }`}
+          >
             <AlertDialog.Title className="text-base font-semibold">{title}</AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted">
               {description}

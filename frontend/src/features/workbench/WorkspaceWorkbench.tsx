@@ -26,6 +26,11 @@ import { CodeView } from "../code/CodeView.tsx";
 import { codeFolderLabel, DEFAULT_CODE_FOLDER } from "../code/folders.ts";
 import { useCodeSessions } from "../code/state.ts";
 import { ChangesView } from "../changes/ChangesView.tsx";
+import {
+  summarizePodChanges,
+  type PodChangeSummary,
+} from "../changes/podChangeSummary.ts";
+import { useRepositoryStatuses } from "../changes/state.ts";
 import { FilesView } from "../files/FilesView.tsx";
 import { ImagesView } from "../images/ImagesView.tsx";
 import { nestedHttpRouteUrl } from "../network/addresses.ts";
@@ -54,6 +59,7 @@ import {
 import type { WebPreview } from "./shell/WebPreview.tsx";
 
 type WorkspaceConnection = "idle" | "connecting" | "live" | "reconnecting";
+const EMPTY_POD_CHANGE_SUMMARIES: ReadonlyMap<pods.PodId, PodChangeSummary> = new Map();
 
 type CodeSelection = {
   podId: pods.PodId;
@@ -91,6 +97,7 @@ export function WorkspaceWorkbench({
   const codeSessionState = useCodeSessions(workspace);
   const repositoryState = useRepositories(workspace);
   const repositoryApprovalState = useRepositoryApprovals(workspace);
+  const repositoryStatusState = useRepositoryStatuses(workspace);
   const pods = podState.value?.pods ?? [];
   const currentWorkspace = allWorkspaces.find((candidate) => candidate.name === workspace);
   const workspacePanelOpen = route.creatingPod === true
@@ -105,6 +112,10 @@ export function WorkspaceWorkbench({
   const publishedWebPreviews = useMemo(
     () => httpRoutePreviews(httpRouteState.value?.httpRoutes ?? [], selectedPodId),
     [httpRouteState.value?.httpRoutes, selectedPodId],
+  );
+  const podChangeSummaries = useMemo(
+    () => summarizePodChanges(repositoryStatusState.value?.repositories ?? []),
+    [repositoryStatusState.value?.repositories],
   );
   const [startingChat, setStartingChat] = useState(false);
   const [error, setError] = useState<string>();
@@ -513,6 +524,8 @@ export function WorkspaceWorkbench({
         selectedWorkspace={workspace}
         usbEnabled={configState.value?.config?.features?.usb ?? false}
         pods={pods}
+        podChangeSummaries={podChangeSummaries}
+        podChangeSummariesVerified={repositoryStatusState.ready && !repositoryStatusState.error}
         selectedPodId={selectedPodId}
         view={route.view}
         workspaceScreen={podCreationScreen ?? podStartupScreen}
@@ -592,6 +605,7 @@ export function WorkspaceWorkbench({
           ? <ProcessTerminal workspace={workspace} process={activeTerminal} />
           : <UnavailablePanel detail="Select a terminal." />}
         terminalTabs={terminalTabs}
+        terminalTabsReady={processState.ready && selectedPodId !== undefined}
         activeTerminalId={activeTerminal?.id}
         onSelectTerminal={(processId) => setActiveTerminalId(processId as processes.ProcessId)}
         onNewTerminal={newTerminal}
@@ -688,6 +702,8 @@ export function UnavailableWorkspace({
       selectedWorkspace={selectedWorkspace?.name}
       usbEnabled={false}
       pods={[]}
+      podChangeSummaries={EMPTY_POD_CHANGE_SUMMARIES}
+      podChangeSummariesVerified={false}
       podListEmptyMessage={activeScreen ? `Workspace ${activeScreen}.` : undefined}
       showPodCount={false}
       view={view}
@@ -728,6 +744,7 @@ export function UnavailableWorkspace({
       onArchiveAgent={() => undefined}
       terminalView={null}
       terminalTabs={[]}
+      terminalTabsReady={false}
       onSelectTerminal={() => undefined}
       onNewTerminal={() => undefined}
       onCloseTerminal={() => undefined}
