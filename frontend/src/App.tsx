@@ -3,17 +3,20 @@ import { useEffect, useRef } from "react";
 
 import { hostApi } from "./api/client.ts";
 import type { workspaces } from "./api/generated/index.ts";
+import { useMobileLayout } from "./app/layout.ts";
 import { rootRoute, useWorkbenchRoute } from "./app/router.tsx";
 import { ConnectionOverlay } from "./components/ui/ConnectionOverlay.tsx";
 import {
   UnavailableWorkspace,
   WorkspaceWorkbench,
 } from "./features/workbench/WorkspaceWorkbench.tsx";
+import { MobileWorkspaceHome } from "./features/workbench/mobile/MobileWorkspaceHome.tsx";
 import { WorkspaceCreationPage } from "./features/workspaces/creation/WorkspaceCreationPage.tsx";
 import { useWorkspaces } from "./features/workspaces/state.ts";
 
 export function App() {
   const route = useWorkbenchRoute();
+  const mobileLayout = useMobileLayout();
   const navigate = rootRoute.useNavigate();
   const workspaceState = useWorkspaces();
   const workspaceRouteVisit = useRef<{ handled: boolean; workspace?: string }>({
@@ -25,9 +28,11 @@ export function App() {
   const routedWorkspace = availableWorkspaces.find(
     (workspace) => workspace.name === route.workspace,
   );
+  const fallbackWorkspace = availableWorkspaces.find(
+    (workspace) => workspace.name === lastSelectedWorkspace.current,
+  ) ?? availableWorkspaces[0];
   const selectedWorkspace = routedWorkspace
-    ?? availableWorkspaces.find((workspace) => workspace.name === lastSelectedWorkspace.current)
-    ?? availableWorkspaces[0];
+    ?? (mobileLayout && !route.creatingWorkspace ? undefined : fallbackWorkspace);
 
   useEffect(() => {
     if (routedWorkspace) lastSelectedWorkspace.current = routedWorkspace.name;
@@ -38,7 +43,8 @@ export function App() {
 
   useEffect(() => {
     if (
-      route.globalScreen
+      mobileLayout
+      || route.globalScreen
       || route.creatingWorkspace
       || route.workspace === pendingCreatedWorkspace.current
       || !selectedWorkspace
@@ -49,7 +55,14 @@ export function App() {
       params: { workspace: selectedWorkspace.name },
       replace: true,
     });
-  }, [navigate, route.creatingWorkspace, route.globalScreen, route.workspace, selectedWorkspace]);
+  }, [
+    mobileLayout,
+    navigate,
+    route.creatingWorkspace,
+    route.globalScreen,
+    route.workspace,
+    selectedWorkspace,
+  ]);
 
   useEffect(() => {
     if (workspaceRouteVisit.current.workspace !== route.workspace) {
@@ -78,6 +91,7 @@ export function App() {
     void navigate({
       to: "/workspaces/$workspace",
       params: { workspace },
+      search: {},
     });
   };
 
@@ -87,11 +101,12 @@ export function App() {
     await navigate({
       to: "/workspaces/$workspace",
       params: { workspace: input.name },
+      search: {},
     });
   };
 
   const openWorkspaceCreation = () => {
-    void navigate({ to: "/workspaces/new" });
+    void navigate({ to: "/workspaces/new", search: {} });
   };
 
   const cancelWorkspaceCreation = () => {
@@ -99,6 +114,7 @@ export function App() {
     void navigate({
       to: "/workspaces/$workspace",
       params: { workspace: selectedWorkspace.name },
+      search: {},
     });
   };
 
@@ -141,6 +157,22 @@ export function App() {
           canCancel={availableWorkspaces.length > 0}
           onCancel={cancelWorkspaceCreation}
           onCreateWorkspace={createWorkspaceAndOpen}
+        />
+      </>
+    );
+  }
+
+  if (mobileLayout && !selectedWorkspace) {
+    return (
+      <>
+        <Outlet />
+        <ConnectionOverlay
+          connection={workspaceState.connection}
+          attempt={workspaceState.connectionAttempt}
+        />
+        <MobileWorkspaceHome
+          workspaces={availableWorkspaces}
+          onSelectWorkspace={selectWorkspace}
         />
       </>
     );

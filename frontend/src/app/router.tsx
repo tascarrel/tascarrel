@@ -20,16 +20,29 @@ export type WorkbenchRoute = {
   globalScreen?: GlobalScreenName;
   screen?: WorkspaceScreenName;
   view: WorkspaceView;
+  changeReview?: {
+    repository: string;
+    base: string;
+    head: string;
+  };
 };
 
 type WorkbenchSearch = {
   path?: string;
+  repository?: string;
+  base?: string;
+  head?: string;
 };
 
 export const rootRoute = createRootRoute({
   component: App,
   validateSearch: (search: Record<string, unknown>): WorkbenchSearch => ({
     ...(typeof search.path === "string" && search.path ? { path: search.path } : {}),
+    ...(typeof search.repository === "string" && search.repository
+      ? { repository: search.repository }
+      : {}),
+    ...(typeof search.base === "string" && search.base ? { base: search.base } : {}),
+    ...(typeof search.head === "string" && search.head ? { head: search.head } : {}),
   }),
 });
 
@@ -153,6 +166,7 @@ declare module "@tanstack/react-router" {
 
 export function useWorkbenchRoute(): WorkbenchRoute {
   const matchRoute = useMatchRoute();
+  const search = rootRoute.useSearch();
   const globalScreen = matchRoute({ to: "/screens/$screen" });
   if (globalScreen && isGlobalScreenName(globalScreen.screen)) {
     return { globalScreen: globalScreen.screen, view: "agent" };
@@ -177,7 +191,16 @@ export function useWorkbenchRoute(): WorkbenchRoute {
   if (code) return { ...code, view: "code" };
 
   const changes = matchRoute({ to: "/workspaces/$workspace/pods/$pod/changes" });
-  if (changes) return { ...changes, view: "changes" };
+  if (changes) {
+    const changeReview = search.repository && search.base && search.head
+      ? {
+          repository: search.repository,
+          base: search.base,
+          head: search.head,
+        }
+      : undefined;
+    return { ...changes, view: "changes", ...(changeReview ? { changeReview } : {}) };
+  }
 
   const files = matchRoute({ to: "/workspaces/$workspace/pods/$pod/files" });
   if (files) return { ...files, view: "files" };

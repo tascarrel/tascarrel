@@ -1,10 +1,16 @@
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { AlertTriangle, GitBranch, Tag } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { hostApi } from "../../api/client.ts";
 import type { pods, repositories, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
+import {
+  approvalReferenceKind,
+  displayApprovalReference,
+  formatApprovalUpdateCount,
+  useApprovalReviewDelay,
+} from "./approvalPresentation.ts";
 
 export function RepositoryApprovalOverlay({
   workspace,
@@ -64,24 +70,8 @@ function RepositoryApprovalDialog({
   onPostpone: () => Promise<void>;
   onReject: () => Promise<void>;
 }) {
-  const [approvalEnabled, setApprovalEnabled] = useState(false);
+  const approvalEnabled = useApprovalReviewDelay(approval.id);
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    setApprovalEnabled(false);
-    let timer: number | undefined;
-    let visibleFrame: number | undefined;
-    const firstFrame = window.requestAnimationFrame(() => {
-      visibleFrame = window.requestAnimationFrame(() => {
-        timer = window.setTimeout(() => setApprovalEnabled(true), APPROVAL_REVIEW_DELAY_MS);
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (visibleFrame !== undefined) window.cancelAnimationFrame(visibleFrame);
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [approval.id]);
 
   const submit = (action: () => Promise<void>) => {
     if (submitting) return;
@@ -106,7 +96,7 @@ function RepositoryApprovalDialog({
               </AlertDialog.Title>
               <AlertDialog.Description className="mt-1.5 text-sm leading-5 text-muted">
                 <span className="font-medium text-foreground">{podTitle}</span> wants to publish{" "}
-                {formatUpdateCount(approval.updates.length)} from{" "}
+                {formatApprovalUpdateCount(approval.updates.length)} from{" "}
                 <span className="font-mono text-xs text-foreground">
                   /workspace/{approval.path}
                 </span>.
@@ -134,8 +124,10 @@ function RepositoryApprovalDialog({
                           {update.reference.startsWith("refs/tags/")
                             ? <Tag aria-hidden="true" className="size-4 shrink-0 text-accent-text" />
                             : <GitBranch aria-hidden="true" className="size-4 shrink-0 text-accent-text" />}
-                          <span>{referenceKind(update.reference)}</span>
-                          <span className="break-all font-mono text-xs">{displayReference(update.reference)}</span>
+                          <span>{approvalReferenceKind(update.reference)}</span>
+                          <span className="break-all font-mono text-xs">
+                            {displayApprovalReference(update.reference)}
+                          </span>
                         </p>
                         <p className="mt-1 break-all font-mono text-[10px] leading-4 text-subtle">
                           {update.reference}
@@ -188,20 +180,6 @@ function RepositoryApprovalDialog({
       </AlertDialog.Portal>
     </AlertDialog.Root>
   );
-}
-
-const APPROVAL_REVIEW_DELAY_MS = 1_000;
-
-function formatUpdateCount(count: number): string {
-  return `${count} ${count === 1 ? "reference" : "references"}`;
-}
-
-function displayReference(reference: string): string {
-  return reference.replace(/^refs\/(heads|tags)\//, "");
-}
-
-function referenceKind(reference: string): string {
-  return reference.startsWith("refs/tags/") ? "Tag" : "Branch";
 }
 
 function shortId(id: unknown): string {

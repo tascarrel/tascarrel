@@ -1,10 +1,30 @@
 import { X } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { chatAttachmentUrl, uploadChatAttachment } from "../../api/attachments.ts";
 import { guestApi } from "../../api/client.ts";
-import type { chats, code, config, network, pods, processes, repositories, workspaces } from "../../api/generated/index.ts";
+import type {
+  changes,
+  chats,
+  code,
+  config,
+  network,
+  pods,
+  processes,
+  repositories,
+  workspaces,
+} from "../../api/generated/index.ts";
+import { useMobileLayout } from "../../app/layout.ts";
 import type { WorkbenchRoute, WorkspaceScreenName } from "../../app/router.tsx";
 import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
@@ -18,47 +38,92 @@ import { removeChatComposerDraft } from "../chat/model/drafts.ts";
 import { harnessKindKey } from "../chat/model/format.ts";
 import { chatModelPreferences } from "../chat/model/modelPreferences.ts";
 import { useChat, useChatHarnesses, useChatList } from "../chat/state.ts";
-import {
-  CodeDirectoryPalette,
-  CodeDirectoryPicker,
-} from "../code/CodeDirectoryPalette.tsx";
-import { CodeView } from "../code/CodeView.tsx";
 import { codeFolderLabel, DEFAULT_CODE_FOLDER } from "../code/folders.ts";
 import { useCodeSessions } from "../code/state.ts";
-import { ChangesView } from "../changes/ChangesView.tsx";
+import { MobileChangesView } from "../changes/MobileChangesView.tsx";
 import {
   summarizePodChanges,
   type PodChangeSummary,
 } from "../changes/podChangeSummary.ts";
 import { useRepositoryStatuses } from "../changes/state.ts";
-import { FilesView } from "../files/FilesView.tsx";
-import { ImagesView } from "../images/ImagesView.tsx";
-import { NetworkView } from "../network/NetworkView.tsx";
 import { useHttpRoutes } from "../network/state.ts";
 import { isPodStarting, PodStartupScreen } from "../pods/PodStartupScreen.tsx";
 import { usePods } from "../pods/state.ts";
-import { ProcessManager } from "../processes/ProcessManager.tsx";
-import { ProcessTerminal } from "../processes/ProcessTerminal.tsx";
 import { useProcesses } from "../processes/state.ts";
-import { RepositoryApprovalOverlay } from "../repositories/RepositoryApprovalOverlay.tsx";
-import { RepositoriesView } from "../repositories/RepositoriesView.tsx";
+import { MobileRepositoryApprovals } from "../repositories/MobileRepositoryApprovals.tsx";
 import { useRepositories, useRepositoryApprovals } from "../repositories/state.ts";
-import { WorkspaceSettings } from "../settings/WorkspaceSettings.tsx";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import {
   WorkspaceLifecycleScreen,
   workspaceScreenForState,
 } from "../workspaces/WorkspaceLifecycleScreens.tsx";
-import {
-  WorkbenchShell,
-  type AgentWorkbenchTab,
-  type CodeWorkbenchTab,
-  type TerminalWorkbenchTab,
+import type {
+  AgentWorkbenchTab,
+  CodeWorkbenchTab,
+  TerminalWorkbenchTab,
 } from "./shell/WorkbenchShell.tsx";
 import type { WebPreview } from "./shell/WebPreview.tsx";
+import { MobileWorkbenchShell } from "./mobile/MobileWorkbenchShell.tsx";
+import { mobileChatSummary } from "./mobile/MobileTaskList.tsx";
+import { MobileWorkspaceStatus } from "./mobile/MobileWorkspaceHome.tsx";
 
 type WorkspaceConnection = "idle" | "connecting" | "live" | "reconnecting";
 const EMPTY_POD_CHANGE_SUMMARIES: ReadonlyMap<pods.PodId, PodChangeSummary> = new Map();
+const CodeDirectoryPalette = lazy(() =>
+  import("../code/CodeDirectoryPalette.tsx").then((module) => ({
+    default: module.CodeDirectoryPalette,
+  }))
+);
+const CodeDirectoryPicker = lazy(() =>
+  import("../code/CodeDirectoryPalette.tsx").then((module) => ({
+    default: module.CodeDirectoryPicker,
+  }))
+);
+const CodeView = lazy(() =>
+  import("../code/CodeView.tsx").then((module) => ({ default: module.CodeView }))
+);
+const DesktopChangesView = lazy(() =>
+  import("../changes/ChangesView.tsx").then((module) => ({ default: module.ChangesView }))
+);
+const FilesView = lazy(() =>
+  import("../files/FilesView.tsx").then((module) => ({ default: module.FilesView }))
+);
+const ImagesView = lazy(() =>
+  import("../images/ImagesView.tsx").then((module) => ({ default: module.ImagesView }))
+);
+const NetworkView = lazy(() =>
+  import("../network/NetworkView.tsx").then((module) => ({ default: module.NetworkView }))
+);
+const ProcessManager = lazy(() =>
+  import("../processes/ProcessManager.tsx").then((module) => ({
+    default: module.ProcessManager,
+  }))
+);
+const ProcessTerminal = lazy(() =>
+  import("../processes/ProcessTerminal.tsx").then((module) => ({
+    default: module.ProcessTerminal,
+  }))
+);
+const RepositoryApprovalOverlay = lazy(() =>
+  import("../repositories/RepositoryApprovalOverlay.tsx").then((module) => ({
+    default: module.RepositoryApprovalOverlay,
+  }))
+);
+const RepositoriesView = lazy(() =>
+  import("../repositories/RepositoriesView.tsx").then((module) => ({
+    default: module.RepositoriesView,
+  }))
+);
+const WorkspaceSettings = lazy(() =>
+  import("../settings/WorkspaceSettings.tsx").then((module) => ({
+    default: module.WorkspaceSettings,
+  }))
+);
+const WorkbenchShell = lazy(() =>
+  import("./shell/WorkbenchShell.tsx").then((module) => ({
+    default: module.WorkbenchShell,
+  }))
+);
 
 type CodeSelection = {
   podId: pods.PodId;
@@ -87,6 +152,7 @@ export function WorkspaceWorkbench({
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
 }) {
   const navigate = useNavigate();
+  const mobileLayout = useMobileLayout();
   const podState = usePods(workspace);
   const chatListState = useChatList(workspace);
   const harnessState = useChatHarnesses(workspace);
@@ -104,9 +170,10 @@ export function WorkspaceWorkbench({
     || route.view === "network"
     || route.view === "repositories"
     || route.view === "settings";
+  const routedPod = pods.find((pod) => pod.id === route.pod);
   const selectedPod = workspacePanelOpen
     ? undefined
-    : pods.find((pod) => pod.id === route.pod) ?? pods[0];
+    : routedPod ?? (mobileLayout ? undefined : pods[0]);
   const selectedPodId = selectedPod?.id;
   const publishedWebPreviews = useMemo(
     () => httpRoutePreviews(httpRouteState.value?.httpRoutes ?? [], selectedPodId),
@@ -183,13 +250,13 @@ export function WorkspaceWorkbench({
   );
 
   useEffect(() => {
-    if (!selectedPodId || route.pod === selectedPodId) return;
+    if (mobileLayout || !selectedPodId || route.pod === selectedPodId) return;
     void navigate({
       to: "/workspaces/$workspace/pods/$pod",
       params: { workspace, pod: selectedPodId },
       replace: true,
     });
-  }, [navigate, route.pod, selectedPodId, workspace]);
+  }, [mobileLayout, navigate, route.pod, selectedPodId, workspace]);
 
   useEffect(() => {
     if (activeTerminal) return;
@@ -216,7 +283,8 @@ export function WorkspaceWorkbench({
 
   useEffect(() => {
     if (
-      route.view !== "agent"
+      mobileLayout
+      || route.view !== "agent"
       || !selectedPodId
       || startingChat
       || !chatListState.ready
@@ -233,6 +301,7 @@ export function WorkspaceWorkbench({
     else setStartingChat(true);
   }, [
     chatListState.ready,
+    mobileLayout,
     navigate,
     podChats,
     route.view,
@@ -258,6 +327,7 @@ export function WorkspaceWorkbench({
     void navigate({
       to: "/workspaces/$workspace/pods/$pod",
       params: { workspace, pod: podId },
+      search: {},
     });
   };
   const selectChat = (chatId: chats.ChatId) => {
@@ -266,6 +336,15 @@ export function WorkspaceWorkbench({
     void navigate({
       to: "/workspaces/$workspace/pods/$pod/chats/$chat",
       params: { workspace, pod: selectedPodId, chat: chatId },
+      search: {},
+    });
+  };
+  const selectWorkspaceChat = (podId: pods.PodId, chatId: chats.ChatId) => {
+    setStartingChat(false);
+    void navigate({
+      to: "/workspaces/$workspace/pods/$pod/chats/$chat",
+      params: { workspace, pod: podId, chat: chatId },
+      search: {},
     });
   };
   const newChat = () => {
@@ -274,6 +353,7 @@ export function WorkspaceWorkbench({
     void navigate({
       to: "/workspaces/$workspace/pods/$pod",
       params: { workspace, pod: selectedPodId },
+      search: {},
     });
   };
   const togglePodCreation = () => {
@@ -321,11 +401,16 @@ export function WorkspaceWorkbench({
       status: agentTabStatus(summary),
       attention: summary.attentionRequired,
     }));
+  const mobileChats = workspaceChats
+    .toSorted((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+    .map(mobileChatSummary);
   const visibleError = error
     ?? podState.error?.message
     ?? chatListState.error?.message
     ?? harnessState.error?.message
-    ?? processState.error?.message
+    ?? (mobileLayout ? undefined : processState.error?.message)
+    ?? repositoryApprovalState.error?.message
+    ?? repositoryStatusState.error?.message
     ?? configState.error?.message
     ?? configState.value?.lastConfigError?.message
     ?? configState.value?.lastSettingsError?.message;
@@ -509,115 +594,225 @@ export function WorkspaceWorkbench({
         }}
         onConfirm={() => void archiveChat()}
       />
-      <RepositoryApprovalOverlay
-        key={workspace}
-        workspace={workspace}
-        approvals={repositoryApprovalState.value?.requests ?? []}
-        podTitlesById={podState.value?.podTitlesById}
-        onError={reportError}
-      />
-      <CodeDirectoryPalette
-        open={codeDirectoryPaletteOpen}
-        repositories={repositories}
-        onOpenChange={setCodeDirectoryPaletteOpen}
-        onSelect={(folder) => {
-          if (selectedPodId) setCodeSelection({ podId: selectedPodId, folder });
-        }}
-      />
-      <WorkbenchShell
-        workspaces={allWorkspaces}
-        selectedWorkspace={workspace}
-        usbEnabled={configState.value?.config?.features?.usb ?? false}
-        pods={pods}
-        podChangeSummaries={podChangeSummaries}
-        podChangeSummariesVerified={repositoryStatusState.ready && !repositoryStatusState.error}
-        selectedPodId={selectedPodId}
-        view={route.view}
-        workspaceScreen={podCreationScreen ?? podStartupScreen}
-        workspaceConnection={workspaceConnection === "live" ? podState.connection : workspaceConnection}
-        workspaceConnectionAttempt={workspaceConnection === "live"
-          ? podState.connectionAttempt
-          : workspaceConnectionAttempt}
-        onSelectWorkspace={onSelectWorkspace}
-        onCreateWorkspace={onCreateWorkspace}
-        onStartWorkspace={onStartWorkspace}
-        onStopWorkspace={onStopWorkspace}
-        onSelectPod={selectPod}
-        canCreatePod
-        podCreationActive={route.creatingPod}
-        onCreatePod={togglePodCreation}
-        onStartPod={async (podId) => {
-          await guestApi(workspace).execute("pods_Start", { podId });
-        }}
-        onStopPod={async (podId) => {
-          await guestApi(workspace).execute("pods_Stop", { podId });
-        }}
-        onDestroyPod={async (podId) => {
-          await guestApi(workspace).execute("pods_Destroy", { podId });
-        }}
-        agentView={agentView}
-        codeView={selectedPod
-          ? selectedCodeFolder
-            ? <CodeView workspace={workspace} pod={selectedPod} folder={selectedCodeFolder} />
-            : (
-              <CodeDirectoryPicker
-                repositories={repositories}
-                onSelect={(folder) => setCodeSelection({ podId: selectedPod.id, folder })}
+      {mobileLayout ? (
+        <MobileWorkbenchShell
+          workspaces={allWorkspaces}
+          selectedWorkspace={workspace}
+          pods={pods}
+          podChangeSummaries={podChangeSummaries}
+          selectedPodId={selectedPodId}
+          selectedChatId={startingChat ? undefined : selectedSummary?.chatId}
+          route={route}
+          workspaceScreen={podCreationScreen ?? podStartupScreen}
+          workspaceConnection={workspaceConnection === "live"
+            ? podState.connection
+            : workspaceConnection}
+          workspaceConnectionAttempt={workspaceConnection === "live"
+            ? podState.connectionAttempt
+            : workspaceConnectionAttempt}
+          chats={mobileChats}
+          creatingChat={startingChat}
+          chatView={agentView}
+          approvalsView={(
+            <MobileRepositoryApprovals
+              workspace={workspace}
+              approvals={repositoryApprovalState.value?.requests ?? []}
+              podTitlesById={podState.value?.podTitlesById}
+              loadError={repositoryApprovalState.error?.message}
+            />
+          )}
+          approvalCount={(repositoryApprovalState.value?.requests ?? []).filter(
+            (approval) => approval.status.tag === "Pending" || approval.status.tag === "Failed",
+          ).length}
+          error={visibleError}
+          changesView={selectedPod
+            ? (
+              <MobileChangesView
+                workspace={workspace}
+                pod={selectedPod}
+                review={route.changeReview
+                  ? {
+                      repository: route.changeReview.repository,
+                      base: route.changeReview.base as changes.GitObjectId,
+                      head: route.changeReview.head as changes.GitObjectId,
+                    }
+                  : undefined}
               />
             )
-          : <UnavailablePanel detail="Select a pod to start its code editor." />}
-        changesView={selectedPod
-          ? <ChangesView workspace={workspace} pod={selectedPod} />
-          : <UnavailablePanel detail="Select a pod to inspect its changes." />}
-        filesView={selectedPod
-          ? <FilesView workspace={workspace} pod={selectedPod} />
-          : <UnavailablePanel detail="Select a pod to browse its files." />}
-        codeTabs={codeTabs}
-        selectedCodeFolder={selectedPod ? selectedCodeFolder : undefined}
-        onSelectCodeSession={(folder) => {
-          if (selectedPodId) setCodeSelection({ podId: selectedPodId, folder });
-        }}
-        onNewCodeSession={() => setCodeDirectoryPaletteOpen(true)}
-        onCloseCodeSession={closeCodeSession}
-        imagesView={<ImagesView workspace={workspace} />}
-        networkView={(
-          <NetworkView
+            : null}
+          onSelectPod={selectPod}
+          onCreatePod={togglePodCreation}
+          onStartPod={async (podId) => {
+            await guestApi(workspace).execute("pods_Start", { podId });
+          }}
+          onStopPod={async (podId) => {
+            await guestApi(workspace).execute("pods_Stop", { podId });
+          }}
+          onSelectChat={selectWorkspaceChat}
+          onNewChat={newChat}
+        />
+      ) : (
+        <Suspense fallback={<UnavailablePanel detail="Loading the desktop workbench…" />}>
+          <RepositoryApprovalOverlay
+            key={workspace}
             workspace={workspace}
-            pods={pods}
+            approvals={repositoryApprovalState.value?.requests ?? []}
             podTitlesById={podState.value?.podTitlesById}
+            onError={reportError}
           />
-        )}
-        repositoriesView={<RepositoriesView workspace={workspace} />}
-        publishedWebPreviews={publishedWebPreviews}
-        publishedWebPreviewsReady={httpRouteState.ready}
-        retainedPublishedWebPreviewIds={retainedPublishedWebPreviewIds}
-        settingsView={currentWorkspace
-          ? <WorkspaceSettings workspace={currentWorkspace} />
-          : <UnavailablePanel detail="Settings are unavailable." />}
-        podProcessView={selectedPod ? <ProcessManager workspace={workspace} pod={selectedPod} /> : undefined}
-        agentTabs={agentTabs}
-        selectedAgentId={startingChat ? undefined : selectedSummary?.chatId}
-        creatingAgent={startingChat}
-        busyPodIds={busyPodIds}
-        attentionPodIds={attentionPodIds}
-        agentNeedsInput={selectedSummary?.agentStatus === "UserInputRequired"}
-        repositoryApprovalCount={repositoryApprovalState.value?.requests.length}
-        onSelectAgent={(chatId) => selectChat(chatId as chats.ChatId)}
-        onNewAgent={newChat}
-        onArchiveAgent={(chatId) => {
-          const target = podChats.find((candidate) => candidate.chatId === chatId);
-          if (target) setArchiveTarget(target);
-        }}
-        terminalView={activeTerminal
-          ? <ProcessTerminal workspace={workspace} process={activeTerminal} />
-          : <UnavailablePanel detail="Select a terminal." />}
-        terminalTabs={terminalTabs}
-        terminalTabsReady={processState.ready && selectedPodId !== undefined}
-        activeTerminalId={activeTerminal?.id}
-        onSelectTerminal={(processId) => setActiveTerminalId(processId as processes.ProcessId)}
-        onNewTerminal={newTerminal}
-        onCloseTerminal={closeTerminal}
-      />
+          <CodeDirectoryPalette
+            open={codeDirectoryPaletteOpen}
+            repositories={repositories}
+            onOpenChange={setCodeDirectoryPaletteOpen}
+            onSelect={(folder) => {
+              if (selectedPodId) setCodeSelection({ podId: selectedPodId, folder });
+            }}
+          />
+          <WorkbenchShell
+            workspaces={allWorkspaces}
+            selectedWorkspace={workspace}
+            usbEnabled={configState.value?.config?.features?.usb ?? false}
+            pods={pods}
+            podChangeSummaries={podChangeSummaries}
+            podChangeSummariesVerified={repositoryStatusState.ready
+              && !repositoryStatusState.error}
+            selectedPodId={selectedPodId}
+            view={route.view}
+            workspaceScreen={podCreationScreen ?? podStartupScreen}
+            workspaceConnection={workspaceConnection === "live"
+              ? podState.connection
+              : workspaceConnection}
+            workspaceConnectionAttempt={workspaceConnection === "live"
+              ? podState.connectionAttempt
+              : workspaceConnectionAttempt}
+            onSelectWorkspace={onSelectWorkspace}
+            onCreateWorkspace={onCreateWorkspace}
+            onStartWorkspace={onStartWorkspace}
+            onStopWorkspace={onStopWorkspace}
+            onSelectPod={selectPod}
+            canCreatePod
+            podCreationActive={route.creatingPod}
+            onCreatePod={togglePodCreation}
+            onStartPod={async (podId) => {
+              await guestApi(workspace).execute("pods_Start", { podId });
+            }}
+            onStopPod={async (podId) => {
+              await guestApi(workspace).execute("pods_Stop", { podId });
+            }}
+            onDestroyPod={async (podId) => {
+              await guestApi(workspace).execute("pods_Destroy", { podId });
+            }}
+            agentView={agentView}
+            codeView={(
+              <DesktopPanel loadingDetail="Loading the code view…">
+                {selectedPod
+                  ? selectedCodeFolder
+                    ? (
+                      <CodeView
+                        workspace={workspace}
+                        pod={selectedPod}
+                        folder={selectedCodeFolder}
+                      />
+                    )
+                    : (
+                      <CodeDirectoryPicker
+                        repositories={repositories}
+                        onSelect={(folder) => setCodeSelection({
+                          podId: selectedPod.id,
+                          folder,
+                        })}
+                      />
+                    )
+                  : <UnavailablePanel detail="Select a pod to start its code editor." />}
+              </DesktopPanel>
+            )}
+            changesView={(
+              <DesktopPanel loadingDetail="Loading changes…">
+                {selectedPod
+                  ? <DesktopChangesView workspace={workspace} pod={selectedPod} />
+                  : <UnavailablePanel detail="Select a pod to inspect its changes." />}
+              </DesktopPanel>
+            )}
+            filesView={(
+              <DesktopPanel loadingDetail="Loading files…">
+                {selectedPod
+                  ? <FilesView workspace={workspace} pod={selectedPod} />
+                  : <UnavailablePanel detail="Select a pod to browse its files." />}
+              </DesktopPanel>
+            )}
+            codeTabs={codeTabs}
+            selectedCodeFolder={selectedPod ? selectedCodeFolder : undefined}
+            onSelectCodeSession={(folder) => {
+              if (selectedPodId) setCodeSelection({ podId: selectedPodId, folder });
+            }}
+            onNewCodeSession={() => setCodeDirectoryPaletteOpen(true)}
+            onCloseCodeSession={closeCodeSession}
+            imagesView={(
+              <DesktopPanel loadingDetail="Loading images…">
+                <ImagesView workspace={workspace} />
+              </DesktopPanel>
+            )}
+            networkView={(
+              <DesktopPanel loadingDetail="Loading network controls…">
+                <NetworkView
+                  workspace={workspace}
+                  pods={pods}
+                  podTitlesById={podState.value?.podTitlesById}
+                />
+              </DesktopPanel>
+            )}
+            repositoriesView={(
+              <DesktopPanel loadingDetail="Loading repositories…">
+                <RepositoriesView workspace={workspace} />
+              </DesktopPanel>
+            )}
+            publishedWebPreviews={publishedWebPreviews}
+            publishedWebPreviewsReady={httpRouteState.ready}
+            retainedPublishedWebPreviewIds={retainedPublishedWebPreviewIds}
+            settingsView={(
+              <DesktopPanel loadingDetail="Loading settings…">
+                {currentWorkspace
+                  ? <WorkspaceSettings workspace={currentWorkspace} />
+                  : <UnavailablePanel detail="Settings are unavailable." />}
+              </DesktopPanel>
+            )}
+            podProcessView={selectedPod
+              ? (
+                <DesktopPanel loadingDetail="Loading processes…">
+                  <ProcessManager workspace={workspace} pod={selectedPod} />
+                </DesktopPanel>
+              )
+              : undefined}
+            agentTabs={agentTabs}
+            selectedAgentId={startingChat ? undefined : selectedSummary?.chatId}
+            creatingAgent={startingChat}
+            busyPodIds={busyPodIds}
+            attentionPodIds={attentionPodIds}
+            agentNeedsInput={selectedSummary?.agentStatus === "UserInputRequired"}
+            repositoryApprovalCount={repositoryApprovalState.value?.requests.length}
+            onSelectAgent={(chatId) => selectChat(chatId as chats.ChatId)}
+            onNewAgent={newChat}
+            onArchiveAgent={(chatId) => {
+              const target = podChats.find((candidate) => candidate.chatId === chatId);
+              if (target) setArchiveTarget(target);
+            }}
+            terminalView={(
+              <DesktopPanel loadingDetail="Loading terminal…">
+                {activeTerminal
+                  ? <ProcessTerminal workspace={workspace} process={activeTerminal} />
+                  : <UnavailablePanel detail="Select a terminal." />}
+              </DesktopPanel>
+            )}
+            terminalTabs={terminalTabs}
+            terminalTabsReady={processState.ready && selectedPodId !== undefined}
+            activeTerminalId={activeTerminal?.id}
+            onSelectTerminal={(processId) =>
+              setActiveTerminalId(processId as processes.ProcessId)}
+            onNewTerminal={newTerminal}
+            onCloseTerminal={closeTerminal}
+          />
+        </Suspense>
+      )}
     </>
   );
 }
@@ -704,64 +899,79 @@ export function UnavailableWorkspace({
   onStartWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
   onStopWorkspace: (workspace: workspaces.WorkspaceName) => Promise<void>;
 }) {
+  const mobileLayout = useMobileLayout();
   const activeScreen = screen ?? (selectedWorkspace
     ? workspaceScreenForState(selectedWorkspace.state)
     : undefined);
   const detail = error?.message ?? "Waiting for the workspace inventory.";
-  return (
-    <WorkbenchShell
-      workspaces={availableWorkspaces}
-      selectedWorkspace={selectedWorkspace?.name}
-      usbEnabled={false}
-      pods={[]}
-      podChangeSummaries={EMPTY_POD_CHANGE_SUMMARIES}
-      podChangeSummariesVerified={false}
-      podListEmptyMessage={activeScreen ? `Workspace ${activeScreen}.` : undefined}
-      showPodCount={false}
-      view={view}
-      workspaceConnection={connection}
-      workspaceConnectionAttempt={connectionAttempt}
-      workspaceScreen={selectedWorkspace && activeScreen ? (
-        <WorkspaceLifecycleScreen
-          screen={activeScreen}
-          workspace={selectedWorkspace}
-          onStart={() => onStartWorkspace(selectedWorkspace.name)}
-        />
-      ) : <UnavailablePanel detail={detail} />}
-      onSelectWorkspace={onSelectWorkspace}
-      onCreateWorkspace={onCreateWorkspace}
-      onStartWorkspace={onStartWorkspace}
-      onStopWorkspace={onStopWorkspace}
-      onSelectPod={() => undefined}
-      canCreatePod={false}
-      onCreatePod={() => undefined}
-      onStartPod={async () => undefined}
-      onStopPod={async () => undefined}
-      onDestroyPod={async () => undefined}
-      agentView={null}
-      codeView={null}
-      changesView={null}
-      filesView={null}
-      codeTabs={[]}
-      onSelectCodeSession={() => undefined}
-      onNewCodeSession={() => undefined}
-      onCloseCodeSession={() => undefined}
-      imagesView={null}
-      networkView={null}
-      repositoriesView={null}
-      settingsView={null}
-      publishedWebPreviewsReady={false}
-      agentTabs={[]}
-      onSelectAgent={() => undefined}
-      onNewAgent={() => undefined}
-      onArchiveAgent={() => undefined}
-      terminalView={null}
-      terminalTabs={[]}
-      terminalTabsReady={false}
-      onSelectTerminal={() => undefined}
-      onNewTerminal={() => undefined}
-      onCloseTerminal={() => undefined}
+  const lifecycleScreen = selectedWorkspace && activeScreen ? (
+    <WorkspaceLifecycleScreen
+      screen={activeScreen}
+      workspace={selectedWorkspace}
+      onStart={() => onStartWorkspace(selectedWorkspace.name)}
     />
+  ) : <UnavailablePanel detail={detail} />;
+  if (mobileLayout && selectedWorkspace) {
+    return (
+      <MobileWorkspaceStatus
+        workspace={selectedWorkspace.name}
+        connection={connection}
+        connectionAttempt={connectionAttempt}
+      >
+        {lifecycleScreen}
+      </MobileWorkspaceStatus>
+    );
+  }
+  return (
+    <Suspense fallback={<UnavailablePanel detail="Loading the desktop workbench…" />}>
+      <WorkbenchShell
+        workspaces={availableWorkspaces}
+        selectedWorkspace={selectedWorkspace?.name}
+        usbEnabled={false}
+        pods={[]}
+        podChangeSummaries={EMPTY_POD_CHANGE_SUMMARIES}
+        podChangeSummariesVerified={false}
+        podListEmptyMessage={activeScreen ? `Workspace ${activeScreen}.` : undefined}
+        showPodCount={false}
+        view={view}
+        workspaceConnection={connection}
+        workspaceConnectionAttempt={connectionAttempt}
+        workspaceScreen={lifecycleScreen}
+        onSelectWorkspace={onSelectWorkspace}
+        onCreateWorkspace={onCreateWorkspace}
+        onStartWorkspace={onStartWorkspace}
+        onStopWorkspace={onStopWorkspace}
+        onSelectPod={() => undefined}
+        canCreatePod={false}
+        onCreatePod={() => undefined}
+        onStartPod={async () => undefined}
+        onStopPod={async () => undefined}
+        onDestroyPod={async () => undefined}
+        agentView={null}
+        codeView={null}
+        changesView={null}
+        filesView={null}
+        codeTabs={[]}
+        onSelectCodeSession={() => undefined}
+        onNewCodeSession={() => undefined}
+        onCloseCodeSession={() => undefined}
+        imagesView={null}
+        networkView={null}
+        repositoriesView={null}
+        settingsView={null}
+        publishedWebPreviewsReady={false}
+        agentTabs={[]}
+        onSelectAgent={() => undefined}
+        onNewAgent={() => undefined}
+        onArchiveAgent={() => undefined}
+        terminalView={null}
+        terminalTabs={[]}
+        terminalTabsReady={false}
+        onSelectTerminal={() => undefined}
+        onNewTerminal={() => undefined}
+        onCloseTerminal={() => undefined}
+      />
+    </Suspense>
   );
 }
 
@@ -808,6 +1018,20 @@ function UnavailablePanel({ detail }: { detail: string }) {
     <div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted">
       {detail}
     </div>
+  );
+}
+
+function DesktopPanel({
+  children,
+  loadingDetail,
+}: {
+  children: ReactNode;
+  loadingDetail: string;
+}) {
+  return (
+    <Suspense fallback={<UnavailablePanel detail={loadingDetail} />}>
+      {children}
+    </Suspense>
   );
 }
 

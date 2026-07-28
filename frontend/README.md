@@ -6,6 +6,19 @@ The frontend uses the v2 control-plane client and a provider-owned state cache. 
 state is keyed by its host or guest identity, so every workspace, pod list, chat list, harness
 inventory, and chat detail has one cached replica and at most one physical subscription.
 
+## Desktop and Mobile Clients
+
+The frontend selects one of two presentation shells while sharing routes, backend state, and
+feature components. The desktop workbench provides the multi-panel development environment. The
+mobile client focuses on starting tasks, monitoring chats, resolving input requests, approving
+repository publications, starting and stopping task pods, and reviewing individual changed-file diffs.
+Its workspace index subscribes to every running workspace and collects active chats and unblock
+requests into one live attention view.
+
+Code editing, terminals, arbitrary file browsing, network configuration, image management, and
+advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless
+they directly help a user start a task or unblock ongoing work.
+
 Chat operation names in `src/api/actions.ts` are maintained manually while the backend operation
 registry is developed in parallel. Sidex types can be refreshed with:
 

@@ -182,7 +182,7 @@ function ComposerFooter({
   onJumpToLatest?: () => void;
 }) {
   return (
-    <footer className="sticky bottom-0 z-20 max-h-[45dvh] flex-none overflow-visible bg-canvas px-3 pb-4 pt-0 sm:px-6 sm:pb-6 sm:pt-0">
+    <footer className="chat-composer-footer sticky bottom-0 z-20 max-h-[45dvh] flex-none overflow-visible bg-canvas px-3 pb-4 pt-0 sm:px-6 sm:pb-6 sm:pt-0">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute bottom-full left-1/2 h-16 w-[calc(100%-1.5rem)] max-w-4xl -translate-x-1/2 bg-gradient-to-t from-canvas to-transparent sm:w-[calc(100%-3rem)]"
