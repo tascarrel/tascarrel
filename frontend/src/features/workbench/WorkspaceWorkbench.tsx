@@ -113,6 +113,12 @@ export function WorkspaceWorkbench({
     () => httpRoutePreviews(httpRouteState.value?.httpRoutes ?? [], selectedPodId),
     [httpRouteState.value?.httpRoutes, selectedPodId],
   );
+  const retainedPublishedWebPreviewIds = useMemo(
+    () => (httpRouteState.value?.httpRoutes ?? [])
+      .filter((route) => !route.internal)
+      .map(httpRoutePreviewId),
+    [httpRouteState.value?.httpRoutes],
+  );
   const podChangeSummaries = useMemo(
     () => summarizePodChanges(repositoryStatusState.value?.repositories ?? []),
     [repositoryStatusState.value?.repositories],
@@ -584,6 +590,8 @@ export function WorkspaceWorkbench({
         )}
         repositoriesView={<RepositoriesView workspace={workspace} />}
         publishedWebPreviews={publishedWebPreviews}
+        publishedWebPreviewsReady={httpRouteState.ready}
+        retainedPublishedWebPreviewIds={retainedPublishedWebPreviewIds}
         settingsView={currentWorkspace
           ? <WorkspaceSettings workspace={currentWorkspace} />
           : <UnavailablePanel detail="Settings are unavailable." />}
@@ -623,10 +631,14 @@ function httpRoutePreviews(
   return routes
     .filter((route) => route.podId === podId && !route.internal)
     .map((route) => ({
-      id: `http-route-${route.id}`,
+      id: httpRoutePreviewId(route),
       title: route.title,
       url: nestedHttpRouteUrl(route.hostnamePrefix),
     }));
+}
+
+function httpRoutePreviewId(route: network.HttpRoute): string {
+  return `http-route-${route.id}`;
 }
 
 function codeSessionTabs(
@@ -738,6 +750,7 @@ export function UnavailableWorkspace({
       networkView={null}
       repositoriesView={null}
       settingsView={null}
+      publishedWebPreviewsReady={false}
       agentTabs={[]}
       onSelectAgent={() => undefined}
       onNewAgent={() => undefined}

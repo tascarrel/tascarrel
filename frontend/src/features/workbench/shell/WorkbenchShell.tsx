@@ -97,6 +97,8 @@ type WorkbenchShellProps = {
   repositoriesView: ReactNode;
   settingsView: ReactNode;
   publishedWebPreviews?: readonly WebPreview[];
+  publishedWebPreviewsReady: boolean;
+  retainedPublishedWebPreviewIds?: readonly string[];
   podProcessView?: ReactNode;
   agentTabs: AgentWorkbenchTab[];
   selectedAgentId?: string;
@@ -164,6 +166,7 @@ const DEFAULT_LAYOUT: LayoutState = {
   previewSize: 440,
 };
 const INITIAL_WEB_PREVIEWS: WebPreview[] = [];
+const INITIAL_WEB_PREVIEW_IDS: string[] = [];
 const EMPTY_POD_IDS: ReadonlySet<pods.PodId> = new Set();
 const WEB_PANEL_MODES = [
   { value: "web", label: "Web", icon: Monitor },
@@ -229,6 +232,8 @@ export function WorkbenchShell({
   repositoriesView,
   settingsView,
   publishedWebPreviews = INITIAL_WEB_PREVIEWS,
+  publishedWebPreviewsReady,
+  retainedPublishedWebPreviewIds = INITIAL_WEB_PREVIEW_IDS,
   podProcessView,
   agentTabs,
   selectedAgentId,
@@ -261,6 +266,15 @@ export function WorkbenchShell({
     : storedLayouts.defaultLayout;
   const terminalPanelTarget = layoutTarget ?? "default";
   const handledTerminalPanelTarget = useRef<string | undefined>(undefined);
+  const publishedWebPreviewSnapshot = useRef<{
+    target: string | undefined;
+    ready: boolean;
+    ids: ReadonlySet<string>;
+  }>({
+    target: layoutTarget,
+    ready: false,
+    ids: new Set(),
+  });
   const [webPreviews, setWebPreviews] = useState(INITIAL_WEB_PREVIEWS);
   const [publishedPreviewUrls, setPublishedPreviewUrls] = useState<Record<string, string>>({});
   const [activeWebPreviewId, setActiveWebPreviewId] = useState<string>();
@@ -282,12 +296,14 @@ export function WorkbenchShell({
     () => availableWebPreviews.map((preview) => preview.id),
     [availableWebPreviews],
   );
-  const availableWebPreviewFrameIds = useMemo(
-    () => availableWebPreviewIds.map((previewId) =>
-      webPreviewFrameId(selectedWorkspace ?? "", previewId)),
-    [availableWebPreviewIds, selectedWorkspace],
+  const retainedWebPreviewFrameIds = useMemo(
+    () => [
+      ...retainedPublishedWebPreviewIds,
+      ...webPreviews.map((preview) => preview.id),
+    ].map((previewId) => webPreviewFrameId(selectedWorkspace ?? "", previewId)),
+    [retainedPublishedWebPreviewIds, selectedWorkspace, webPreviews],
   );
-  useRetainedWebPreviewFrames(availableWebPreviewFrameIds);
+  useRetainedWebPreviewFrames(retainedWebPreviewFrameIds);
   const activeWorkspaceView: WorkspaceControlView | undefined = mode === "images" || mode === "network" || mode === "repositories" || mode === "settings"
     ? mode
     : undefined;
@@ -348,6 +364,34 @@ export function WorkbenchShell({
       ? current
       : availableWebPreviews[0]?.id);
   }, [availableWebPreviews]);
+
+  useEffect(() => {
+    const currentIds = new Set(publishedWebPreviews.map((preview) => preview.id));
+    const previous = publishedWebPreviewSnapshot.current;
+    publishedWebPreviewSnapshot.current = {
+      target: layoutTarget,
+      ready: publishedWebPreviewsReady,
+      ids: currentIds,
+    };
+    if (
+      !publishedWebPreviewsReady
+      || !previous.ready
+      || previous.target !== layoutTarget
+    ) return;
+
+    const addedPreview = publishedWebPreviews.findLast(
+      (preview) => !previous.ids.has(preview.id),
+    );
+    if (!addedPreview) return;
+    setActiveWebPreviewId(addedPreview.id);
+    setStoredLayouts((current) =>
+      updateStoredLayout(current, layoutTarget, () => ({ previewOpen: true }))
+    );
+  }, [
+    layoutTarget,
+    publishedWebPreviews,
+    publishedWebPreviewsReady,
+  ]);
 
   useEffect(() => {
     if (!layout.terminalOpen) {

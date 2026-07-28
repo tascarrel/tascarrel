@@ -27,7 +27,7 @@ export function useWebPreviewFrame(
   useIframeFrame(WEB_PREVIEW_FRAME_POOL, spec, anchor);
 }
 
-/** Synchronizes retained web-preview frames with the currently available preview tabs. */
+/** Synchronizes retained web-preview frames with the routes available in the workspace. */
 export function useRetainedWebPreviewFrames(frameIds: readonly string[]) {
   useRetainedIframeFrames(WEB_PREVIEW_FRAME_POOL, frameIds);
 }
