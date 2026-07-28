@@ -8,6 +8,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+#[cfg(target_os = "macos")]
+use std::thread;
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -22,6 +26,10 @@ use crate::install::create_directory;
 const LINUX_UNIT: &str = "tascarrel.service";
 #[cfg(target_os = "macos")]
 const MACOS_LABEL: &str = "dev.tascarrel.host";
+#[cfg(target_os = "macos")]
+const LAUNCHD_TRANSITION_ATTEMPTS: usize = 20;
+#[cfg(target_os = "macos")]
+const LAUNCHD_TRANSITION_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Writes and enables the per-user service for a server executable.
 ///
@@ -47,6 +55,7 @@ pub fn install(binary: &Path, dependencies: &ResolvedDependencies) -> Result<()>
     }
     #[cfg(target_os = "macos")]
     {
+        create_directory(&tascarrel_home.state(), 0o700)?;
         let path = macos_plist_path()?;
         let contents = macos_plist(binary, dependencies, tascarrel_home.root())?;
         atomic_write(&path, contents.as_bytes(), 0o600)?;
@@ -79,31 +88,16 @@ pub fn start() -> Result<()> {
     {
         let domain = launchd_domain()?;
         let service = format!("{domain}/{MACOS_LABEL}");
-        let plist = macos_plist_path()?;
-        let bootstrapped = Command::new("launchctl")
-            .arg("bootstrap")
-            .arg(&domain)
-            .arg(&plist)
-            .status()
-            .context("bootstrap the Tascarrel LaunchAgent")?;
-        if !bootstrapped.success() {
-            let printed = Command::new("launchctl")
-                .arg("print")
-                .arg(&service)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .context("inspect the Tascarrel LaunchAgent")?;
-            if !printed.success() {
-                bail!("could not bootstrap the Tascarrel LaunchAgent");
-            }
+        if macos_service_loaded(&service)? {
+            run_checked(
+                Command::new("launchctl")
+                    .args(["kickstart", "-k"])
+                    .arg(service),
+                "start the Tascarrel LaunchAgent",
+            )
+        } else {
+            bootstrap_macos_service(&domain, &service, &macos_plist_path()?)
         }
-        run_checked(
-            Command::new("launchctl")
-                .args(["kickstart", "-k"])
-                .arg(service),
-            "start the Tascarrel LaunchAgent",
-        )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -171,8 +165,16 @@ pub fn restart() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        stop()?;
-        start()
+        let domain = launchd_domain()?;
+        let service = format!("{domain}/{MACOS_LABEL}");
+        if macos_service_loaded(&service)? {
+            run_checked(
+                Command::new("launchctl").arg("bootout").arg(&service),
+                "stop the Tascarrel LaunchAgent",
+            )?;
+            wait_for_macos_service_unloaded(&service)?;
+        }
+        bootstrap_macos_service(&domain, &service, &macos_plist_path()?)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -361,6 +363,60 @@ fn macos_log_path() -> Result<PathBuf> {
 #[cfg(target_os = "macos")]
 fn launchd_domain() -> Result<String> {
     Ok(format!("gui/{}", nix::unistd::Uid::effective().as_raw()))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_loaded(service: &str) -> Result<bool> {
+    let status = Command::new("launchctl")
+        .arg("print")
+        .arg(service)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("inspect the Tascarrel LaunchAgent")?;
+    Ok(status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn bootstrap_macos_service(domain: &str, service: &str, plist: &Path) -> Result<()> {
+    for attempt in 0..LAUNCHD_TRANSITION_ATTEMPTS {
+        let output = Command::new("launchctl")
+            .arg("bootstrap")
+            .arg(domain)
+            .arg(plist)
+            .output()
+            .context("bootstrap the Tascarrel LaunchAgent")?;
+        if output.status.success() || macos_service_loaded(service)? {
+            return Ok(());
+        }
+        if attempt + 1 == LAUNCHD_TRANSITION_ATTEMPTS {
+            let details = String::from_utf8_lossy(&output.stderr);
+            let details = details.trim();
+            if details.is_empty() {
+                bail!(
+                    "could not bootstrap the Tascarrel LaunchAgent: command exited with {}",
+                    output.status
+                );
+            }
+            bail!("could not bootstrap the Tascarrel LaunchAgent: {details}");
+        }
+        thread::sleep(LAUNCHD_TRANSITION_INTERVAL);
+    }
+
+    bail!("launchctl bootstrap was not attempted");
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_macos_service_unloaded(service: &str) -> Result<()> {
+    for attempt in 0..LAUNCHD_TRANSITION_ATTEMPTS {
+        if !macos_service_loaded(service)? {
+            return Ok(());
+        }
+        if attempt + 1 < LAUNCHD_TRANSITION_ATTEMPTS {
+            thread::sleep(LAUNCHD_TRANSITION_INTERVAL);
+        }
+    }
+    bail!("could not unload the Tascarrel LaunchAgent");
 }
 
 fn absolute_environment(name: &str) -> Option<PathBuf> {
