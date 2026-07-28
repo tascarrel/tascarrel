@@ -128,7 +128,7 @@ impl OpenSubscription for api::WorkspaceListChangedSubscription {
         context
             .state()
             .workspaces()
-            .subscribe(self)
+            .subscribe(&self)
             .map_err(workspace_error)
     }
 }
@@ -164,7 +164,7 @@ impl OpenSubscription for api::WorkspaceVmLogSubscription {
         context
             .state()
             .workspaces()
-            .subscribe_vm_log(self)
+            .subscribe_vm_log(&self)
             .map_err(workspace_error)
     }
 }

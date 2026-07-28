@@ -1137,7 +1137,8 @@ mod tests {
         assert!(process.no_new_privileges);
     }
 
-    /// Verifies virtualization retains the standard AppArmor profile for execs.
+    /// Verifies virtualization retains the standard `AppArmor` profile for
+    /// execs.
     #[test]
     fn standard_exec_uses_the_standard_apparmor_profile() {
         let mut account = container_account();

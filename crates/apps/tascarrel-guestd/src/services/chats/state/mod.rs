@@ -88,7 +88,8 @@ pub struct ChatState {
 }
 
 impl ChatState {
-    /// Opens the durable state layer over the guest daemon's SQLite connection.
+    /// Opens the durable state layer over the guest daemon's `SQLite`
+    /// connection.
     pub fn new(database: Connection) -> BoxFuture<'static, Result<Self, ChatStateError>> {
         Box::pin(async move {
             let storage = Storage::open(database);
@@ -158,9 +159,13 @@ impl ChatState {
     /// foreign-instance, or evicted cursor starts with a fresh snapshot.
     pub fn subscribe_chats(
         &self,
-        subscription: ChatListChangedSubscription,
+        subscription: &ChatListChangedSubscription,
     ) -> Result<ChatListStoreSubscription, ChatStateError> {
-        let cursor = subscription.cursor.map(runtime_stamp).transpose()?;
+        let cursor = subscription
+            .cursor
+            .as_ref()
+            .map(runtime_stamp)
+            .transpose()?;
         Ok(self.layer.subscribe_chats(cursor))
     }
 
@@ -175,7 +180,11 @@ impl ChatState {
     ) -> BoxFuture<'_, Result<ChatStoreSubscription, ChatStateError>> {
         let layer = Arc::clone(&self.layer);
         Box::pin(async move {
-            let cursor = subscription.cursor.map(runtime_stamp).transpose()?;
+            let cursor = subscription
+                .cursor
+                .as_ref()
+                .map(runtime_stamp)
+                .transpose()?;
             layer
                 .subscribe_chat(subscription.chat_id, cursor)
                 .await
@@ -497,6 +506,7 @@ struct ReconciledEvent {
 const EVENT_CAPACITY: NonZeroUsize =
     NonZeroUsize::new(16_384).expect("chat event capacity is non-zero");
 
+#[allow(clippy::too_many_lines)] // One exhaustive reducer keeps event invariants visible.
 fn reconcile_harness_event(
     snapshot: &Chat,
     binding_id: &ChatBindingId,
@@ -625,7 +635,7 @@ fn reconcile_harness_event(
                         let mut turn = turn.clone();
                         turn.state = state;
                         turn.completed_at = Some(occurred_at);
-                        turn.error = error.clone();
+                        turn.error.clone_from(&error);
                         if let Some(usage) = &mut turn.usage {
                             usage.state = ChatUsageState::Settled;
                         }
@@ -919,6 +929,7 @@ fn has_inflight_state(snapshot: &Chat, binding_id: &ChatBindingId) -> bool {
         })
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn state_layer_error(error: Report<StateLayerError>) -> ChatStateError {
     let kind = match error.error() {
         StateLayerError::Reconciliation => ChatStateErrorKind::Internal,
@@ -945,7 +956,7 @@ fn invalid_event(message: impl Into<String>) -> ChatStateError {
 }
 
 fn runtime_stamp(
-    stamp: tascarrel_api::types::store::Stamp,
+    stamp: &tascarrel_api::types::store::Stamp,
 ) -> Result<tascarrel_store::Stamp, ChatStateError> {
     let generation = stamp
         .generation

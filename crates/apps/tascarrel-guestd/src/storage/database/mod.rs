@@ -1,6 +1,6 @@
-//! Shared SQLite database for durable guest state.
+//! Shared `SQLite` database for durable guest state.
 //!
-//! [`Database`] owns the guest daemon's serialized SQLite connection. Opening
+//! [`Database`] owns the guest daemon's serialized `SQLite` connection. Opening
 //! it configures the connection, validates the migration ledger, and applies
 //! every pending schema migration before feature storage becomes available.
 
@@ -20,14 +20,14 @@ use tokio_rusqlite::rusqlite;
 use tokio_rusqlite::rusqlite::Transaction;
 use tokio_rusqlite::rusqlite::TransactionBehavior;
 
-/// A configured, migrated connection to the guest daemon's SQLite database.
+/// A configured, migrated connection to the guest daemon's `SQLite` database.
 #[derive(Clone)]
 pub struct Database {
     connection: Connection,
 }
 
 impl Database {
-    /// Opens a serialized SQLite connection and applies pending migrations.
+    /// Opens a serialized `SQLite` connection and applies pending migrations.
     ///
     /// # Errors
     ///
@@ -226,7 +226,7 @@ fn unavailable(path: &Path, source: impl std::fmt::Display) -> Report<DatabaseEr
         .field("path", path)
 }
 
-/// Builds a report for an SQLite initialization failure.
+/// Builds a report for an `SQLite` initialization failure.
 fn initialization_failure(
     operation: &'static str,
     source: impl std::fmt::Display,

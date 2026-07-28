@@ -898,6 +898,7 @@ impl PodService {
 
     /// Starts the concrete runc, namespace, and network-service resources for
     /// one record.
+    #[allow(clippy::too_many_lines)] // Pod startup keeps fail-closed resource cleanup in one scope.
     async fn start_record(
         &self,
         record: &PodRecord,
@@ -1863,6 +1864,7 @@ async fn acquire_pod_control_listener(
 }
 
 /// Reconciles durable records and Btrfs storage after guestd starts.
+#[allow(clippy::too_many_lines)] // Recovery keeps cross-store reconciliation decisions together.
 async fn recover(
     state: &PodStateRepository,
     storage: &Arc<BtrfsStore>,
@@ -1921,18 +1923,7 @@ async fn recover(
                 .map_err(state_error)?;
             continue;
         }
-        if !stored_ids.contains(runtime_id.as_str()) {
-            let roots = Arc::clone(nix_roots);
-            let withdrawn_id = runtime_id.clone();
-            blocking("withdraw roots for pod without storage", move || {
-                roots.withdraw(&withdrawn_id)
-            })
-            .await?;
-            record.pod.status = api::PodState::Failed(api::PodFailure {
-                message: "pod storage is missing".into(),
-                failed_at: Timestamp::now(),
-            });
-        } else {
+        if stored_ids.contains(runtime_id.as_str()) {
             let pod_storage = stored
                 .iter()
                 .find(|storage| storage.id() == &runtime_id)
@@ -1965,6 +1956,17 @@ async fn recover(
                 record.persistent_state = PersistentPodState::Ready;
                 record.pod.status = api::PodState::Stopped;
             }
+        } else {
+            let roots = Arc::clone(nix_roots);
+            let withdrawn_id = runtime_id.clone();
+            blocking("withdraw roots for pod without storage", move || {
+                roots.withdraw(&withdrawn_id)
+            })
+            .await?;
+            record.pod.status = api::PodState::Failed(api::PodFailure {
+                message: "pod storage is missing".into(),
+                failed_at: Timestamp::now(),
+            });
         }
         state.save(record.clone()).await.map_err(state_error)?;
         recovered.insert(record.pod.id.clone(), record);

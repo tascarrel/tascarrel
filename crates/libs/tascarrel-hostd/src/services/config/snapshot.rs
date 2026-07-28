@@ -410,7 +410,6 @@ impl ConfigLoadError {
             Self::UnknownFields(fields) => {
                 format!("config.toml contains unknown fields: {}", fields.join(", "))
             }
-            Self::InvalidSlashCommand { .. } => self.to_string(),
             _ => self.to_string(),
         }
     }

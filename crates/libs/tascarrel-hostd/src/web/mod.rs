@@ -539,6 +539,7 @@ struct UploadChatAttachmentQuery {
     name: String,
 }
 
+#[allow(clippy::too_many_lines)] // Upload streaming keeps peer cancellation and response ordering together.
 #[tracing::instrument(
     level = "debug",
     skip(state, input, headers, body),
@@ -677,6 +678,7 @@ struct ReadChatAttachmentQuery {
     attachment_id: String,
 }
 
+#[allow(clippy::too_many_lines)] // Response validation and security headers form one delivery boundary.
 #[tracing::instrument(
     level = "debug",
     skip(state, input),

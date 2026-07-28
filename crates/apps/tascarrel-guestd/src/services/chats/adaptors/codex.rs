@@ -521,7 +521,8 @@ impl HarnessEventStream for CodexEvents {
                 };
                 match message {
                     CodexMessage::Notification { method, params } => {
-                        if let Some(event) = normalize_notification(&self.state, &method, params)? {
+                        if let Some(event) = normalize_notification(&self.state, &method, &params)?
+                        {
                             return Ok(Some(event));
                         }
                     }
@@ -721,14 +722,14 @@ async fn list_models(server: &CodexAppServer) -> Result<ArcVec<ChatModel>, Harne
 fn normalize_notification(
     state: &Arc<Mutex<CodexSessionState>>,
     method: &str,
-    params: RawJson,
+    params: &RawJson,
 ) -> Result<Option<HarnessEvent>, HarnessError> {
-    if !belongs_to_session(state, &params)? {
+    if !belongs_to_session(state, params)? {
         return Ok(None);
     }
     match method {
         "thread/started" => {
-            let params: ThreadStartedParams = decode(&params, method)?;
+            let params: ThreadStartedParams = decode(params, method)?;
             let provider_session_id = ProviderSessionId(params.thread.id);
             if provider_session_id != lock(state).provider_session_id {
                 return Ok(None);
@@ -743,20 +744,23 @@ fn normalize_notification(
                 },
             )))
         }
-        "turn/started" => turn_started(state, decode(&params, method)?).map(Some),
-        "turn/completed" => turn_completed(state, decode(&params, method)?).map(Some),
-        "thread/tokenUsage/updated" => token_usage_updated(state, decode(&params, method)?),
-        "item/started" => item_started(state, decode(&params, method)?).map(Some),
-        "item/completed" => item_completed(state, decode(&params, method)?).map(Some),
+        "turn/started" => Ok(Some(turn_started(state, decode(params, method)?))),
+        "turn/completed" => Ok(Some(turn_completed(state, decode(params, method)?))),
+        "thread/tokenUsage/updated" => Ok(token_usage_updated(state, decode(params, method)?)),
+        "item/started" => item_started(state, decode(params, method)?).map(Some),
+        "item/completed" => item_completed(state, decode(params, method)?).map(Some),
         "item/agentMessage/delta"
         | "item/reasoning/textDelta"
         | "item/reasoning/summaryTextDelta"
         | "item/plan/delta"
         | "item/commandExecution/outputDelta"
-        | "item/fileChange/outputDelta" => content_delta(state, decode(&params, method)?).map(Some),
-        "serverRequest/resolved" => request_resolved(state, decode(&params, method)?).map(Some),
+        | "item/fileChange/outputDelta" => Ok(Some(content_delta(state, decode(params, method)?))),
+        "serverRequest/resolved" => {
+            let params = decode(params, method)?;
+            Ok(Some(request_resolved(state, &params)))
+        }
         "warning" | "configWarning" => {
-            let warning: WarningParams = decode(&params, method)?;
+            let warning: WarningParams = decode(params, method)?;
             let message = warning
                 .message
                 .or(warning.summary)
@@ -778,7 +782,7 @@ fn normalize_notification(
             )))
         }
         "error" => {
-            let error_params: ErrorNotificationParams = decode(&params, method)?;
+            let error_params: ErrorNotificationParams = decode(params, method)?;
             let message = error_params
                 .error
                 .map(|error| error.message)
@@ -793,7 +797,7 @@ fn normalize_notification(
             )))
         }
         "model/rerouted" => {
-            let params: ModelReroutedParams = decode(&params, method)?;
+            let params: ModelReroutedParams = decode(params, method)?;
             let model = params.to_model.or(params.model).ok_or_else(|| {
                 harness_error(HarnessErrorKind::Protocol, "model change has no model")
             })?;
@@ -807,7 +811,7 @@ fn normalize_notification(
                 HarnessEventPayload::ModelChanged { model: selection },
             )))
         }
-        _ => Ok(Some(unknown_event(state, method.to_owned(), &params))),
+        _ => Ok(Some(unknown_event(state, method.to_owned(), params))),
     }
 }
 
@@ -890,7 +894,7 @@ fn normalize_user_input_request(
 fn turn_started(
     state: &Arc<Mutex<CodexSessionState>>,
     params: TurnLifecycleParams,
-) -> Result<HarnessEvent, HarnessError> {
+) -> HarnessEvent {
     let provider_turn_id = params.turn.id;
     let mut session = lock(state);
     let turn_id = tascarrel_turn_id(&mut session, &provider_turn_id);
@@ -906,7 +910,7 @@ fn turn_started(
     session.info.state = SessionState::Running;
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Ok(event(
+    event(
         references(
             Some(provider_session_id),
             Some(ProviderTurnId(provider_turn_id)),
@@ -917,13 +921,13 @@ fn turn_started(
         None,
         None,
         HarnessEventPayload::TurnStarted,
-    ))
+    )
 }
 
 fn turn_completed(
     state: &Arc<Mutex<CodexSessionState>>,
     params: TurnLifecycleParams,
-) -> Result<HarnessEvent, HarnessError> {
+) -> HarnessEvent {
     let provider_turn_id = params.turn.id;
     let turn_state = match params.turn.status.as_deref() {
         Some("completed") => ChatTurnState::Completed,
@@ -953,7 +957,7 @@ fn turn_completed(
     }
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Ok(event(
+    event(
         references(
             Some(provider_session_id),
             Some(ProviderTurnId(provider_turn_id)),
@@ -967,13 +971,13 @@ fn turn_completed(
             state: turn_state,
             error: failure,
         },
-    ))
+    )
 }
 
 fn token_usage_updated(
     state: &Arc<Mutex<CodexSessionState>>,
     params: TokenUsageParams,
-) -> Result<Option<HarnessEvent>, HarnessError> {
+) -> Option<HarnessEvent> {
     let latest = params.token_usage.last;
     let latest = ChatTokenUsage {
         input_tokens: latest.input_tokens,
@@ -989,7 +993,7 @@ fn token_usage_updated(
         .as_ref()
         .is_none_or(|active| active.0 != params.turn_id)
     {
-        return Ok(None);
+        return None;
     }
     let turn_id = tascarrel_turn_id(&mut session, &params.turn_id);
     let tokens = session.active_turn_usage.get_or_insert_with(empty_usage);
@@ -1010,7 +1014,7 @@ fn token_usage_updated(
         .into();
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Ok(Some(event(
+    Some(event(
         references(
             Some(provider_session_id),
             Some(ProviderTurnId(params.turn_id)),
@@ -1029,7 +1033,7 @@ fn token_usage_updated(
             },
             state: ChatUsageState::Provisional,
         },
-    )))
+    ))
 }
 
 fn item_started(
@@ -1097,13 +1101,13 @@ fn item_completed(
 fn content_delta(
     state: &Arc<Mutex<CodexSessionState>>,
     params: ContentDeltaParams,
-) -> Result<HarnessEvent, HarnessError> {
+) -> HarnessEvent {
     let mut session = lock(state);
     let turn_id = tascarrel_turn_id(&mut session, &params.turn_id);
     let item_id = tascarrel_item_id(&mut session, &params.item_id);
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Ok(event(
+    event(
         references(
             Some(provider_session_id),
             Some(ProviderTurnId(params.turn_id)),
@@ -1117,23 +1121,23 @@ fn content_delta(
             item_id,
             delta: params.delta.into(),
         }),
-    ))
+    )
 }
 
 fn request_resolved(
     state: &Arc<Mutex<CodexSessionState>>,
-    params: RequestResolvedParams,
-) -> Result<HarnessEvent, HarnessError> {
+    params: &RequestResolvedParams,
+) -> HarnessEvent {
     let mut session = lock(state);
     let Some(request_id) = session.provider_requests.remove(&params.request_id) else {
         drop(session);
-        return Ok(base_event(
+        return base_event(
             state,
             HarnessEventPayload::Warning {
                 code: "unknown_resolved_request".to_owned(),
                 message: "Codex resolved an unknown user-input request".to_owned(),
             },
-        ));
+        );
     };
     session.pending_requests.remove(&request_id);
     session.info.state = SessionState::Running;
@@ -1141,7 +1145,7 @@ fn request_resolved(
     let provider_turn_id = session.provider_active_turn_id.clone();
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Ok(event(
+    event(
         references(
             Some(provider_session_id),
             provider_turn_id,
@@ -1152,7 +1156,7 @@ fn request_resolved(
         None,
         Some(request_id),
         HarnessEventPayload::RequestResolved,
-    ))
+    )
 }
 
 fn item_content(
@@ -2158,6 +2162,7 @@ struct NativeTokenUsage {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_field_names)] // Field names mirror Codex's token-usage schema.
 struct NativeTokenCounts {
     #[serde(default)]
     input_tokens: u64,

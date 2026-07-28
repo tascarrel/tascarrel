@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -273,6 +274,7 @@ impl Harness for ClaudeCodeAdaptor {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Session startup keeps ordered provider handshakes together.
     fn start_session(
         &self,
         request: StartSessionRequest,
@@ -422,6 +424,7 @@ impl HarnessControl for ClaudeControl {
 }
 
 impl ClaudeControl {
+    #[allow(clippy::too_many_lines)] // Prompt submission keeps the provider turn transition atomic.
     async fn send_prompt(
         &self,
         prompt: HarnessPrompt,
@@ -890,21 +893,21 @@ fn normalize_stream_event(
         "content_block_start" => {
             let event: ContentBlockStartEvent =
                 decode(&stream_event.event, "content block start event")?;
-            content_block_start(
+            Ok(content_block_start(
                 state,
                 event.index,
                 decode_claude_block(&event.content_block)?,
-            )
+            ))
         }
         "content_block_delta" => {
             let event: ContentBlockDeltaEvent =
                 decode(&stream_event.event, "content block delta event")?;
-            content_block_delta(state, event.index, event.delta)
+            Ok(content_block_delta(state, event.index, event.delta))
         }
         "content_block_stop" => {
             let event: ContentBlockStopEvent =
                 decode(&stream_event.event, "content block stop event")?;
-            content_block_stop(state, event.index)
+            Ok(content_block_stop(state, event.index))
         }
         "message_stop" | "message_delta" | "ping" => Ok(Vec::new()),
         _ => Ok(vec![unknown_event(
@@ -919,13 +922,13 @@ fn content_block_start(
     state: &Arc<Mutex<ClaudeSessionState>>,
     index: u64,
     block: ClaudeBlock,
-) -> Result<Vec<HarnessEvent>, HarnessError> {
+) -> Vec<HarnessEvent> {
     let mut events = ensure_native_turn(state);
     let Some(turn_id) = current_turn(state) else {
-        return Ok(events);
+        return events;
     };
     if native_turn_is_completed(state, &turn_id) {
-        return Ok(events);
+        return events;
     }
     match block {
         ClaudeBlock::Text { text } => start_text_block(
@@ -958,7 +961,7 @@ fn content_block_start(
             if lock(state).completed_provider_items.contains(&id)
                 || lock(state).tools.contains_key(&id)
             {
-                return Ok(events);
+                return events;
             }
             let kind = tool_kind(&name);
             let item_id = ChatItemId::generate();
@@ -984,9 +987,9 @@ fn content_block_start(
                 provider_item_id,
                 kind,
             ));
-            Ok(events)
+            events
         }
-        ClaudeBlock::ToolResult { .. } | ClaudeBlock::Other => Ok(events),
+        ClaudeBlock::ToolResult { .. } | ClaudeBlock::Other => events,
     }
 }
 
@@ -997,13 +1000,13 @@ fn start_text_block(
     index: u64,
     kind: ChatItemKind,
     initial: String,
-) -> Result<Vec<HarnessEvent>, HarnessError> {
+) -> Vec<HarnessEvent> {
     let provider_item_id = ProviderItemId(content_block_provider_id(state, index));
     if lock(state)
         .completed_provider_items
         .contains(&provider_item_id.0)
     {
-        return Ok(std::mem::take(events));
+        return std::mem::take(events);
     }
     let item_id = ChatItemId::generate();
     lock(state).blocks.insert(
@@ -1031,19 +1034,19 @@ fn start_text_block(
             initial,
         ));
     }
-    Ok(std::mem::take(events))
+    std::mem::take(events)
 }
 
 fn content_block_delta(
     state: &Arc<Mutex<ClaudeSessionState>>,
     index: u64,
     delta: ClaudeDelta,
-) -> Result<Vec<HarnessEvent>, HarnessError> {
+) -> Vec<HarnessEvent> {
     let Some(turn_id) = current_turn(state) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     if native_turn_is_completed(state, &turn_id) {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let text = match delta {
         ClaudeDelta::TextDelta { text } => text,
@@ -1051,56 +1054,53 @@ fn content_block_delta(
         ClaudeDelta::InputJsonDelta { partial_json } => {
             let mut session = lock(state);
             let Some(tool_id) = session.tool_indices.get(&index).cloned() else {
-                return Ok(Vec::new());
+                return Vec::new();
             };
             let Some(tool) = session.tools.get_mut(&tool_id) else {
-                return Ok(Vec::new());
+                return Vec::new();
             };
             tool.partial_input.push_str(&partial_json);
             if let Ok(input) = serde_json::from_str::<RawJson>(&tool.partial_input) {
                 tool.input = input;
             }
-            return Ok(Vec::new());
+            return Vec::new();
         }
-        ClaudeDelta::Other => return Ok(Vec::new()),
+        ClaudeDelta::Other => return Vec::new(),
     };
     if text.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let (item_id, provider_item_id) = {
         let mut session = lock(state);
         let Some(block) = session.blocks.get_mut(&index) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         block.text.push_str(&text);
         (block.item_id.clone(), block.provider_item_id.clone())
     };
-    Ok(vec![content_delta_event(
+    vec![content_delta_event(
         state,
         turn_id,
         item_id,
         provider_item_id,
         text,
-    )])
+    )]
 }
 
-fn content_block_stop(
-    state: &Arc<Mutex<ClaudeSessionState>>,
-    index: u64,
-) -> Result<Vec<HarnessEvent>, HarnessError> {
+fn content_block_stop(state: &Arc<Mutex<ClaudeSessionState>>, index: u64) -> Vec<HarnessEvent> {
     let Some(turn_id) = current_turn(state) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     if native_turn_is_completed(state, &turn_id) {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let Some(block) = lock(state).blocks.remove(&index) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     lock(state)
         .completed_provider_items
         .insert(block.provider_item_id.0.clone());
-    Ok(vec![item_completed_event(
+    vec![item_completed_event(
         state,
         turn_id,
         block.item_id,
@@ -1111,7 +1111,7 @@ fn content_block_stop(
             value: block.text.into(),
         })]
         .into(),
-    )])
+    )]
 }
 
 fn normalize_assistant(
@@ -1286,7 +1286,7 @@ fn normalize_result(
             None,
             None,
             HarnessEventPayload::TurnUsageUpdated {
-                usage: normalize_usage(usage, message.model_usage),
+                usage: normalize_usage(&usage, message.model_usage),
                 state: ChatUsageState::Settled,
             },
         ));
@@ -1530,10 +1530,9 @@ fn tool_content(
 ) -> Result<ArcVec<ChatContent>, HarnessError> {
     if tool.kind == ChatItemKind::Plan
         && let Ok(input) = serde_json::from_str::<PlanToolInput>(tool.input.get())
+        && let Some(plan) = input.plan.or(input.content)
     {
-        if let Some(plan) = input.plan.or(input.content) {
-            return Ok(vec![ChatContent::Text(TextContent { value: plan.into() })].into());
-        }
+        return Ok(vec![ChatContent::Text(TextContent { value: plan.into() })].into());
     }
     let value = serde_json::to_value(StructuredToolContent {
         tool: &tool.name,
@@ -1831,7 +1830,8 @@ async fn prompt_content(
         }
         prompt_text.push_str("<tascarrel_attachments>\n");
         for attachment in files {
-            prompt_text.push_str(&format!("- {}: {}\n", attachment.name, attachment.path));
+            writeln!(prompt_text, "- {}: {}", attachment.name, attachment.path)
+                .expect("writing to a String cannot fail");
         }
         prompt_text.push_str("</tascarrel_attachments>");
     }
@@ -2053,10 +2053,10 @@ fn effort_label(effort: &str) -> String {
 }
 
 fn normalize_usage(
-    usage: NativeUsage,
+    usage: &NativeUsage,
     model_usage: HashMap<String, NativeUsage>,
 ) -> ChatUsageSnapshot {
-    let tokens = token_usage(&usage);
+    let tokens = token_usage(usage);
     let models = model_usage
         .into_iter()
         .map(|(model, usage)| ChatModelUsage {
@@ -2859,6 +2859,7 @@ struct ResultMessage {
 }
 
 #[derive(Clone, Deserialize)]
+#[allow(clippy::struct_field_names)] // Field names mirror Claude's token-usage schema.
 struct NativeUsage {
     #[serde(default, alias = "inputTokens")]
     input_tokens: u64,

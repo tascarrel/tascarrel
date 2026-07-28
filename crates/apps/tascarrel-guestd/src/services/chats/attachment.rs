@@ -67,6 +67,7 @@ impl AttachmentStore {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Validation and atomic publication share one cleanup scope.
     pub async fn store<R>(
         &self,
         request: StoreChatAttachmentRequest,

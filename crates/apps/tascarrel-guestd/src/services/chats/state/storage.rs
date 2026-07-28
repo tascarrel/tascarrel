@@ -1,4 +1,4 @@
-//! SQLite storage used by the durable state layer.
+//! `SQLite` storage used by the durable state layer.
 
 use reportify::Report;
 use reportify::ResultExt as _;
@@ -22,7 +22,7 @@ reportify::new_whatever_type! {
     pub StorageError
 }
 
-/// Serialized access to the state layer's SQLite database.
+/// Serialized access to the state layer's `SQLite` database.
 pub struct Storage {
     database: Connection,
 }
@@ -481,13 +481,13 @@ fn apply_durable_update(
         store_resume_cursor(transaction, chat_id, &resume_cursor)?;
     }
     for turn in update.turns {
-        store_turn(transaction, turn)?;
+        store_turn(transaction, &turn)?;
     }
     for entry in update.timeline {
-        store_timeline_entry(transaction, entry)?;
+        store_timeline_entry(transaction, &entry)?;
     }
     for attachment in update.attachments {
-        store_attachment(transaction, attachment)?;
+        store_attachment(transaction, &attachment)?;
     }
     Ok(())
 }
@@ -544,7 +544,7 @@ fn store_resume_cursor(
 
 fn store_turn(
     transaction: &rusqlite::Transaction<'_>,
-    stored: StoredTurn,
+    stored: &StoredTurn,
 ) -> Result<(), Report<StorageError>> {
     let turn_index = i64::try_from(stored.turn_index)
         .whatever("turn index does not fit in an SQLite INTEGER")?;
@@ -571,7 +571,7 @@ fn store_turn(
 
 fn store_timeline_entry(
     transaction: &rusqlite::Transaction<'_>,
-    stored: StoredTimelineEntry,
+    stored: &StoredTimelineEntry,
 ) -> Result<(), Report<StorageError>> {
     let entry_index = i64::try_from(stored.entry_index)
         .whatever("timeline entry index does not fit in an SQLite INTEGER")?;
@@ -606,7 +606,7 @@ fn store_timeline_entry(
 
 fn store_attachment(
     transaction: &rusqlite::Transaction<'_>,
-    stored: StoredAttachment,
+    stored: &StoredAttachment,
 ) -> Result<(), Report<StorageError>> {
     let attachment_json = encode_json(
         &stored.attachment,

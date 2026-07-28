@@ -51,8 +51,8 @@ use crate::control_plane::HostClientError;
 
 const DEFAULT_MAX_SESSIONS: usize = 256;
 const DEFAULT_MAX_EXTENSIONS: usize = 128;
-const DEFAULT_EXTENSION_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_EXTENSION_INSTALL_TIMEOUT: Duration = Duration::from_mins(5);
+const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_mins(2);
 const DEFAULT_PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(1);

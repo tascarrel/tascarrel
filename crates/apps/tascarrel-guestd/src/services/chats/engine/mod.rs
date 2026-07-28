@@ -125,7 +125,7 @@ pub struct ChatEngineOptions {
 impl Default for ChatEngineOptions {
     fn default() -> Self {
         Self {
-            binding_idle_timeout: Duration::from_secs(5 * 60),
+            binding_idle_timeout: Duration::from_mins(5),
             max_active_bindings: 4,
             attachment_store_path: None,
             attachment_binding_path: None,
@@ -498,7 +498,7 @@ impl ChatEngine {
     /// Subscribes to snapshots and ordered changes for the chat list.
     pub fn subscribe_chats(
         &self,
-        subscription: ChatListChangedSubscription,
+        subscription: &ChatListChangedSubscription,
     ) -> Result<ChatListStoreSubscription, ChatEngineError> {
         self.inner
             .state
@@ -979,6 +979,7 @@ impl EngineInner {
             .await;
     }
 
+    #[allow(clippy::too_many_lines)] // Binding consumption keeps ordered lifecycle cleanup together.
     async fn consume_binding(
         self: &Arc<Self>,
         chat_id: ChatId,
@@ -1061,15 +1062,13 @@ impl EngineInner {
 
         if activation == BindingActivation::Attached {
             self.send_next_queued(&chat_id, &binding_id).await;
-        } else {
-            if let Err(error) = binding.control.detach().await {
-                tracing::warn!(
-                    chat_id = %chat_id.0,
-                    binding_id = %binding_id.0,
-                    message = %error.message,
-                    "failed to finish detaching a chat binding"
-                );
-            }
+        } else if let Err(error) = binding.control.detach().await {
+            tracing::warn!(
+                chat_id = %chat_id.0,
+                binding_id = %binding_id.0,
+                message = %error.message,
+                "failed to finish detaching a chat binding"
+            );
         }
 
         let mut final_error = None;
@@ -1152,7 +1151,7 @@ impl EngineInner {
 
     async fn begin_detach(self: &Arc<Self>, chat_id: ChatId) -> Result<(), ChatEngineError> {
         let operation_lock = self.chat_operation_lock(&chat_id);
-        let _guard = operation_lock.lock().await;
+        let _operation_guard = operation_lock.lock().await;
         if self
             .state
             .chat(chat_id.clone())
@@ -1285,8 +1284,8 @@ impl EngineInner {
                 false
             }
         };
-        if restored {
-            if let Err(state_error) = self
+        if restored
+            && let Err(state_error) = self
                 .state
                 .set_binding(
                     chat_id,
@@ -1297,13 +1296,12 @@ impl EngineInner {
                     Some(binding_error(binding_id.clone(), error)),
                 )
                 .await
-            {
-                tracing::warn!(
-                    binding_id = %binding_id.0,
-                    message = %state_error.message,
-                    "failed to restore chat binding state after detach failed"
-                );
-            }
+        {
+            tracing::warn!(
+                binding_id = %binding_id.0,
+                message = %state_error.message,
+                "failed to restore chat binding state after detach failed"
+            );
         }
     }
 
@@ -1320,7 +1318,7 @@ impl EngineInner {
             harness_prompt,
         } = prepared;
         let operation_lock = self.chat_operation_lock(&action.chat_id);
-        let _guard = operation_lock.lock().await;
+        let operation_guard = operation_lock.lock().await;
         let target = {
             let mut runtime = lock(&self.runtime);
             let chat = runtime.chat_mut(&action.chat_id);
@@ -1358,7 +1356,7 @@ impl EngineInner {
                     .set_prompt_queue(action.chat_id.clone(), prompts)
                     .await
                     .map_err(state_api_error)?;
-                drop(_guard);
+                drop(operation_guard);
                 if attach {
                     self.schedule_attach(action.chat_id, processes, pods, network_service)
                         .await?;
@@ -1496,15 +1494,15 @@ impl EngineInner {
                 "failed to persist the delivered chat prompt queue"
             );
         }
-        if let Some(model) = model {
-            if let Err(error) = self.state.set_model(chat_id.clone(), model).await {
-                tracing::warn!(
-                    chat_id = %chat_id.0,
-                    binding_id = %binding_id.0,
-                    message = %error.message,
-                    "failed to persist the model used by a queued chat prompt"
-                );
-            }
+        if let Some(model) = model
+            && let Err(error) = self.state.set_model(chat_id.clone(), model).await
+        {
+            tracing::warn!(
+                chat_id = %chat_id.0,
+                binding_id = %binding_id.0,
+                message = %error.message,
+                "failed to persist the model used by a queued chat prompt"
+            );
         }
     }
 
@@ -1979,8 +1977,8 @@ impl BindingSlot {
 
     fn control(&self) -> Option<Arc<dyn HarnessBindingControl>> {
         match self {
-            Self::Attached { control, .. } => Some(Arc::clone(control)),
-            Self::Detaching {
+            Self::Attached { control, .. }
+            | Self::Detaching {
                 control: Some(control),
                 ..
             } => Some(Arc::clone(control)),
@@ -2146,6 +2144,7 @@ fn binding_api_error(error: HarnessBindingError) -> ChatEngineError {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn pod_api_error(report: Report<PodServiceError>) -> ChatEngineError {
     match report.error() {
         PodServiceError::InvalidRequest(message) => ChatEngineError {
@@ -2186,5 +2185,5 @@ impl std::error::Error for ChatEngineError {}
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

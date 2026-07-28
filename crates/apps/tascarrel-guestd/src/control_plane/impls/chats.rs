@@ -411,7 +411,7 @@ impl OpenSubscription for api::ChatListChangedSubscription {
             .state()
             .chats()
             .engine()
-            .subscribe_chats(self)
+            .subscribe_chats(&self)
             .map_err(chat_error)
     }
 }

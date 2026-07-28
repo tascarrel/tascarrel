@@ -76,7 +76,7 @@ const CODEX_VERSION: &str = "0.144.4";
 const CLAUDE_CODE_VERSION: &str = "2.1.220";
 const TASCI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const INSTALL_RETRY_DELAY: Duration = Duration::from_secs(30);
-const INSTALL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const INSTALL_DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(2);
 const PRICING_RETRY_DELAY: Duration = Duration::from_secs(30);
 const PRICING_REFRESH_INTERVAL: Duration = Duration::from_hours(24);
 const MAX_ARCHIVE_BYTES: u64 = 400 * 1024 * 1024;
@@ -1506,24 +1506,24 @@ fn prepare_directory(path: &Path, mode: u32) -> io::Result<()> {
 
 fn prepare_credential_directory(
     path: &Path,
-    harness_uid: u32,
-    harness_gid: u32,
+    owner_user_id: u32,
+    owner_group_id: u32,
 ) -> Result<(), Report<HarnessManagerError>> {
     prepare_directory(path, 0o700).whatever("failed to prepare harness credential directory")?;
     nix::unistd::chown(
         path,
-        Some(nix::unistd::Uid::from_raw(harness_uid)),
-        Some(nix::unistd::Gid::from_raw(harness_gid)),
+        Some(nix::unistd::Uid::from_raw(owner_user_id)),
+        Some(nix::unistd::Gid::from_raw(owner_group_id)),
     )
     .whatever("failed to assign harness credential directory")
 }
 
 fn prepare_owned_credential_tree(
     root: &Path,
-    harness_uid: u32,
-    harness_gid: u32,
+    owner_user_id: u32,
+    owner_group_id: u32,
 ) -> Result<(), Report<HarnessManagerError>> {
-    fn prepare(path: &Path, harness_uid: u32, harness_gid: u32) -> io::Result<()> {
+    fn prepare(path: &Path, owner_user_id: u32, owner_group_id: u32) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
@@ -1537,8 +1537,8 @@ fn prepare_owned_credential_tree(
         }
         nix::unistd::chown(
             path,
-            Some(nix::unistd::Uid::from_raw(harness_uid)),
-            Some(nix::unistd::Gid::from_raw(harness_gid)),
+            Some(nix::unistd::Uid::from_raw(owner_user_id)),
+            Some(nix::unistd::Gid::from_raw(owner_group_id)),
         )?;
         let mode = if file_type.is_dir() {
             0o700
@@ -1550,20 +1550,20 @@ fn prepare_owned_credential_tree(
         fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
         if file_type.is_dir() {
             for entry in fs::read_dir(path)? {
-                prepare(&entry?.path(), harness_uid, harness_gid)?;
+                prepare(&entry?.path(), owner_user_id, owner_group_id)?;
             }
         }
         Ok(())
     }
 
-    prepare(root, harness_uid, harness_gid)
+    prepare(root, owner_user_id, owner_group_id)
         .whatever("failed to prepare owned harness credential state")
 }
 
 fn write_codex_config(
     root: &Path,
-    harness_uid: u32,
-    harness_gid: u32,
+    owner_user_id: u32,
+    owner_group_id: u32,
 ) -> Result<(), Report<HarnessManagerError>> {
     let path = root.join("config.toml");
     let mut file = open_credential_file(&path, true)
@@ -1578,8 +1578,8 @@ fn write_codex_config(
         .whatever("failed to protect Codex credential configuration")?;
     nix::unistd::fchown(
         &file,
-        Some(nix::unistd::Uid::from_raw(harness_uid)),
-        Some(nix::unistd::Gid::from_raw(harness_gid)),
+        Some(nix::unistd::Uid::from_raw(owner_user_id)),
+        Some(nix::unistd::Gid::from_raw(owner_group_id)),
     )
     .whatever("failed to assign Codex credential configuration")
 }
@@ -1613,8 +1613,8 @@ fn credentials_exist(root: &Path, candidates: &[&str]) -> io::Result<bool> {
 fn install_claude_token(
     root: &Path,
     token: &str,
-    harness_uid: u32,
-    harness_gid: u32,
+    owner_user_id: u32,
+    owner_group_id: u32,
 ) -> Result<(), Report<HarnessManagerError>> {
     let token = token.trim();
     if token.is_empty() || token.len() > MAX_SECRET_BYTES || token.chars().any(char::is_control) {
@@ -1635,8 +1635,8 @@ fn install_claude_token(
         .whatever("failed to protect Claude setup token")?;
     nix::unistd::fchown(
         &file,
-        Some(nix::unistd::Uid::from_raw(harness_uid)),
-        Some(nix::unistd::Gid::from_raw(harness_gid)),
+        Some(nix::unistd::Uid::from_raw(owner_user_id)),
+        Some(nix::unistd::Gid::from_raw(owner_group_id)),
     )
     .whatever("failed to assign Claude setup token")
 }
@@ -1729,6 +1729,7 @@ fn harness_manager_error(
     Report::new(HarnessManagerError::Internal(error.message))
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn title_manager_error(report: Report<HarnessManagerError>) -> TitleGenerationError {
     TitleGenerationError {
         code: "harness_unavailable".to_owned(),
@@ -1736,6 +1737,7 @@ fn title_manager_error(report: Report<HarnessManagerError>) -> TitleGenerationEr
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn manager_binding_error(error: Report<HarnessManagerError>) -> HarnessBindingError {
     HarnessBindingError {
         code: "harness_unavailable".to_owned(),

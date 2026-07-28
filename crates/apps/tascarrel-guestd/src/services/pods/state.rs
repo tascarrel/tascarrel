@@ -220,7 +220,7 @@ fn allocate_slot(database: &rusqlite::Connection) -> Result<u32, Report<PodState
 /// Failures while reading or updating persistent pod state.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum PodStateError {
-    /// The database connection or an SQLite operation failed.
+    /// The database connection or an `SQLite` operation failed.
     #[error("pod state database is unavailable")]
     Unavailable,
     /// A stored pod record violates the feature's invariants.
@@ -231,7 +231,7 @@ pub(crate) enum PodStateError {
     SlotExhausted,
 }
 
-/// SQLite representation decoded before domain validation.
+/// `SQLite` representation decoded before domain validation.
 struct RawPodRecord {
     id: String,
     title: String,

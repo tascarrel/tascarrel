@@ -768,7 +768,7 @@ impl ChangesServiceConfig {
             max_event_batch: 512,
             refresh_quiet_period: Duration::from_millis(350),
             refresh_max_delay: Duration::from_secs(2),
-            safety_rescan_interval: Duration::from_secs(300),
+            safety_rescan_interval: Duration::from_mins(5),
             store_history_limit: DEFAULT_STORE_HISTORY_LIMIT,
         }
     }

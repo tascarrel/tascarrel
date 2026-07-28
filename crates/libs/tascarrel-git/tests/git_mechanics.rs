@@ -107,6 +107,18 @@ fn opening_an_existing_store_does_not_create_it() {
     assert!(!cache.exists());
 }
 
+/// Verifies maintenance remains a no-op when an empty store has no packs to
+/// index.
+#[tokio::test]
+async fn maintenance_accepts_a_store_without_pack_files() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store = RepositoryStore::open(isolated_git(), temporary.path().join("cache.git"))
+        .await
+        .unwrap();
+
+    store.maintain().await.unwrap();
+}
+
 /// Verifies an empty upstream is retained as a successful snapshot without an
 /// advertised default branch.
 #[tokio::test]

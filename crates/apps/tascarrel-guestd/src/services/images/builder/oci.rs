@@ -2,7 +2,40 @@
 
 use std::collections::BTreeSet;
 
-use super::*;
+use super::Component;
+use super::Digest;
+use super::File;
+use super::ID_MAP_SIZE;
+use super::ImageBuildError;
+use super::ImageBuildLimits;
+use super::ImageConfig;
+use super::ImageId;
+use super::ImageUser;
+use super::OCI_IMAGE_CONFIG_MEDIA_TYPE;
+use super::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
+use super::OCI_LAYER_MEDIA_TYPE;
+use super::OCI_NONDISTRIBUTABLE_LAYER_MEDIA_TYPE;
+use super::OciImageConfiguration;
+use super::OciIndex;
+use super::OciLayerDescriptor;
+use super::OciManifest;
+use super::OsStr;
+use super::OsStrExt;
+use super::Path;
+use super::PathBuf;
+use super::READ_BUFFER_SIZE;
+use super::Read;
+use super::Sha256;
+use super::TreePolicy;
+use super::UmociConfiguration;
+use super::ValidatedOciImage;
+use super::fs;
+use super::read_bounded_metadata;
+use super::real_directory;
+use super::real_regular_file;
+use super::safe_component;
+use super::same_metadata;
+use super::validate_tree;
 
 pub(crate) fn validate_oci_archive(
     path: &Path,

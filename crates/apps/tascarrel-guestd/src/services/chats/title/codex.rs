@@ -75,6 +75,7 @@ impl CodexExecTitleGenerator {
         self
     }
 
+    #[allow(clippy::too_many_lines)] // The short-lived provider process has one ordered lifecycle.
     async fn run(
         &self,
         request: GenerateTitleRequest,

@@ -25,6 +25,7 @@ use crate::services::pods::PodService;
 /// Discovers guest-kernel nodes for passed-through USB devices and mirrors
 /// them into every running and future pod.
 #[derive(Debug)]
+#[allow(clippy::struct_field_names)] // Each root names a distinct device namespace.
 pub struct UsbGuest {
     usb_root: PathBuf,
     char_root: PathBuf,

@@ -210,29 +210,12 @@ impl Vm {
             }
         };
 
-        let invocation = match config.qemu_command() {
-            Ok(invocation) => invocation,
+        let mut child = match start_qemu_process(&config) {
+            Ok(child) => child,
             Err(error) => {
                 force_cleanup_virtiofsd(&mut virtiofsd).await;
                 cleanup_runtime(&config);
-                return Err(error.escalate(VmError::Invocation));
-            }
-        };
-        let mut command = Command::from(invocation.to_command());
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(source) => {
-                force_cleanup_virtiofsd(&mut virtiofsd).await;
-                cleanup_runtime(&config);
-                return Err(Report::new(VmError::Spawn {
-                    program: invocation.program().to_owned(),
-                    source,
-                }));
+                return Err(error);
             }
         };
         let mut serial_output_task = Some(start_serial_output(&mut child, serial_input));
@@ -620,6 +603,25 @@ fn required_executable_path(
             .unwrap_or("executable did not pass preflight")
             .to_owned(),
     }))
+}
+
+/// Starts QEMU with the configured invocation and managed standard streams.
+fn start_qemu_process(config: &VmConfig) -> Result<Child, Report<VmError>> {
+    let invocation = config
+        .qemu_command()
+        .map_err(|error| error.escalate(VmError::Invocation))?;
+    let mut command = Command::from(invocation.to_command());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    command.spawn().map_err(|source| {
+        Report::new(VmError::Spawn {
+            program: invocation.program().to_owned(),
+            source,
+        })
+    })
 }
 
 /// Creates or grows the managed sparse raw data disk off the async executor.

@@ -825,7 +825,8 @@ impl RepositoryStore {
     /// # Errors
     ///
     /// Returns a report when Git cannot update commit graphs, pack loose
-    /// objects, or perform an incremental repack.
+    /// objects, inspect the resulting pack directory, or perform an
+    /// incremental repack. Repacking is skipped when the store has no packs.
     #[tracing::instrument(
         name = "tascarrel_git.store.maintain",
         level = "debug",
@@ -842,11 +843,18 @@ impl RepositoryStore {
             "--quiet",
             "--task=commit-graph",
             "--task=loose-objects",
-            "--task=incremental-repack",
         ]);
         self.run(command, "maintain the managed repository", &[])
             .await?
             .success("maintain the managed repository")?;
+        if !has_pack_files(&self.core.path)? {
+            return Ok(());
+        }
+        let mut command = self.command();
+        command.args(["maintenance", "run", "--quiet", "--task=incremental-repack"]);
+        self.run(command, "incrementally repack the managed repository", &[])
+            .await?
+            .success("incrementally repack the managed repository")?;
         Ok(())
     }
 
@@ -1279,6 +1287,31 @@ fn validate_limits(limits: &GitLimits) -> GitResult<()> {
 
 fn receive_namespace_prefix(namespace: &ReceiveNamespace) -> String {
     format!("refs/namespaces/{namespace}/")
+}
+
+fn has_pack_files(repository: &Path) -> GitResult<bool> {
+    let entries = fs::read_dir(repository.join("objects/pack")).map_err(|source| {
+        Report::new(GitError::Io {
+            action: "inspect the managed Git pack directory",
+            source,
+        })
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| {
+            Report::new(GitError::Io {
+                action: "inspect the managed Git pack directory",
+                source,
+            })
+        })?;
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "pack")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Installs the immutable branch-and-tag allowlist used by receive-pack.

@@ -330,10 +330,12 @@ impl AsyncRead for SupervisedStdout {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn process_report(report: Report<crate::ProcessSupervisorError>) -> HarnessError {
     process_error(report.to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)] // This signature is used directly with Result::map_err.
 fn io_error(error: io::Error) -> HarnessError {
     process_error(error.to_string())
 }

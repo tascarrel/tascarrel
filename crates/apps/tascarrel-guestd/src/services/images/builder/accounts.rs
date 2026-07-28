@@ -1,6 +1,41 @@
 //! Image user, group, home-directory, and subordinate-ID normalization.
 
-use super::*;
+use super::Component;
+use super::DEVELOPMENT_USER_HOME;
+use super::DEVELOPMENT_USER_ID;
+use super::DEVELOPMENT_USER_NAME;
+use super::Digest;
+use super::DirBuilderExt;
+use super::File;
+use super::Gid;
+use super::GroupAccount;
+use super::ID_MAP_SIZE;
+use super::ImageBuildError;
+use super::ImageConfig;
+use super::ImageId;
+use super::ImageUser;
+use super::MAX_ACCOUNT_DATABASE_BYTES;
+use super::MetadataExt;
+use super::Mode;
+use super::NORMALIZED_IMAGE_ALGORITHM;
+use super::NORMALIZED_IMAGE_HASH_DOMAIN;
+use super::OFlags;
+use super::OpenOptions;
+use super::OpenOptionsExt;
+use super::PasswdAccount;
+use super::Path;
+use super::PathBuf;
+use super::PermissionsExt;
+use super::Read;
+use super::Sha256;
+use super::Uid;
+use super::Write;
+use super::fchown;
+use super::fs;
+use super::io;
+use super::open;
+use super::real_directory;
+use super::same_metadata;
 
 /// Normalizes the OCI identity and its conventional supplementary groups.
 pub(crate) fn normalize_image_user(

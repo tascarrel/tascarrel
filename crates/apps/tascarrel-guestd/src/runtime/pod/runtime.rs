@@ -81,7 +81,7 @@ const INITIAL_MOUNT_NAMESPACE_ROOT: &str = "/proc/1/root";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 const COMMAND_DIAGNOSTIC_LIMIT: usize = 4096;
 const STARTUP_LOG_LIMIT: usize = 64 * 1024;
-const RUNC_CREATE_TIMEOUT: Duration = Duration::from_secs(120);
+const RUNC_CREATE_TIMEOUT: Duration = Duration::from_mins(2);
 const DOCKER_DAEMON: u8 = 1 << 0;
 const NIX_DAEMON: u8 = 1 << 1;
 const VIRTUALIZATION: u8 = 1 << 2;
@@ -2645,6 +2645,7 @@ fn readiness_handshake() -> Result<String, RuntimeError> {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // Each flag controls an independent mount property.
 struct ResolvedPodShare {
     source: PathBuf,
     mountpoint: PathBuf,
@@ -3521,6 +3522,7 @@ mod tests {
             Self::with_policy_shares_and_devices(false, PodPolicy::default(), &[], devices)
         }
 
+        #[allow(clippy::too_many_lines)] // The fixture constructs one complete runtime filesystem.
         fn with_policy_shares_and_devices(
             systemd_cgroup: bool,
             policy: PodPolicy,
@@ -3539,8 +3541,8 @@ mod tests {
             let dockerd = nix_store.join("ijkl-docker/bin/dockerd");
             let docker_client = nix_store.join("mnop-docker-client/bin/docker");
             let podman = nix_store.join("opqr-podman/bin/podman");
-            let newuidmap = nix_store.join("stuv-shadow/bin/newuidmap");
-            let newgidmap = nix_store.join("stuv-shadow/bin/newgidmap");
+            let user_mapping_helper = nix_store.join("stuv-shadow/bin/newuidmap");
+            let group_mapping_helper = nix_store.join("stuv-shadow/bin/newgidmap");
             let nix_client = nix_store.join("qrst-nix/bin/nix");
             let pod_nix_store = root.join("persistent-nix/nix/store");
             let pod_nix_socket = root.join("run/pod-nix-daemon");
@@ -3554,8 +3556,8 @@ mod tests {
                 &dockerd,
                 &docker_client,
                 &podman,
-                &newuidmap,
-                &newgidmap,
+                &user_mapping_helper,
+                &group_mapping_helper,
                 &nix_client,
             ] {
                 fs::create_dir_all(program.parent().unwrap()).unwrap();
@@ -3596,8 +3598,8 @@ mod tests {
                     &dockerd,
                     &docker_client,
                     &podman,
-                    &newuidmap,
-                    &newgidmap,
+                    &user_mapping_helper,
+                    &group_mapping_helper,
                     &nix_client,
                 )
                 .unwrap(),
@@ -3674,8 +3676,8 @@ mod tests {
         let dockerd = store.join("docker/bin/dockerd");
         let docker_client = store.join("docker-client/bin/docker");
         let podman = store.join("podman/bin/podman");
-        let newuidmap = store.join("shadow/bin/newuidmap");
-        let newgidmap = store.join("shadow/bin/newgidmap");
+        let user_mapping_helper = store.join("shadow/bin/newuidmap");
+        let group_mapping_helper = store.join("shadow/bin/newgidmap");
         let nix_client = store.join("nix/bin/nix");
         let programs = PodPrograms::new(
             &store,
@@ -3687,8 +3689,8 @@ mod tests {
             &dockerd,
             &docker_client,
             &podman,
-            &newuidmap,
-            &newgidmap,
+            &user_mapping_helper,
+            &group_mapping_helper,
             &nix_client,
         )
         .unwrap();

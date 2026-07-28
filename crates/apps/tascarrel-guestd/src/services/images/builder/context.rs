@@ -1,6 +1,25 @@
 //! Safe deterministic hashing of Dockerfile build contexts.
 
-use super::*;
+use super::DOCKERFILE;
+use super::Digest;
+use super::File;
+use super::HASH_DOMAIN;
+use super::ImageBuildError;
+use super::ImageBuildLimits;
+use super::ImageId;
+use super::MetadataExt;
+use super::Mode;
+use super::OFlags;
+use super::OsStrExt;
+use super::Path;
+use super::PathBuf;
+use super::READ_BUFFER_SIZE;
+use super::Read;
+use super::Sha256;
+use super::fs;
+use super::io;
+use super::open;
+use super::safe_component;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ContextSnapshot {

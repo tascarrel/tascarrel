@@ -2059,20 +2059,14 @@ mod tests {
             .expect("upstream server task did not panic")
             .expect("upstream server stopped cleanly");
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                match downstream_peer.recv().await {
-                    Some(wire::Message::Subscription(wire::SubscriptionMessage::Unsubscribe(
-                        stop,
-                    ))) if stop.id == start.id => {
-                        break;
-                    }
-                    message => panic!("unexpected downstream release message: {message:?}"),
-                }
-            }
-        })
-        .await
-        .expect("downstream subscription release timed out");
+        match tokio::time::timeout(Duration::from_secs(1), downstream_peer.recv())
+            .await
+            .expect("downstream subscription release timed out")
+        {
+            Some(wire::Message::Subscription(wire::SubscriptionMessage::Unsubscribe(stop)))
+                if stop.id == start.id => {}
+            message => panic!("unexpected downstream release message: {message:?}"),
+        }
         downstream_peer
             .handle
             .send(wire::Message::Subscription(

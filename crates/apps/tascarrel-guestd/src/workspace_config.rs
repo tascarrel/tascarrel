@@ -809,7 +809,13 @@ mod tests {
 
         fs::write(
             &config,
-            format!("#{}\n", "x".repeat(MAX_WORKSPACE_CONFIG_BYTES as usize)),
+            format!(
+                "#{}\n",
+                "x".repeat(
+                    usize::try_from(MAX_WORKSPACE_CONFIG_BYTES)
+                        .expect("the test configuration limit fits in usize"),
+                )
+            ),
         )
         .unwrap();
         assert!(WorkspaceConfig::load(&config).is_err());

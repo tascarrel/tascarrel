@@ -98,6 +98,7 @@ impl NetworkService {
         fields(workspace = %workspace.as_str()),
         err(Debug)
     )]
+    #[allow(clippy::too_many_lines)] // DNS handling keeps request auditing and response delivery paired.
     pub(crate) async fn serve_dns_channel(
         &self,
         workspace: &WorkspaceName,

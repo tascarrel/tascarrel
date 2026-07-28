@@ -46,7 +46,7 @@ impl LinkState {
                     SubscriptionAdmission::Deliver => {}
                     SubscriptionAdmission::Ignore => return Ok(Received::Ignore),
                     SubscriptionAdmission::Reject(failure) => {
-                        return Ok(Received::Reject(failure));
+                        return Ok(Received::Reject(*failure));
                     }
                 }
             }
@@ -225,9 +225,8 @@ impl LinkState {
                         self.inbound_subscriptions.insert(start.id.clone(), 0);
                     }
                     Err(error) => {
-                        return Ok(SubscriptionAdmission::Reject(subscription_failure(
-                            start.id.clone(),
-                            render_operation_error(error),
+                        return Ok(SubscriptionAdmission::Reject(Box::new(
+                            subscription_failure(start.id.clone(), render_operation_error(error)),
                         )));
                     }
                 }
@@ -338,7 +337,7 @@ enum SubscriptionAdmission {
     /// The message should be delivered to the application.
     Deliver,
     /// The message should be answered with a generated failure.
-    Reject(wire::Message),
+    Reject(Box<wire::Message>),
     /// The message is a harmless late control for a terminal subscription.
     Ignore,
 }

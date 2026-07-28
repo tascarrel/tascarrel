@@ -169,7 +169,7 @@ WHERE status = 'generating'
 /// Failures while reading or updating persistent image state.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum ImageStateError {
-    /// The database connection or an SQLite operation failed.
+    /// The database connection or an `SQLite` operation failed.
     #[error("image state database is unavailable")]
     Unavailable,
     /// A stored image record violates the feature's invariants.
@@ -177,7 +177,7 @@ pub(crate) enum ImageStateError {
     InvalidState,
 }
 
-/// SQLite representation decoded before domain validation.
+/// `SQLite` representation decoded before domain validation.
 struct RawImageRecord {
     id: String,
     input_sha256: String,

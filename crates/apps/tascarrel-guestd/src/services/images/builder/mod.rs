@@ -124,7 +124,7 @@ const OCI_EXPORT_TAG_SUFFIX: &str = ":latest";
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const MAX_CONFIGURED_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_CONFIGURED_TIMEOUT: Duration = Duration::from_hours(24);
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 100;
 const MAX_SYMLINK_TARGET_BYTES: usize = 4096;
 const MAX_OCI_METADATA_BYTES: u64 = 4 * 1024 * 1024;
@@ -236,8 +236,8 @@ impl ImageBuilderConfig {
             cp: cp.into(),
             temporary_root: PathBuf::from("/tmp"),
             daemon_startup_timeout: Duration::from_secs(20),
-            build_timeout: Duration::from_secs(30 * 60),
-            helper_timeout: Duration::from_secs(5 * 60),
+            build_timeout: Duration::from_mins(30),
+            helper_timeout: Duration::from_mins(5),
             daemon_shutdown_timeout: Duration::from_secs(10),
             limits: ImageBuildLimits::default(),
         }

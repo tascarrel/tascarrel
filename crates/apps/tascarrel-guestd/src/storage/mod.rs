@@ -1,7 +1,7 @@
 //! Guest-owned durable storage and its on-disk layout.
 //!
 //! [`GuestStorage`] is the single entry point for persistent guest state. It
-//! initializes the versioned filesystem layout, opens the shared SQLite
+//! initializes the versioned filesystem layout, opens the shared `SQLite`
 //! database, and recovers the Btrfs store before feature services are
 //! constructed. Typed namespace handles keep path derivation inside this
 //! module while the database remains shared for cross-feature transactions.
@@ -16,7 +16,7 @@
 //!
 //! Guestd opens durable state only through `GuestStorage`. That boundary checks
 //! the storage format version, owns all persistent path derivation, opens the
-//! one shared SQLite database, and recovers the Btrfs image/pod store before
+//! one shared `SQLite` database, and recovers the Btrfs image/pod store before
 //! feature services start. Feature services receive the database, Btrfs store,
 //! or typed namespace handles from it instead of constructing persistent paths
 //! independently. The guest is a trusted appliance, so startup does not police
@@ -148,8 +148,8 @@
 //! pod identity-slot allocations, image build records, chat summaries, chat
 //! turns, timeline entries, attachment metadata, and harness resumption
 //! cursors. One database preserves cross-concern transactions and one migration
-//! order. SQLite creates the WAL and shared-memory sidecars in the same private
-//! directory.
+//! order. `SQLite` creates the WAL and shared-memory sidecars in the same
+//! private directory.
 //!
 //! The `input` namespace contains content-addressed snapshots received from
 //! hostd. The `current` symlink is atomically replaced and always points to a
@@ -182,7 +182,7 @@
 //! secret injection needs a workspace authority; the corresponding private
 //! key never enters the guest.
 //!
-//! The `scratch/image-builds` namespace is persistent because BuildKit state,
+//! The `scratch/image-builds` namespace is persistent because `BuildKit` state,
 //! OCI archives, and unpacking scratch can exceed the tmpfs runtime budget. Its
 //! per-build directories are rebuildable and removed after a build or during
 //! startup recovery.
@@ -201,7 +201,7 @@
 //! The persistent root and namespaces that UID-dropped processes must traverse
 //! are searchable without being listable (`0711`) until a feature deliberately
 //! exposes a narrower directory. The `database` and `scratch` namespaces are
-//! root-only (`0700`), which also protects the SQLite database and its WAL
+//! root-only (`0700`), which also protects the `SQLite` database and its WAL
 //! sidecars. The public network tree and published repository views are `0755`.
 //!
 //! Provider credential directories and files are owned by the dedicated harness
@@ -264,7 +264,7 @@
 //! shared mount.
 //!
 //! The entire `/run/tascarrel` tree is discarded on reboot. Guestd reconstructs
-//! pod runtime state from SQLite, the Btrfs store, and per-pod Nix roots.
+//! pod runtime state from `SQLite`, the Btrfs store, and per-pod Nix roots.
 //! Process state and process/image log buffers remain in memory.
 //!
 //! ## Other Guest-Owned State

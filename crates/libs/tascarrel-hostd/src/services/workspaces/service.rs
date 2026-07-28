@@ -587,6 +587,11 @@ impl WorkspaceService {
     }
 
     /// Starts one stopped workspace VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace name is invalid or its VM cannot be
+    /// started.
     pub async fn start(
         &self,
         input: api::StartWorkspaceAction,
@@ -597,6 +602,11 @@ impl WorkspaceService {
     }
 
     /// Stops one workspace VM while retaining its state partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace is invalid, unmanaged, or cannot be
+    /// stopped.
     pub async fn stop(
         &self,
         input: api::StopWorkspaceAction,
@@ -631,6 +641,11 @@ impl WorkspaceService {
     }
 
     /// Destroys one workspace configuration and state partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace is invalid, unmanaged, cannot be
+    /// stopped, or cannot be deleted.
     pub async fn destroy(
         &self,
         input: api::DestroyWorkspaceAction,
@@ -659,18 +674,26 @@ impl WorkspaceService {
     }
 
     /// Opens a resumable subscription to the host-wide workspace list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supplied cursor is invalid.
     pub fn subscribe(
         &self,
-        input: api::WorkspaceListChangedSubscription,
+        input: &api::WorkspaceListChangedSubscription,
     ) -> Result<WorkspaceListSubscription, Report<WorkspaceServiceError>> {
-        let cursor = input.cursor.map(runtime_stamp).transpose()?;
+        let cursor = input.cursor.as_ref().map(runtime_stamp).transpose()?;
         Ok(self.inner.store.subscribe(cursor))
     }
 
     /// Opens a retained and live log subscription for one VM instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM instance is unknown.
     pub fn subscribe_vm_log(
         &self,
-        input: api::WorkspaceVmLogSubscription,
+        input: &api::WorkspaceVmLogSubscription,
     ) -> Result<super::log::WorkspaceVmLogSubscription, Report<WorkspaceServiceError>> {
         let logs = self
             .inner
@@ -797,12 +820,12 @@ impl WorkspaceService {
             Some(
                 WorkspaceRuntimeState::Starting(id)
                 | WorkspaceRuntimeState::Running(id)
-                | WorkspaceRuntimeState::Stopping(id),
+                | WorkspaceRuntimeState::Stopping(id)
+                | WorkspaceRuntimeState::Failed {
+                    guest_instance_id: Some(id),
+                    ..
+                },
             ) => Some(id.clone()),
-            Some(WorkspaceRuntimeState::Failed {
-                guest_instance_id: Some(id),
-                ..
-            }) => Some(id.clone()),
             _ => None,
         }
     }
@@ -1633,7 +1656,7 @@ fn runtime_name(name: &api::WorkspaceName) -> Result<WorkspaceName, Report<Works
 }
 
 fn runtime_stamp(
-    stamp: store_api::Stamp,
+    stamp: &store_api::Stamp,
 ) -> Result<tascarrel_store::Stamp, Report<WorkspaceServiceError>> {
     let generation = stamp.generation.parse::<uuid::Uuid>().map_err(|error| {
         invalid_request("workspace-list cursor generation is invalid").message(error.to_string())
@@ -1782,8 +1805,8 @@ async fn workspace_worker(
             .filter_map(|state| match state {
                 WorkspaceRuntimeState::Starting(id)
                 | WorkspaceRuntimeState::Running(id)
-                | WorkspaceRuntimeState::Stopping(id) => Some(id),
-                WorkspaceRuntimeState::Failed {
+                | WorkspaceRuntimeState::Stopping(id)
+                | WorkspaceRuntimeState::Failed {
                     guest_instance_id: Some(id),
                     ..
                 } => Some(id),
@@ -3481,8 +3504,7 @@ mod tests {
             .collect::<Vec<_>>();
         let successes = creators
             .into_iter()
-            .map(|creator| creator.join().unwrap())
-            .filter(Result::is_ok)
+            .flat_map(|creator| creator.join().unwrap())
             .count();
 
         assert_eq!(successes, 1);

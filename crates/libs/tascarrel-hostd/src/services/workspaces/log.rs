@@ -131,6 +131,11 @@ pub struct WorkspaceVmLogSubscription {
 
 impl WorkspaceVmLogSubscription {
     /// Receives the next non-empty batch of retained or live lines.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log returns an empty batch or drops its watch sender while
+    /// the subscription is still active.
     pub async fn recv(&mut self) -> Option<api::WorkspaceVmLogEvent> {
         loop {
             {

@@ -654,12 +654,9 @@ async fn main() -> Result<()> {
         .as_deref()
         .and_then(|argument| Path::new(argument).file_name())
         .map(ToOwned::to_owned);
-    match invoked_as.as_deref().and_then(|name| name.to_str()) {
-        Some("git-remote-tascarrel") => {
-            run_git_remote_helper().context("run Git remote helper")?;
-            return Ok(());
-        }
-        _ => {}
+    if let Some("git-remote-tascarrel") = invoked_as.as_deref().and_then(|name| name.to_str()) {
+        run_git_remote_helper().context("run Git remote helper")?;
+        return Ok(());
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -797,7 +794,7 @@ async fn main() -> Result<()> {
         id: PodId("chat-harness".into()),
         name: "workspace chat harnesses".into(),
         title: None,
-        user: harness_user.name.clone().into(),
+        user: harness_user.name.clone(),
         uid: harness_user.uid.as_raw(),
         gid: harness_user.gid.as_raw(),
         created_at_unix_ms: 0,
@@ -1032,8 +1029,10 @@ async fn main() -> Result<()> {
     let usb_task = tokio::spawn(usb.run(pods.clone()));
     let executor = Executor::new(args.setsid);
     let process_supervisor = ProcessSupervisor::new(executor, ProcessSupervisorConfig::default());
-    let mut code_config = CodeServiceConfig::default();
-    code_config.extensions = workspace.editors.code.extensions.clone();
+    let code_config = CodeServiceConfig {
+        extensions: workspace.editors.code.extensions.clone(),
+        ..CodeServiceConfig::default()
+    };
     let code = CodeService::new(code_config)
         .map_err(|error| anyhow!(error.to_string()))
         .context("start workspace Code editor service")?;

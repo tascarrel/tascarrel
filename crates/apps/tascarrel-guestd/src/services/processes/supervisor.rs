@@ -345,19 +345,18 @@ impl ProcessSupervisor {
             {
                 self.publish_stopping(process_id);
             }
-            match timeout(stop_timeout, wait_for_completion(&mut completion)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    if controls.try_send(ExecControl::Signal(Signal::Kill)).is_ok() {
-                        self.publish_stopping(process_id);
-                    }
-                    timeout(stop_timeout, wait_for_completion(&mut completion))
-                        .await
-                        .map_err(|_| {
-                            internal_error("process did not stop after a forced termination")
-                                .field_display("process_id", &process_id.0)
-                        })??;
+            if let Ok(result) = timeout(stop_timeout, wait_for_completion(&mut completion)).await {
+                result?;
+            } else {
+                if controls.try_send(ExecControl::Signal(Signal::Kill)).is_ok() {
+                    self.publish_stopping(process_id);
                 }
+                timeout(stop_timeout, wait_for_completion(&mut completion))
+                    .await
+                    .map_err(|_| {
+                        internal_error("process did not stop after a forced termination")
+                            .field_display("process_id", &process_id.0)
+                    })??;
             }
         }
 
@@ -445,6 +444,7 @@ impl ProcessSupervisor {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Admission atomically constructs all process supervision state.
     fn admit(
         &self,
         input: api::SpawnProcessAction,
@@ -1050,7 +1050,7 @@ impl ProcessState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Supervision keeps process output, shutdown, and terminal publication ordered.
 #[tracing::instrument(
     level = "debug",
     skip_all,

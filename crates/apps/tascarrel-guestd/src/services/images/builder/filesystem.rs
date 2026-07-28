@@ -1,6 +1,22 @@
 //! Filesystem validation and bounded file publication for image builds.
 
-use super::*;
+use super::DirBuilderExt;
+use super::File;
+use super::ID_MAP_SIZE;
+use super::ImageBuildError;
+use super::ImageBuildLimits;
+use super::MAX_OCI_METADATA_BYTES;
+use super::MAX_SYMLINK_TARGET_BYTES;
+use super::MetadataExt;
+use super::OpenOptions;
+use super::OpenOptionsExt;
+use super::OsStr;
+use super::OsStrExt;
+use super::Path;
+use super::PathBuf;
+use super::Read;
+use super::Write;
+use super::fs;
 
 pub(crate) fn read_bounded_metadata(
     path: &Path,

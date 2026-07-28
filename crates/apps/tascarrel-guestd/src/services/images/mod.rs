@@ -1,7 +1,7 @@
 //! Asynchronous workspace image generation and observable image state.
 //!
 //! [`ImageService`] owns the host-backed input fingerprint, singleton build
-//! lifecycle, SQLite inventory, Btrfs image store, build network, resumable
+//! lifecycle, `SQLite` inventory, Btrfs image store, build network, resumable
 //! image list, and retained generation logs. Control-plane dispatch and daemon
 //! construction remain outside this feature.
 

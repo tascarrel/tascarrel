@@ -74,7 +74,7 @@ const DEFAULT_MAX_PORT_FORWARDS: usize = 256;
 const DEFAULT_MAX_POD_HOST_FORWARDS: usize = 256;
 const DEFAULT_MAX_CONNECTIONS: usize = 512;
 const DEFAULT_MAX_GUEST_TRANSPORTS: usize = 512;
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_mins(2);
 const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_DNS_ADDRESS_SUMMARY_LIMIT: NonZeroUsize =
     NonZeroUsize::new(16).expect("the DNS address summary limit is non-zero");
@@ -2368,6 +2368,7 @@ mod tests {
     /// Exercises route creation, exclusive frontend trust, subscription, and
     /// deletion together.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end test exercises the complete route lifecycle.
     async fn http_route_api_is_idempotent_and_resumable() {
         let directory = tempdir().unwrap();
         let workspaces = workspace_service(directory.path());

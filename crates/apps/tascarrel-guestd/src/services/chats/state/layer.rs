@@ -44,7 +44,7 @@ pub type ChatListStoreSubscription = tascarrel_store::Subscription<ChatList, Cha
 /// Resumable subscription to one chat.
 pub type ChatStoreSubscription = tascarrel_store::Subscription<Chat, ChatMutation>;
 
-/// Durable state layer backed by SQLite and reducer stores.
+/// Durable state layer backed by `SQLite` and reducer stores.
 pub struct StateLayer {
     storage: Storage,
     list: ChatListStore,
@@ -340,7 +340,7 @@ pub struct StateChatUpdate {
 pub enum StateLayerError {
     /// In-memory reconciliation failed.
     Reconciliation,
-    /// SQLite access failed.
+    /// `SQLite` access failed.
     Storage,
 }
 
@@ -421,7 +421,6 @@ fn validate_update_shape(update: &StateUpdate) -> Result<(), Report<StateLayerEr
             "a chat-list upsert must include the same chat summary mutation",
         )
         .escalate(StateLayerError::Reconciliation)),
-        (Some(ChatListMutation::Remove(_)), None) => Ok(()),
         (Some(ChatListMutation::Remove(_)), Some(_)) => Err(reconciliation_error(
             "a chat-list removal cannot include a chat mutation",
         )
@@ -436,7 +435,7 @@ fn validate_update_shape(update: &StateUpdate) -> Result<(), Report<StateLayerEr
             reconciliation_error("a summary mutation must include the same chat-list upsert")
                 .escalate(StateLayerError::Reconciliation),
         ),
-        (None, Some(_)) => Ok(()),
+        (Some(ChatListMutation::Remove(_)), None) | (None, Some(_)) => Ok(()),
         (None, None) => Err(
             reconciliation_error("a state update must contain a mutation")
                 .escalate(StateLayerError::Reconciliation),
@@ -481,9 +480,6 @@ fn durable_update(
                 turn: turn.clone(),
             });
         }
-        ChatMutation::UpsertTurn(_)
-        | ChatMutation::AppendItemContent(_)
-        | ChatMutation::ReplacePromptQueue(_) => {}
         ChatMutation::UpsertTimelineEntry(entry)
             if timeline_entry_is_terminal(entry)
                 || !current_chat.timeline.iter().any(|candidate| {
@@ -503,7 +499,10 @@ fn durable_update(
                 entry: entry.clone(),
             });
         }
-        ChatMutation::UpsertTimelineEntry(_) => {}
+        ChatMutation::UpsertTurn(_)
+        | ChatMutation::AppendItemContent(_)
+        | ChatMutation::ReplacePromptQueue(_)
+        | ChatMutation::UpsertTimelineEntry(_) => {}
         ChatMutation::CompleteTimelineItem(completion) => {
             let entry_index = next_chat
                 .timeline

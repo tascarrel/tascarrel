@@ -287,6 +287,7 @@ pub struct ProviderRequestId(pub String);
 /// Engine logic must use the canonical Tascarrel identifiers on
 /// [`HarnessEvent`].
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[allow(clippy::struct_field_names)] // Prefixes distinguish provider IDs from canonical IDs.
 pub struct ProviderEventReferences {
     /// Native conversation or session identifier.
     pub provider_session_id: Option<ProviderSessionId>,
