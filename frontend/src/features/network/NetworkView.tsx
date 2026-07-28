@@ -15,7 +15,7 @@ import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
 import { SidebarTabs, SidebarTabsPanel } from "../../components/ui/SidebarTabs.tsx";
 import { httpRouteUrl } from "./addresses.ts";
-import { createHttpRouteTicket } from "./routeAccess.ts";
+import { openHttpRouteInNewTab } from "./routeAccess.ts";
 import { HostPodForwardForm, HttpRouteForm, PodHostForwardForm } from "./NetworkForms.tsx";
 import {
   useDnsRequests,
@@ -123,14 +123,10 @@ export function NetworkView({
   };
 
   const openRoute = async (route: network.HttpRoute) => {
-    const popup = window.open("", "_blank");
-    if (popup) popup.opener = null;
+    setActionError(undefined);
     try {
-      const url = await createHttpRouteTicket(route.hostnamePrefix);
-      if (popup) popup.location.replace(url);
-      else window.location.assign(url);
+      await openHttpRouteInNewTab(route.hostnamePrefix);
     } catch (cause) {
-      popup?.close();
       setActionError(`Could not open the HTTP route: ${errorMessage(cause)}`);
     }
   };

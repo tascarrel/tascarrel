@@ -68,6 +68,7 @@ use crate::services::workspaces::WorkspaceNetworkRequest;
 use crate::services::workspaces::WorkspaceNetworkRequests;
 
 const DEFAULT_HOSTNAME_SUFFIX: &str = "tascarrel.localhost";
+const HTTP_ROUTE_TERMINAL_HOSTNAME: &str = "localhost";
 const DEFAULT_MAX_HTTP_ROUTES: usize = 4096;
 const DEFAULT_MAX_PORT_FORWARDS: usize = 256;
 const DEFAULT_MAX_POD_HOST_FORWARDS: usize = 256;
@@ -1837,9 +1838,9 @@ fn split_routed_authority(
             (remaining, prefix)
         });
     let forwarded_host = if remaining.is_empty() {
-        suffix.to_owned()
+        HTTP_ROUTE_TERMINAL_HOSTNAME.to_owned()
     } else {
-        format!("{remaining}.{suffix}")
+        format!("{remaining}.{DEFAULT_HOSTNAME_SUFFIX}")
     };
     let forwarded = match authority.port_u16() {
         Some(port) => format!("{forwarded_host}:{port}"),
@@ -1887,6 +1888,7 @@ fn rewrite_forwarded_request(
             invalid_proxy_request(format!("forwarded HTTP Host is invalid: {error}"))
         })?,
     );
+    strip_forwarded_authority_headers(request.headers_mut());
     strip_hop_by_hop(request.headers_mut(), preserve_upgrade);
     *request.uri_mut() = request
         .uri()
@@ -1894,6 +1896,13 @@ fn rewrite_forwarded_request(
         .map_or_else(|| "/".parse(), |path| path.as_str().parse())
         .map_err(|error| invalid_proxy_request(format!("request path is invalid: {error}")))?;
     Ok(())
+}
+
+/// Removes proxy-supplied authority metadata before entering a pod.
+fn strip_forwarded_authority_headers(headers: &mut HeaderMap) {
+    headers.remove(header::FORWARDED);
+    headers.remove("x-forwarded-host");
+    headers.remove("x-original-host");
 }
 
 fn rewrite_same_origin(
@@ -2547,6 +2556,57 @@ mod tests {
         workspaces.shutdown().await;
     }
 
+    /// Verifies public and local route authorities become the canonical
+    /// loopback authority before entering a pod.
+    #[tokio::test]
+    async fn http_route_resolution_canonicalizes_forwarded_authority() {
+        let directory = tempdir().unwrap();
+        let workspaces = workspace_service(directory.path());
+        let network = NetworkService::new(NetworkServiceConfig {
+            hostname_suffix: "tascarrel.example.com".to_owned(),
+            ..NetworkServiceConfig::default()
+        })
+        .unwrap();
+        let created = network
+            .create_http_route(
+                api::CreateHttpRouteAction {
+                    workspace: api_workspace(),
+                    pod_id: tascarrel_api::types::pods::PodId::generate(),
+                    pod_port: 8080,
+                    title: "Development server".into(),
+                    internal: false,
+                },
+                &workspaces,
+            )
+            .unwrap();
+
+        for (hostname, forwarded) in [
+            (
+                format!("{}.tascarrel.example.com:8272", created.hostname_prefix),
+                "localhost:8272",
+            ),
+            (
+                format!(
+                    "inner.{}.tascarrel.example.com:8272",
+                    created.hostname_prefix
+                ),
+                "inner.tascarrel.localhost:8272",
+            ),
+            (
+                format!("{}.tascarrel.localhost:8272", created.hostname_prefix),
+                "localhost:8272",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, hostname.parse().unwrap());
+            let resolved = network.resolve_http_route(&headers).unwrap().unwrap();
+            assert_eq!(resolved.forwarded_authority.as_str(), forwarded);
+        }
+
+        network.shutdown().await;
+        workspaces.shutdown().await;
+    }
+
     /// Verifies a dynamic listener is host-owned, observable with its assigned
     /// loopback port, and withdrawn through the delete API.
     #[tokio::test]
@@ -2843,7 +2903,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(prefix, "editor");
-        assert_eq!(forwarded.as_str(), "tascarrel.localhost:8272");
+        assert_eq!(forwarded.as_str(), "localhost:8272");
     }
 
     /// Verifies each proxy layer exposes the remaining route stack to the pod
@@ -2883,6 +2943,41 @@ mod tests {
             "http://inner.tascarrel.localhost:8272/page?mode=edit"
         );
         assert_eq!(request.uri().to_string(), "/socket?mode=watch");
+    }
+
+    /// Verifies the final proxy layer presents localhost and removes authority
+    /// metadata that could override the rewritten Host header.
+    #[test]
+    fn request_rewrite_presents_localhost_to_terminal_service() {
+        let route = resolved_route("editor.tascarrel.example.com", "localhost");
+        let mut request = Request::builder()
+            .uri("/socket")
+            .header(header::HOST, route.original_authority.as_str())
+            .header(header::ORIGIN, "https://editor.tascarrel.example.com")
+            .header(
+                header::REFERER,
+                "https://editor.tascarrel.example.com/workspace",
+            )
+            .header(
+                header::FORWARDED,
+                "for=192.0.2.1;host=editor.tascarrel.example.com;proto=https",
+            )
+            .header("x-forwarded-host", "editor.tascarrel.example.com")
+            .header("x-original-host", "editor.tascarrel.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        rewrite_forwarded_request(&mut request, &route, false).unwrap();
+
+        assert_eq!(request.headers()[header::HOST], "localhost");
+        assert_eq!(request.headers()[header::ORIGIN], "https://localhost");
+        assert_eq!(
+            request.headers()[header::REFERER],
+            "https://localhost/workspace"
+        );
+        assert!(!request.headers().contains_key(header::FORWARDED));
+        assert!(!request.headers().contains_key("x-forwarded-host"));
+        assert!(!request.headers().contains_key("x-original-host"));
     }
 
     /// Verifies absolute redirects return through every consumed layer and

@@ -3,6 +3,7 @@ import {
   Bot,
   Box,
   Code2,
+  ExternalLink,
   Files,
   GitPullRequest,
   GitBranch,
@@ -10,6 +11,7 @@ import {
   LoaderCircle,
   Monitor,
   Network,
+  RefreshCw,
   Settings,
   TerminalSquare,
 } from "lucide-react";
@@ -23,7 +25,10 @@ import {
 
 import type { pods, workspaces } from "../../../api/generated/index.ts";
 import { ConnectionOverlay } from "../../../components/ui/ConnectionOverlay.tsx";
-import { createHttpRouteTicket } from "../../network/routeAccess.ts";
+import {
+  createHttpRouteTicket,
+  openHttpRouteInNewTab,
+} from "../../network/routeAccess.ts";
 import {
   type GlobalCommandDefinition,
   useGlobalCommands,
@@ -288,6 +293,11 @@ export function WorkbenchShell({
   >({});
   const [activeWebPreviewId, setActiveWebPreviewId] = useState<string>();
   const [webPreviewRevisions, setWebPreviewRevisions] = useState<Record<string, number>>({});
+  const [openingWebPreviewId, setOpeningWebPreviewId] = useState<string>();
+  const [webPreviewActionError, setWebPreviewActionError] = useState<{
+    previewId: string;
+    message: string;
+  }>();
   const nextWebPreviewNumber = useRef(1);
   const presentation = MODE_PRESENTATION[mode];
   const publishedWebPreviewIds = useMemo(
@@ -560,6 +570,21 @@ export function WorkbenchShell({
       ...current,
       [previewId]: (current[previewId] ?? 0) + 1,
     }));
+  };
+  const openWebPreviewInNewTab = async (preview: WebPreview) => {
+    if (!preview.hostnamePrefix || openingWebPreviewId === preview.id) return;
+    setOpeningWebPreviewId(preview.id);
+    setWebPreviewActionError(undefined);
+    try {
+      await openHttpRouteInNewTab(preview.hostnamePrefix);
+    } catch (cause) {
+      setWebPreviewActionError({
+        previewId: preview.id,
+        message: `Could not open the HTTP route: ${previewAccessError(cause)}`,
+      });
+    } finally {
+      setOpeningWebPreviewId((current) => current === preview.id ? undefined : current);
+    }
   };
   const navigateWebPreview = (previewId: string, address: string) => {
     const url = normalizePreviewUrl(address);
@@ -839,7 +864,27 @@ export function WorkbenchShell({
                   <ShellModeNav value="web" options={WEB_PANEL_MODES} label="Web panel mode" />
                   <ShellTabStrip
                     label="Web previews"
-                    action={<ShellTabAction label="New web preview" onClick={addWebPreview} />}
+                    action={(
+                      <>
+                        {activeWebPreview?.hostnamePrefix ? (
+                          <>
+                            <ShellTabAction
+                              label={`Reload ${activeWebPreview.title}`}
+                              icon={RefreshCw}
+                              disabled={activeWebPreview.routeAccessPending}
+                              onClick={() => reloadWebPreview(activeWebPreview.id)}
+                            />
+                            <ShellTabAction
+                              label={`Open ${activeWebPreview.title} in a new tab`}
+                              icon={ExternalLink}
+                              disabled={openingWebPreviewId === activeWebPreview.id}
+                              onClick={() => void openWebPreviewInNewTab(activeWebPreview)}
+                            />
+                          </>
+                        ) : null}
+                        <ShellTabAction label="New web preview" onClick={addWebPreview} />
+                      </>
+                    )}
                   >
                     {availableWebPreviews.map((preview) => (
                       <ShellTab
@@ -847,7 +892,9 @@ export function WorkbenchShell({
                         closeLabel={publishedWebPreviewIds.has(preview.id)
                           ? undefined
                           : `Close ${preview.title}`}
-                        title={preview.url || preview.title}
+                        title={preview.hostnamePrefix
+                          ? preview.title
+                          : preview.url || preview.title}
                         key={preview.id}
                         onClose={publishedWebPreviewIds.has(preview.id)
                           ? undefined
@@ -863,6 +910,9 @@ export function WorkbenchShell({
             >
               {activeWebPreview ? (
                 <WebPreviewView
+                  actionError={webPreviewActionError?.previewId === activeWebPreview.id
+                    ? webPreviewActionError.message
+                    : undefined}
                   frameId={webPreviewFrameId(selectedWorkspace ?? "", activeWebPreview.id)}
                   preview={activeWebPreview}
                   revision={webPreviewRevisions[activeWebPreview.id] ?? 0}

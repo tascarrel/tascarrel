@@ -1700,6 +1700,17 @@ diffs-container {
   opacity: 0.42;
 }
 
+.web-preview-action-error {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgb(239 68 68 / 20%);
+  color: #fecaca;
+  background: rgb(239 68 68 / 5%);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .web-preview-frame-host {
   position: relative;
   min-width: 0;

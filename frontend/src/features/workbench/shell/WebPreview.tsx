@@ -17,19 +17,21 @@ export type WebPreview = {
 };
 
 export function WebPreviewView({
+  actionError,
   frameId,
   preview,
   revision,
   onNavigate,
   onReload,
 }: {
+  actionError?: string;
   frameId: string;
   preview: WebPreview;
   revision: number;
   onNavigate: (address: string) => void;
   onReload: () => void;
 }) {
-  const [address, setAddress] = useState(preview.url);
+  const [address, setAddress] = useState(preview.hostnamePrefix ? "" : preview.url);
   const [frameAnchor, setFrameAnchor] = useState<HTMLDivElement | null>(null);
   const frame = useMemo<IframeFrameSpec | undefined>(() => preview.url ? {
     id: frameId,
@@ -40,48 +42,56 @@ export function WebPreviewView({
     iframeProps: { referrerPolicy: "strict-origin-when-cross-origin" },
   } : undefined, [frameId, preview.title, preview.url, revision]);
   useWebPreviewFrame(frame, frameAnchor);
-  useEffect(() => setAddress(preview.url), [preview.id, preview.url]);
+  useEffect(
+    () => setAddress(preview.hostnamePrefix ? "" : preview.url),
+    [preview.hostnamePrefix, preview.id, preview.url],
+  );
   const submitAddress = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     onNavigate(address);
   };
   return (
     <div className="web-preview" role="region" aria-label={`${preview.title} web preview`}>
-      <div className="web-preview-toolbar">
-        <form className="web-preview-address" onSubmit={submitAddress}>
-          <input
-            aria-label="Preview address"
-            autoCapitalize="none"
-            autoComplete="off"
-            spellCheck="false"
-            placeholder="Enter a URL"
-            value={address}
-            onChange={(event) => setAddress(event.target.value)}
-          />
-        </form>
-        <Button
-          aria-label={`Reload ${preview.title}`}
-          className="web-preview-toolbar-button rounded-none border-0 bg-transparent p-0"
-          size="icon"
-          title="Reload preview"
-          disabled={!preview.url}
-          onClick={onReload}
-        >
-          <RefreshCw aria-hidden="true" size={12} />
-        </Button>
-        {preview.url ? (
-          <a
-            className="web-preview-toolbar-button"
-            href={preview.url}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open ${preview.title} in a new tab`}
-            title="Open in new tab"
+      {!preview.hostnamePrefix ? (
+        <div className="web-preview-toolbar">
+          <form className="web-preview-address" onSubmit={submitAddress}>
+            <input
+              aria-label="Preview address"
+              autoCapitalize="none"
+              autoComplete="off"
+              spellCheck="false"
+              placeholder="Enter a URL"
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+            />
+          </form>
+          <Button
+            aria-label={`Reload ${preview.title}`}
+            className="web-preview-toolbar-button rounded-none border-0 bg-transparent p-0"
+            size="icon"
+            title="Reload preview"
+            disabled={!preview.url}
+            onClick={onReload}
           >
-            <ExternalLink aria-hidden="true" size={12} />
-          </a>
-        ) : null}
-      </div>
+            <RefreshCw aria-hidden="true" size={12} />
+          </Button>
+          {preview.url ? (
+            <a
+              className="web-preview-toolbar-button"
+              href={preview.url}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Open ${preview.title} in a new tab`}
+              title="Open in new tab"
+            >
+              <ExternalLink aria-hidden="true" size={12} />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+      {actionError ? (
+        <p className="web-preview-action-error" role="alert">{actionError}</p>
+      ) : null}
       <div
         ref={setFrameAnchor}
         className={`web-preview-frame-host ${preview.url ? "" : "web-preview-frame-host-empty"}`}
@@ -91,11 +101,11 @@ export function WebPreviewView({
             icon={Monitor}
             title={preview.routeAccessError
               ? "Could Not Open Preview"
-              : preview.routeAccessPending
+              : preview.routeAccessPending || preview.hostnamePrefix
                 ? "Authorizing Preview"
                 : "New Web Preview"}
             detail={preview.routeAccessError
-              ?? (preview.routeAccessPending
+              ?? (preview.routeAccessPending || preview.hostnamePrefix
                 ? "Tascarrel is issuing route access…"
                 : "Enter an address above to load a site.")}
           />

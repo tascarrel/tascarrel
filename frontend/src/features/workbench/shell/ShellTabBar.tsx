@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, X, type LucideIcon } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type HTMLAttributes,
@@ -192,8 +192,9 @@ export function ShellTab({
   );
 }
 
-export function ShellTabAction({ label, onClick, disabled }: {
+export function ShellTabAction({ label, icon: Icon = Plus, onClick, disabled }: {
   label: string;
+  icon?: LucideIcon;
   onClick?: () => void;
   disabled?: boolean;
 }) {
@@ -206,7 +207,7 @@ export function ShellTabAction({ label, onClick, disabled }: {
       disabled={disabled}
       onClick={onClick}
     >
-      <Plus aria-hidden="true" size={14} />
+      <Icon aria-hidden="true" size={14} />
     </button>
   );
 }

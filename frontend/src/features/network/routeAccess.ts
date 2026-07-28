@@ -20,6 +20,25 @@ export async function createHttpRouteTicket(
   return result.url;
 }
 
+/** Opens a route with a ticket minted for this navigation. */
+export async function openHttpRouteInNewTab(
+  prefix: network.HostnamePrefix,
+  returnTo = "/",
+): Promise<void> {
+  const popup = window.open("", "_blank");
+  if (!popup) {
+    throw new Error("The browser blocked the new tab. Allow pop-ups for Tascarrel and try again.");
+  }
+  popup.opener = null;
+  try {
+    const url = await createHttpRouteTicket(prefix, returnTo);
+    popup.location.replace(url);
+  } catch (cause) {
+    popup.close();
+    throw cause;
+  }
+}
+
 export function useHttpRouteTicket(
   prefix: network.HostnamePrefix | undefined,
   returnTo = "/",
