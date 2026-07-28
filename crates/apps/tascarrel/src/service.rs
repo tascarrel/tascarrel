@@ -23,12 +23,12 @@ const LINUX_UNIT: &str = "tascarrel.service";
 #[cfg(target_os = "macos")]
 const MACOS_LABEL: &str = "dev.tascarrel.host";
 
-/// Writes the per-user service definition for a server executable.
+/// Writes and enables the per-user service for a server executable.
 ///
 /// # Errors
 ///
 /// Returns an error when state paths cannot be discovered or the service
-/// definition cannot be written.
+/// definition cannot be written or enabled.
 pub fn install(binary: &Path, dependencies: &ResolvedDependencies) -> Result<()> {
     let tascarrel_home =
         tascarrel_host::TascarrelHome::discover().map_err(|error| anyhow!(error.to_string()))?;
@@ -37,7 +37,13 @@ pub fn install(binary: &Path, dependencies: &ResolvedDependencies) -> Result<()>
         let path = linux_unit_path()?;
         let contents = linux_unit(binary, dependencies, tascarrel_home.root())?;
         atomic_write(&path, contents.as_bytes(), 0o600)?;
-        Ok(())
+        reload_linux_user_manager()?;
+        run_checked(
+            Command::new("systemctl")
+                .args(["--user", "enable", LINUX_UNIT])
+                .stdin(Stdio::null()),
+            "enable the Tascarrel user service",
+        )
     }
     #[cfg(target_os = "macos")]
     {
@@ -277,7 +283,7 @@ fn macos_plist(
          <key>TASCARREL_QEMU</key><string>{}</string>\n\
          <key>TASCARREL_GIT</key><string>{}</string>\n\
          <key>TASCARREL_SOPS</key><string>{}</string>\n\
-         </dict><key>RunAtLoad</key><false/><key>KeepAlive</key><false/>\n\
+         </dict><key>RunAtLoad</key><true/><key>KeepAlive</key><false/>\n\
          <key>StandardOutPath</key><string>{}</string>\n\
          <key>StandardErrorPath</key><string>{}</string>\n\
          </dict></plist>\n",
