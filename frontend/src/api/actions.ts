@@ -1,6 +1,9 @@
 import * as types from "./generated/index.ts";
 
 export type HostActions = {
+  "auth_CreatePairingKey": { input: types.auth.CreatePairingKeyAction; output: types.auth.CreatePairingKeyOutput };
+  "auth_RevokeBrowserSession": { input: types.auth.RevokeBrowserSessionAction; output: types.auth.RevokeBrowserSessionOutput };
+  "auth_CreateHttpRouteTicket": { input: types.auth.CreateHttpRouteTicketAction; output: types.auth.CreateHttpRouteTicketOutput };
   "config_UpdateSettings": { input: types.config.UpdateWorkspaceSettingsAction; output: types.config.UpdateWorkspaceSettingsOutput };
   "secrets_Reveal": { input: types.secrets.RevealSecretAction; output: types.secrets.RevealSecretOutput };
   "secrets_Set": { input: types.secrets.SetSecretAction; output: types.secrets.SetSecretOutput };
@@ -67,6 +70,7 @@ export type GuestActions = {
 };
 
 export type HostSubscriptions = {
+  "auth_BrowserSessionsChanged": { input: types.auth.BrowserSessionsChangedSubscription; output: types.auth.BrowserSessionsChangedEvent };
   "config_Changed": { input: types.config.ConfigChangedSubscription; output: types.config.ConfigChangedEvent };
   "secrets_Changed": { input: types.secrets.SecretsChangedSubscription; output: types.secrets.SecretsChangedEvent };
   "network_HttpRoutesChanged": { input: types.network.HttpRouteListChangedSubscription; output: types.network.HttpRouteListChangedEvent };

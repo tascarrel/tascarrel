@@ -5,7 +5,7 @@ import type {
   HostSubscriptions,
 } from "./actions.ts";
 import type { protocol, workspaces } from "./generated/index.ts";
-import { CONTROL_API_PATH } from "./paths.ts";
+import { AUTH_SESSION_API_PATH, CONTROL_API_PATH } from "./paths.ts";
 
 type OperationInput<O> = O extends { input: infer I } ? I : never;
 type OperationOutput<O> = O extends { output: infer O } ? O : never;
@@ -348,6 +348,14 @@ class ControlConnection {
       subscription.restart = undefined;
     }
     this.failInvocations(unavailable("The Tascarrel control-plane connection closed"));
+    void fetch(AUTH_SESSION_API_PATH, {
+      credentials: "same-origin",
+      cache: "no-store",
+    }).then((response) => {
+      if (response.status === 401) window.location.reload();
+    }).catch((cause) => {
+      console.debug("Could not check whether the browser session remains active", cause);
+    });
     this.scheduleReconnect();
   }
 

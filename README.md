@@ -57,5 +57,12 @@ another. Use separate workspaces for projects with different trust requirements.
 [Read the isolation model](https://tascarrel.dev/docs/getting-started/isolation-model)
 for its guarantees, limitations, and residual risks.
 
+## Remote Access
+
+Tascarrel can remain bound to loopback while an SSH reverse tunnel and reverse
+proxy expose the authenticated workbench. See the
+[remote access guide](https://tascarrel.dev/docs/operations/remote-access) for
+the host, DNS, TLS, and Nginx configuration.
+
 Tascarrel is available under the
 [Apache License 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT).

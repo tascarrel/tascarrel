@@ -1,4 +1,11 @@
-//! Loopback-only static HTTP plus the Tascarrel control `WebSocket`.
+//! Authenticated browser HTTP, static UI, routed services, and the Tascarrel
+//! control `WebSocket`.
+//!
+//! [`WebServer`] serves the browser interface on hostd's loopback listener.
+//! Browser-session middleware protects host APIs, while routed requests require
+//! independent route-scoped credentials before reaching workspace services.
+
+mod browser_auth;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,6 +16,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
+use axum::extract::Extension;
 use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
@@ -21,7 +29,6 @@ use axum::http::Method;
 use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header;
-use axum::http::uri::Authority;
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::Html;
@@ -68,8 +75,27 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
+use self::browser_auth::BROWSER_SESSION_COOKIE;
+use self::browser_auth::ROUTE_AUTHORIZATION_PATH;
+use self::browser_auth::TrustedFrontendBridge;
+use self::browser_auth::authenticated_session;
+use self::browser_auth::authentication_service_error;
+use self::browser_auth::cookie_value;
+use self::browser_auth::exact_request_origin;
+use self::browser_auth::frontend_context;
+use self::browser_auth::is_route_bridge_path;
+use self::browser_auth::logout_browser;
+use self::browser_auth::pair_browser;
+use self::browser_auth::require_browser_session;
+use self::browser_auth::route_authentication_required;
+use self::browser_auth::route_authorization;
+use self::browser_auth::trusted_bridge_uri;
+use self::browser_auth::validate_browser_origin;
 use crate::HostState;
 use crate::control_plane::HostControlService;
+use crate::services::auth::AuthService;
+use crate::services::auth::AuthenticatedSession;
+use crate::services::auth::HTTP_ROUTE_COOKIE_NAME;
 use crate::startup::StartupReporter;
 
 const FRONTEND_CORS_MAX_AGE: Duration = Duration::from_mins(10);
@@ -77,7 +103,7 @@ const UI_DOCUMENT_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-stor
 const UI_ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
 const CHAT_ATTACHMENT_UPLOAD_PROOF: &str = "tascarrel-chat-attachment";
-const STARTUP_PAGE: &str = include_str!("startup.html");
+const STARTUP_PAGE: &str = include_str!("../startup.html");
 
 pub(crate) struct WebServer {
     listener: TcpListener,
@@ -91,6 +117,8 @@ pub(crate) struct WebServerControl {
 
 #[derive(Clone)]
 struct WebState {
+    auth: AuthService,
+    public_origin: Option<String>,
     ready: Arc<RwLock<Option<ReadyWebState>>>,
     retry: mpsc::Sender<()>,
     status: StartupReporter,
@@ -192,11 +220,15 @@ impl WebServerControl {
 pub(crate) async fn bind(
     address: SocketAddr,
     status: StartupReporter,
+    auth: AuthService,
+    public_origin: Option<String>,
 ) -> anyhow::Result<(WebServer, WebServerControl)> {
     let listener = TcpListener::bind(address).await?;
     let web_authority = listener.local_addr()?;
     let (retry, retry_requests) = mpsc::channel(1);
     let state = WebState {
+        auth,
+        public_origin,
         ready: Arc::new(RwLock::new(None)),
         retry,
         status,
@@ -217,11 +249,13 @@ pub(crate) async fn bind(
 fn router(state: WebState) -> Router {
     let network_state = state.clone();
     let cors = frontend_cors(&state);
-    Router::new()
-        .route("/api/health", get(server_status))
+    let protected = Router::new()
         .route("/api/v1/server/status", get(server_status))
         .route("/api/v1/server/status/events", get(server_status_events))
         .route("/api/v1/server/retry", post(retry_startup))
+        .route("/api/v1/auth/session", get(authenticated_session))
+        .route("/api/v1/auth/context", get(frontend_context))
+        .route("/api/v1/auth/logout", post(logout_browser))
         .route("/api/v1/control", get(control_upgrade))
         .route(
             "/api/v1/chat/upload-attachment",
@@ -229,6 +263,14 @@ fn router(state: WebState) -> Router {
         )
         .route("/api/v1/chat/attachment", get(read_chat_attachment))
         .route("/api/v1/files/raw", get(raw_file))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_browser_session,
+        ));
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/v1/auth/pair", post(pair_browser))
+        .merge(protected)
         .fallback(serve_ui)
         .with_state(state)
         .layer(middleware::from_fn(ui_cache_headers))
@@ -237,6 +279,10 @@ fn router(state: WebState) -> Router {
             network_state,
             forward_network_request,
         ))
+}
+
+async fn health() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn serve_ui(State(state): State<WebState>, request: Request) -> Response {
@@ -300,7 +346,18 @@ async fn retry_startup(
     State(state): State<WebState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    validate_same_origin(&headers)?;
+    validate_browser_origin(&state, &headers)?;
+    let token = cookie_value(&headers, BROWSER_SESSION_COOKIE).ok_or_else(|| {
+        ApiError::unauthorized(
+            "authentication-required",
+            "a paired Tascarrel browser session is required",
+        )
+    })?;
+    state
+        .auth
+        .authenticate_browser(&token)
+        .await
+        .map_err(|_| ApiError::unauthorized("invalid-session", "browser session is invalid"))?;
     if !matches!(state.status.current().state, ServerState::Failed(_)) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -316,27 +373,6 @@ async fn retry_startup(
             "the Tascarrel startup task is unavailable",
         )),
     }
-}
-
-fn validate_same_origin(headers: &HeaderMap) -> Result<(), ApiError> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ApiError::forbidden("invalid-origin", "missing HTTP host"))?;
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<Uri>().ok())
-        .filter(|origin| matches!(origin.scheme_str(), Some("http" | "https")))
-        .and_then(|origin| origin.authority().cloned())
-        .ok_or_else(|| ApiError::forbidden("invalid-origin", "missing or invalid HTTP origin"))?;
-    if !origin.as_str().eq_ignore_ascii_case(host) {
-        return Err(ApiError::forbidden(
-            "cross-origin-request",
-            "request origin does not match the Tascarrel server",
-        ));
-    }
-    Ok(())
 }
 
 /// Builds the browser API policy for canonical and explicitly trusted origins.
@@ -378,7 +414,7 @@ fn is_allowed_frontend_origin(
 
 async fn forward_network_request(
     State(state): State<WebState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let Some(ready) = state.ready() else {
@@ -392,6 +428,38 @@ async fn forward_network_request(
         Ok(None) => return next.run(request).await,
         Err(error) => return network_proxy_error(&error),
     };
+    if request.uri().path() == ROUTE_AUTHORIZATION_PATH {
+        return route_authorization(&state, request, &route).await;
+    }
+    let Some(token) = cookie_value(request.headers(), HTTP_ROUTE_COOKIE_NAME) else {
+        return route_authentication_required();
+    };
+    let session = match state
+        .auth
+        .authenticate_route(&token, route.id(), route.hostname())
+        .await
+    {
+        Ok(session) => session,
+        Err(error)
+            if error.error() == &crate::services::auth::AuthServiceError::InvalidRouteGrant =>
+        {
+            debug!(%error, "HTTP route grant authentication failed");
+            return route_authentication_required();
+        }
+        Err(error) => return authentication_service_error(&error).into_response(),
+    };
+    if is_route_bridge_path(request.uri().path()) {
+        if !route.is_trusted_tascarrel_frontend() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let Some(rewritten) = trusted_bridge_uri(request.uri()) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        *request.uri_mut() = rewritten;
+        request.extensions_mut().insert(session);
+        request.extensions_mut().insert(TrustedFrontendBridge);
+        return next.run(request).await;
+    }
     match ready
         .network_service()
         .forward_http(request, route, ready.workspace_service())
@@ -917,21 +985,42 @@ async fn control_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<WebState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    bridge: Option<Extension<TrustedFrontendBridge>>,
 ) -> Result<Response, ApiError> {
-    let web_authority = state.web_authority;
+    if bridge.is_some() {
+        exact_request_origin(&headers)?;
+    } else {
+        validate_browser_origin(&state, &headers)?;
+    }
     let state = state.require_ready()?;
-    validate_websocket_origin(&headers, web_authority, state.network_service())?;
     Ok(ws
         .max_message_size(DEFAULT_MAX_FRAME_LEN)
         .max_frame_size(DEFAULT_MAX_FRAME_LEN)
-        .on_upgrade(move |socket| control_session(socket, state)))
+        .on_upgrade(move |socket| control_session(socket, state, session)))
 }
 
-async fn control_session(socket: WebSocket, state: ReadyWebState) {
+async fn control_session(socket: WebSocket, state: ReadyWebState, session: AuthenticatedSession) {
     let client_id = protocol::ClientId::generate();
+    let _connection = state.host.auth().connect_browser(session.id.clone());
+    let auth = state.host.auth().clone();
+    let monitored_session_id = session.id.clone();
+    let shutdown = async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            match auth.keep_browser_alive(&monitored_session_id).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    warn!(%error, "failed to verify active browser session");
+                    return;
+                }
+            }
+        }
+    };
     if let Err(error) = state
         .control
-        .serve(WebSocketTransport { socket }, client_id)
+        .serve_browser_until_shutdown(WebSocketTransport { socket }, client_id, session, shutdown)
         .await
     {
         debug!(%error, "web control-plane connection closed");
@@ -1025,52 +1114,6 @@ impl control_plane::Transport for WebSocketTransport {
     }
 }
 
-fn validate_websocket_origin(
-    headers: &HeaderMap,
-    web_authority: SocketAddr,
-    network: &crate::NetworkService,
-) -> Result<(), ApiError> {
-    let origin = headers
-        .get(header::ORIGIN)
-        .ok_or_else(|| ApiError::forbidden("missing-origin", "missing WebSocket origin"))?;
-    let origin = origin
-        .to_str()
-        .map_err(|_| ApiError::forbidden("invalid-origin", "invalid WebSocket origin"))?;
-    let origin = origin
-        .parse::<Uri>()
-        .map_err(|_| ApiError::forbidden("invalid-origin", "invalid WebSocket origin"))?;
-    if !matches!(origin.scheme_str(), Some("http" | "https")) {
-        return Err(ApiError::forbidden(
-            "invalid-origin",
-            "invalid WebSocket origin",
-        ));
-    }
-    let origin_authority = origin
-        .authority()
-        .ok_or_else(|| ApiError::forbidden("invalid-origin", "invalid WebSocket origin"))?;
-    let request_authority: Authority = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ApiError::forbidden("invalid-origin", "missing HTTP host"))?
-        .parse()
-        .map_err(|_| ApiError::forbidden("invalid-origin", "invalid HTTP host"))?;
-    let same_origin = origin_authority
-        .host()
-        .eq_ignore_ascii_case(request_authority.host())
-        && origin_authority.port_u16() == request_authority.port_u16();
-    let trusted_frontend_origin =
-        network.is_trusted_tascarrel_frontend_authority(origin_authority, web_authority);
-    if !network.is_frontend_authority(&request_authority, web_authority)
-        || (!same_origin && !trusted_frontend_origin)
-    {
-        return Err(ApiError::forbidden(
-            "cross-origin-websocket",
-            "WebSocket authority does not match the configured web interface",
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -1091,6 +1134,10 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, code, message)
     }
 
+    fn unauthorized(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, code, message)
+    }
+
     fn new(status: StatusCode, _code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -1108,78 +1155,8 @@ impl IntoResponse for ApiError {
 }
 
 #[cfg(test)]
-mod websocket_origin_tests {
+mod cache_header_tests {
     use super::*;
-
-    fn network() -> crate::NetworkService {
-        crate::NetworkService::new(crate::NetworkServiceConfig::default()).unwrap()
-    }
-
-    /// Accepts the browser origin only when both authorities match the bound
-    /// listener.
-    #[test]
-    fn browser_websocket_origin_matches_bound_authority() {
-        let authority = "127.0.0.1:8272".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "127.0.0.1:8272".parse().unwrap());
-        headers.insert(header::ORIGIN, "http://127.0.0.1:8272".parse().unwrap());
-
-        assert!(validate_websocket_origin(&headers, authority, &network()).is_ok());
-    }
-
-    /// Accepts the canonical frontend hostname while hostd remains bound to
-    /// its loopback socket address.
-    #[test]
-    fn browser_websocket_origin_accepts_canonical_frontend_authority() {
-        let authority = "127.0.0.1:8272".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "tascarrel.localhost:8272".parse().unwrap());
-        headers.insert(
-            header::ORIGIN,
-            "http://tascarrel.localhost:8272".parse().unwrap(),
-        );
-
-        assert!(validate_websocket_origin(&headers, authority, &network()).is_ok());
-    }
-
-    /// Rejects a canonical hostname carrying a port other than hostd's bound
-    /// frontend port.
-    #[test]
-    fn browser_websocket_origin_rejects_wrong_canonical_port() {
-        let authority = "127.0.0.1:8272".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "tascarrel.localhost:8273".parse().unwrap());
-        headers.insert(
-            header::ORIGIN,
-            "http://tascarrel.localhost:8273".parse().unwrap(),
-        );
-
-        assert!(validate_websocket_origin(&headers, authority, &network()).is_err());
-    }
-
-    /// Rejects non-browser clients that omit the required origin proof.
-    #[test]
-    fn browser_websocket_requires_origin() {
-        let authority = "127.0.0.1:8272".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "127.0.0.1:8272".parse().unwrap());
-
-        assert!(validate_websocket_origin(&headers, authority, &network()).is_err());
-    }
-
-    /// Rejects a rebound hostname even when its Origin and Host agree.
-    #[test]
-    fn browser_websocket_rejects_rebound_authority() {
-        let authority = "127.0.0.1:8272".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "attacker.example:8272".parse().unwrap());
-        headers.insert(
-            header::ORIGIN,
-            "http://attacker.example:8272".parse().unwrap(),
-        );
-
-        assert!(validate_websocket_origin(&headers, authority, &network()).is_err());
-    }
 
     /// Prevents an SPA document from retaining stale asset references.
     #[test]

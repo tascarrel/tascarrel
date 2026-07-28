@@ -22,14 +22,19 @@ nix develop --command pnpm run build
 
 ## Developing Inside Tascarrel
 
-Point browser API requests at the host Tascarrel daemon while Vite continues to serve the frontend
-from its pod:
+Start Vite in the pod and publish it through Tascarrel:
 
 ```sh
-VITE_TASCARREL_API_ROOT=http://tascarrel.localhost:8272/api/v1 pnpm run dev
-podctl http publish 5174 --title "Tascarrel frontend"
+pnpm run dev
+podctl http publish --title "Tascarrel frontend" 5174
 ```
 
-Open the packaged Tascarrel frontend, find the published route in the Network view, and choose
-**Trust as Tascarrel frontend**. Tascarrel grants API access only to that route's exact browser origin;
-other routes and previews nested beneath the development frontend remain untrusted.
+In the packaged Tascarrel frontend, find the published route in the Network view and choose
+**Trust as Tascarrel frontend**, then open it with the route action. Hostd issues a one-time route
+ticket, installs a route-scoped `HttpOnly` cookie, and exposes the Tascarrel API below
+`/.tascarrel/api/v1` on that exact trusted route. The development frontend discovers this bridge
+through `/.tascarrel/context`; no API-root environment override is needed.
+
+Frontend trust remains exclusive. Trusting another route removes trust from the previous route.
+Ordinary published routes receive only their proxied application traffic, and hostd strips its
+route credential before forwarding requests into the pod.

@@ -23,6 +23,7 @@ import {
 
 import type { pods, workspaces } from "../../../api/generated/index.ts";
 import { ConnectionOverlay } from "../../../components/ui/ConnectionOverlay.tsx";
+import { createHttpRouteTicket } from "../../network/routeAccess.ts";
 import {
   type GlobalCommandDefinition,
   useGlobalCommands,
@@ -117,6 +118,12 @@ type WorkbenchShellProps = {
   onSelectTerminal: (terminalId: string) => void;
   onNewTerminal: () => void;
   onCloseTerminal: (terminalId: string) => void;
+};
+
+type PublishedPreviewAccess = {
+  url?: string;
+  error?: string;
+  pending?: boolean;
 };
 
 export type AgentWorkbenchTab = {
@@ -276,7 +283,9 @@ export function WorkbenchShell({
     ids: new Set(),
   });
   const [webPreviews, setWebPreviews] = useState(INITIAL_WEB_PREVIEWS);
-  const [publishedPreviewUrls, setPublishedPreviewUrls] = useState<Record<string, string>>({});
+  const [publishedPreviewAccess, setPublishedPreviewAccess] = useState<
+    Record<string, PublishedPreviewAccess>
+  >({});
   const [activeWebPreviewId, setActiveWebPreviewId] = useState<string>();
   const [webPreviewRevisions, setWebPreviewRevisions] = useState<Record<string, number>>({});
   const nextWebPreviewNumber = useRef(1);
@@ -286,12 +295,17 @@ export function WorkbenchShell({
     [publishedWebPreviews],
   );
   const availableWebPreviews = useMemo(() => [
-    ...publishedWebPreviews.map((preview) => ({
-      ...preview,
-      url: publishedPreviewUrls[preview.id] ?? preview.url,
-    })),
+    ...publishedWebPreviews.map((preview) => {
+      const access = publishedPreviewAccess[preview.id];
+      return {
+        ...preview,
+        url: access?.url ?? preview.url,
+        routeAccessError: access?.error,
+        routeAccessPending: access?.pending,
+      };
+    }),
     ...webPreviews,
-  ], [publishedPreviewUrls, publishedWebPreviews, webPreviews]);
+  ], [publishedPreviewAccess, publishedWebPreviews, webPreviews]);
   const availableWebPreviewIds = useMemo(
     () => availableWebPreviews.map((preview) => preview.id),
     [availableWebPreviews],
@@ -353,11 +367,42 @@ export function WorkbenchShell({
   );
 
   useEffect(() => {
-    setPublishedPreviewUrls((current) => {
+    setPublishedPreviewAccess((current) => {
       const entries = Object.entries(current).filter(([id]) => publishedWebPreviewIds.has(id));
       return entries.length === Object.keys(current).length ? current : Object.fromEntries(entries);
     });
   }, [publishedWebPreviewIds]);
+
+  useEffect(() => {
+    let active = true;
+    for (const preview of publishedWebPreviews) {
+      if (!preview.hostnamePrefix) continue;
+      setPublishedPreviewAccess((current) => ({
+        ...current,
+        [preview.id]: { pending: true },
+      }));
+      void createHttpRouteTicket(preview.hostnamePrefix)
+        .then((url) => {
+          if (active) {
+            setPublishedPreviewAccess((current) => ({
+              ...current,
+              [preview.id]: { url },
+            }));
+          }
+        })
+        .catch((cause) => {
+          if (active) {
+            setPublishedPreviewAccess((current) => ({
+              ...current,
+              [preview.id]: { error: previewAccessError(cause) },
+            }));
+          }
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [publishedWebPreviews]);
 
   useEffect(() => {
     setActiveWebPreviewId((current) => current && availableWebPreviews.some((preview) => preview.id === current)
@@ -486,6 +531,31 @@ export function WorkbenchShell({
     updateLayout({ previewOpen: true });
   };
   const reloadWebPreview = (previewId: string) => {
+    const published = publishedWebPreviews.find((preview) => preview.id === previewId);
+    if (published?.hostnamePrefix) {
+      setPublishedPreviewAccess((current) => ({
+        ...current,
+        [previewId]: { pending: true },
+      }));
+      void createHttpRouteTicket(published.hostnamePrefix)
+        .then((url) => {
+          setPublishedPreviewAccess((current) => ({
+            ...current,
+            [previewId]: { url },
+          }));
+          setWebPreviewRevisions((current) => ({
+            ...current,
+            [previewId]: (current[previewId] ?? 0) + 1,
+          }));
+        })
+        .catch((cause) => {
+          setPublishedPreviewAccess((current) => ({
+            ...current,
+            [previewId]: { error: previewAccessError(cause) },
+          }));
+        });
+      return;
+    }
     setWebPreviewRevisions((current) => ({
       ...current,
       [previewId]: (current[previewId] ?? 0) + 1,
@@ -495,7 +565,10 @@ export function WorkbenchShell({
     const url = normalizePreviewUrl(address);
     if (!url) return;
     if (publishedWebPreviewIds.has(previewId)) {
-      setPublishedPreviewUrls((current) => ({ ...current, [previewId]: url }));
+      setPublishedPreviewAccess((current) => ({
+        ...current,
+        [previewId]: { url },
+      }));
     } else {
       setWebPreviews((current) => current.map((preview) => preview.id === previewId
         ? { ...preview, title: previewTitleForUrl(url), url }
@@ -960,6 +1033,12 @@ function normalizeWorkbenchLayout(value: unknown, fallback = DEFAULT_LAYOUT): La
       : fallback.previewOpen,
     previewSize: clampNumber(layout.previewSize, 300, MAX_PREVIEW_SIZE, fallback.previewSize),
   };
+}
+
+function previewAccessError(cause: unknown): string {
+  return cause instanceof Error
+    ? cause.message
+    : "Tascarrel could not authorize the published route.";
 }
 
 function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number) {

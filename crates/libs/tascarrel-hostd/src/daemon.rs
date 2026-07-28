@@ -29,7 +29,6 @@ use tascarrel_api::types::host::ServerStartupPhase;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_vm::Acceleration;
 use tascarrel_vm::Architecture;
-use tokio::net::UnixListener;
 use tokio::signal::unix::SignalKind;
 use tokio::signal::unix::signal;
 use tracing::info;
@@ -47,6 +46,9 @@ use crate::WorkspaceServiceConfig;
 use crate::bind_control_socket;
 use crate::control_plane::HostControlService;
 use crate::remove_control_socket;
+use crate::server_config::ServerConfig;
+use crate::services::auth::AuthService;
+use crate::services::auth::AuthServiceConfig;
 use crate::services::config::ConfigService;
 use crate::services::config::ConfigServiceConfig;
 use crate::services::network::NetworkService;
@@ -386,13 +388,54 @@ where
         &runtime_dir.join("host.lock"),
         "Tascarrel host workspace service",
     )?;
+    let server_config = ServerConfig::load(tascarrel_home.server_config())
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("load host server configuration")?;
     let reporter = StartupReporter::new();
+    let mut auth_config = AuthServiceConfig::new(tascarrel_home.state().join("auth"));
+    auth_config.secret_file = server_config
+        .authentication_secret_file()
+        .map(Path::to_owned);
+    let auth = AuthService::open(auth_config)
+        .await
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("start host authentication service")?;
+    let control_socket = args
+        .socket
+        .clone()
+        .unwrap_or_else(|| tascarrel_home.control_socket());
+    if !control_socket.is_absolute() {
+        bail!(
+            "control socket must be absolute: {}",
+            control_socket.display()
+        );
+    }
+    let _socket_cleanup = SocketCleanup(control_socket.clone());
+    let listener = bind_control_socket(&control_socket).with_context(|| {
+        format!(
+            "failed to bind unified host socket {}",
+            control_socket.display()
+        )
+    })?;
+    let (control_ready, control_state) = tokio::sync::watch::channel(None);
+    let broker_auth = auth.clone();
+    let broker = async move {
+        Broker::new(listener, broker_auth, control_state)
+            .run()
+            .await
+            .context("local host control plane stopped")
+    };
     let web_address = args.web_address.map(validate_web_address).transpose()?;
     let (web_server, mut web_control) = match web_address {
         Some(address) => {
-            let (server, control) = crate::web::bind(address, reporter.clone())
-                .await
-                .context("bind Tascarrel bootstrap web server")?;
+            let (server, control) = crate::web::bind(
+                address,
+                reporter.clone(),
+                auth.clone(),
+                server_config.public_origin().map(str::to_owned),
+            )
+            .await
+            .context("bind Tascarrel bootstrap web server")?;
             (Some(server), Some(control))
         }
         None => (None, None),
@@ -404,7 +447,7 @@ where
             None => std::future::pending::<Result<()>>().await,
         }
     };
-    tokio::pin!(web, shutdown);
+    tokio::pin!(broker, web, shutdown);
 
     let initial_options = args;
     let (initialized, warnings) = loop {
@@ -419,6 +462,7 @@ where
                 info!("host workspace service shutdown requested during startup");
                 return Ok(());
             }
+            result = &mut broker => return result,
             result = &mut web => return result,
             result = &mut startup => result,
         };
@@ -434,6 +478,7 @@ where
                 };
                 tokio::select! {
                     () = &mut shutdown => return Ok(()),
+                    result = &mut broker => return result,
                     result = &mut web => return result,
                     () = control.retry_requested() => {}
                 }
@@ -445,7 +490,7 @@ where
             ServerStartupPhase::InitializingServices,
             "Initializing Tascarrel services",
         );
-        match Initialized::new(preparation.options) {
+        match Initialized::new(preparation.options, auth.clone(), &server_config) {
             Ok(initialized) => break (initialized, preparation.warnings),
             Err(error) => {
                 let failure = StartupFailure::retryable(
@@ -462,6 +507,7 @@ where
                 };
                 tokio::select! {
                     () = &mut shutdown => return Ok(()),
+                    result = &mut broker => return result,
                     result = &mut web => return result,
                     () = control.retry_requested() => {}
                 }
@@ -471,12 +517,11 @@ where
 
     let Initialized {
         prepared,
-        listener,
         repository_service,
         state,
         host_control,
-        _socket_cleanup,
     } = initialized;
+    control_ready.send_replace(Some(host_control.clone()));
     if let Some(control) = &web_control {
         control.make_ready(
             state.clone(),
@@ -490,15 +535,8 @@ where
         socket = %prepared.socket.display(),
         "host workspace service ready"
     );
-    let broker_control = host_control.clone();
-    let broker = async move {
-        Broker::new(listener, broker_control)
-            .run()
-            .await
-            .context("local host control plane stopped")
-    };
     let repository_refreshes = repository_service.run_background_refreshes();
-    tokio::pin!(broker, repository_refreshes, workspace_requests);
+    tokio::pin!(repository_refreshes, workspace_requests);
     let result = tokio::select! {
         () = &mut shutdown => {
             info!("host workspace service shutdown requested");
@@ -616,24 +654,15 @@ impl DaemonOptions {
 
 struct Initialized {
     prepared: Prepared,
-    listener: UnixListener,
     repository_service: RepositoryService,
     state: HostState,
     host_control: HostControlService,
-    _socket_cleanup: SocketCleanup,
 }
 
 impl Initialized {
     /// Builds the host services that become available only after preparation.
-    fn new(args: DaemonOptions) -> Result<Self> {
+    fn new(args: DaemonOptions, auth: AuthService, server_config: &ServerConfig) -> Result<Self> {
         let prepared = Prepared::new(&args)?;
-        let socket_cleanup = SocketCleanup(prepared.socket.clone());
-        let listener = bind_control_socket(&prepared.socket).with_context(|| {
-            format!(
-                "failed to bind unified host socket {}",
-                prepared.socket.display()
-            )
-        })?;
         let repository_service = RepositoryService::new(RepositoryServiceConfig::new(
             prepared.workspace_service.git.clone(),
             &prepared.workspaces_dir,
@@ -649,6 +678,7 @@ impl Initialized {
         let network_service = NetworkService::new(NetworkServiceConfig {
             dns_resolver: args.dns_resolver,
             host_port_host: args.host_port_host,
+            hostname_suffix: server_config.route_hostname_suffix().to_owned(),
             ..NetworkServiceConfig::default()
         })
         .map_err(|error| anyhow!(error.to_string()))
@@ -660,6 +690,7 @@ impl Initialized {
         .map_err(|error| anyhow!(error.to_string()))
         .context("start host secrets service")?;
         let state = HostState::new(
+            auth,
             workspace_service,
             config_service,
             network_service,
@@ -669,11 +700,9 @@ impl Initialized {
         let host_control = HostControlService::new(state.clone());
         Ok(Self {
             prepared,
-            listener,
             repository_service,
             state,
             host_control,
-            _socket_cleanup: socket_cleanup,
         })
     }
 }

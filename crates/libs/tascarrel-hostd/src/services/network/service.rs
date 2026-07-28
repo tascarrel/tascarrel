@@ -22,6 +22,7 @@ use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header;
 use axum::http::uri::Authority;
+use cookie::Cookie;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::ConnectionConfig;
 use hickory_resolver::config::NameServerConfig;
@@ -61,6 +62,7 @@ use super::activity::ActivitySubscription;
 use super::proxy::requests_upgrade;
 use super::proxy::strip_hop_by_hop;
 use crate::WorkspaceService;
+use crate::services::auth::HTTP_ROUTE_COOKIE_NAME;
 use crate::services::secrets::SecretsService;
 use crate::services::workspaces::WorkspaceNetworkRequest;
 use crate::services::workspaces::WorkspaceNetworkRequests;
@@ -258,9 +260,28 @@ struct PodPortTarget {
 /// One resolved routing layer consumed by this host daemon.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedHttpRoute {
+    route_id: api::HttpRouteId,
+    trusted_tascarrel_frontend: bool,
     target: PodPortTarget,
     original_authority: Authority,
     forwarded_authority: Authority,
+}
+
+impl ResolvedHttpRoute {
+    /// Returns the stable route receiving this request.
+    pub(crate) fn id(&self) -> &api::HttpRouteId {
+        &self.route_id
+    }
+
+    /// Returns the exact downstream hostname used for this routed request.
+    pub(crate) fn hostname(&self) -> &str {
+        self.original_authority.host()
+    }
+
+    /// Returns whether this route may host a Tascarrel frontend bridge.
+    pub(crate) fn is_trusted_tascarrel_frontend(&self) -> bool {
+        self.trusted_tascarrel_frontend
+    }
 }
 
 /// Caller-relevant network service failure categories.
@@ -321,6 +342,10 @@ impl NetworkProxyError {
 }
 
 impl NetworkService {
+    /// Stable local-development suffix accepted alongside a configured public
+    /// route suffix.
+    pub(crate) const LOCAL_HOSTNAME_SUFFIX: &'static str = DEFAULT_HOSTNAME_SUFFIX;
+
     /// Creates an empty host network service.
     ///
     /// # Errors
@@ -639,6 +664,23 @@ impl NetworkService {
     #[must_use]
     pub(crate) fn http_route(&self, id: &api::HttpRouteId) -> Option<api::HttpRoute> {
         lock(&self.inner.state).http_routes.get(id).cloned()
+    }
+
+    /// Returns one route selected by its host-issued DNS label.
+    #[must_use]
+    pub(crate) fn http_route_by_hostname_prefix(
+        &self,
+        prefix: &api::HostnamePrefix,
+    ) -> Option<api::HttpRoute> {
+        let state = lock(&self.inner.state);
+        let id = state.hostname_prefixes.get(prefix.as_str())?;
+        state.http_routes.get(id).cloned()
+    }
+
+    /// Returns the DNS suffix below which HTTP route labels are published.
+    #[must_use]
+    pub(crate) fn hostname_suffix(&self) -> &str {
+        &self.inner.config.hostname_suffix
     }
 
     /// Creates one dynamic host-loopback TCP forward.
@@ -1210,8 +1252,10 @@ impl NetworkService {
         headers: &HeaderMap,
     ) -> Result<Option<ResolvedHttpRoute>, Report<NetworkProxyError>> {
         let original_authority = request_authority(headers)?;
-        let Some((prefix, forwarded_authority)) =
-            split_routed_authority(&original_authority, &self.inner.config.hostname_suffix)?
+        let Some((prefix, forwarded_authority)) = split_host_issued_route_authority(
+            &original_authority,
+            &self.inner.config.hostname_suffix,
+        )?
         else {
             return Ok(None);
         };
@@ -1225,6 +1269,8 @@ impl NetworkService {
             .get(id)
             .expect("every hostname prefix refers to an HTTP route");
         Ok(Some(ResolvedHttpRoute {
+            route_id: route.id.clone(),
+            trusted_tascarrel_frontend: route.trusted_tascarrel_frontend,
             target: PodPortTarget::from(route),
             original_authority,
             forwarded_authority,
@@ -1252,6 +1298,7 @@ impl NetworkService {
         let wants_upgrade = requests_upgrade(request.headers())
             .map_err(|error| NetworkProxyError::InvalidRequest(error.to_string()).report())?;
         let downstream_upgrade = wants_upgrade.then(|| hyper::upgrade::on(&mut request));
+        strip_route_authentication_cookie(request.headers_mut())?;
         rewrite_forwarded_request(&mut request, &route, wants_upgrade)?;
         let permit = Arc::new(
             Arc::clone(&self.inner.connections)
@@ -1805,6 +1852,19 @@ fn split_routed_authority(
     Ok(Some((prefix.to_owned(), forwarded)))
 }
 
+fn split_host_issued_route_authority(
+    authority: &Authority,
+    configured_suffix: &str,
+) -> Result<Option<(String, Authority)>, Report<NetworkProxyError>> {
+    if let Some(route) = split_routed_authority(authority, configured_suffix)? {
+        return Ok(Some(route));
+    }
+    if !configured_suffix.eq_ignore_ascii_case(DEFAULT_HOSTNAME_SUFFIX) {
+        return split_routed_authority(authority, DEFAULT_HOSTNAME_SUFFIX);
+    }
+    Ok(None)
+}
+
 fn rewrite_forwarded_request(
     request: &mut Request<Body>,
     route: &ResolvedHttpRoute,
@@ -1981,6 +2041,11 @@ fn make_response_cookies_host_only(
         let cookie = cookie
             .to_str()
             .map_err(|_| forward_proxy_error("upstream Set-Cookie header is not text"))?;
+        let parsed = Cookie::parse(cookie)
+            .map_err(|error| forward_proxy_error(format!("upstream cookie is invalid: {error}")))?;
+        if parsed.name().eq_ignore_ascii_case(HTTP_ROUTE_COOKIE_NAME) {
+            continue;
+        }
         let sanitized = cookie
             .split(';')
             .filter(|attribute| {
@@ -1995,6 +2060,42 @@ fn make_response_cookies_host_only(
             HeaderValue::from_str(&sanitized).map_err(|error| {
                 forward_proxy_error(format!("could not make upstream cookie host-only: {error}"))
             })?,
+        );
+    }
+    Ok(())
+}
+
+fn strip_route_authentication_cookie(
+    headers: &mut HeaderMap,
+) -> Result<(), Report<NetworkProxyError>> {
+    let sanitized = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .map(|value| {
+            let value = value
+                .to_str()
+                .map_err(|_| invalid_proxy_request("Cookie header is not text"))?;
+            Ok(Cookie::split_parse(value)
+                .map(|cookie| {
+                    cookie.map_err(|error| {
+                        invalid_proxy_request(format!("Cookie header is invalid: {error}"))
+                    })
+                })
+                .collect::<Result<Vec<_>, Report<NetworkProxyError>>>()?
+                .into_iter()
+                .filter(|cookie| !cookie.name().eq_ignore_ascii_case(HTTP_ROUTE_COOKIE_NAME))
+                .map(|cookie| cookie.to_string())
+                .collect::<Vec<_>>()
+                .join("; "))
+        })
+        .collect::<Result<Vec<_>, Report<NetworkProxyError>>>()?;
+    headers.remove(header::COOKIE);
+    for cookie in sanitized.into_iter().filter(|cookie| !cookie.is_empty()) {
+        headers.append(
+            header::COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| invalid_proxy_request("Cookie header is invalid"))?,
         );
     }
     Ok(())
@@ -2031,7 +2132,7 @@ async fn relay_upgrade(
     Ok(())
 }
 
-fn validate_hostname_suffix(suffix: &str) -> Result<(), Report<NetworkServiceError>> {
+pub(crate) fn validate_hostname_suffix(suffix: &str) -> Result<(), Report<NetworkServiceError>> {
     if suffix.is_empty() || suffix.len() > 253 || suffix != suffix.to_ascii_lowercase() {
         return Err(invalid_configuration(
             "network hostname suffix must be 1-253 lowercase ASCII bytes",
@@ -2225,6 +2326,8 @@ mod tests {
 
     fn resolved_route(original: &str, forwarded: &str) -> ResolvedHttpRoute {
         ResolvedHttpRoute {
+            route_id: api::HttpRouteId::generate(),
+            trusted_tascarrel_frontend: false,
             target: PodPortTarget {
                 workspace: api_workspace(),
                 pod_id: tascarrel_api::types::pods::PodId::generate(),
@@ -2730,6 +2833,19 @@ mod tests {
         assert_eq!(forwarded.as_str(), "inner.tascarrel.localhost:8272");
     }
 
+    /// Verifies a configured public route suffix retains the stable local
+    /// development suffix as an alias.
+    #[test]
+    fn public_route_configuration_keeps_the_local_development_alias() {
+        let authority = "editor.tascarrel.localhost:8272".parse().unwrap();
+        let (prefix, forwarded) =
+            split_host_issued_route_authority(&authority, "tascarrel.example.com")
+                .unwrap()
+                .unwrap();
+        assert_eq!(prefix, "editor");
+        assert_eq!(forwarded.as_str(), "tascarrel.localhost:8272");
+    }
+
     /// Verifies each proxy layer exposes the remaining route stack to the pod
     /// in both Host and same-origin Origin.
     #[test]
@@ -2794,6 +2910,10 @@ mod tests {
             header::SET_COOKIE,
             "preference=dark; SameSite=Lax".parse().unwrap(),
         );
+        headers.append(
+            header::SET_COOKIE,
+            "tascarrel_route=overwritten; Path=/".parse().unwrap(),
+        );
 
         rewrite_forwarded_response(&mut headers, &route).unwrap();
 
@@ -2809,6 +2929,26 @@ mod tests {
         assert_eq!(cookies.len(), 2);
         assert_eq!(cookies[0], "session=one; Path=/; HttpOnly");
         assert_eq!(cookies[1], "preference=dark; SameSite=Lax");
+    }
+
+    /// Verifies host route authentication remains private while application
+    /// cookies continue to reach the routed service.
+    #[test]
+    fn request_cookie_filter_preserves_upstream_application_sessions() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            "application_session=one; tascarrel_route=secret; preference=dark"
+                .parse()
+                .unwrap(),
+        );
+
+        strip_route_authentication_cookie(&mut headers).unwrap();
+
+        assert_eq!(
+            headers[header::COOKIE],
+            "application_session=one; preference=dark"
+        );
     }
 
     /// Verifies the canonical frontend authority is not treated as a route.

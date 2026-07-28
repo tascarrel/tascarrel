@@ -5,7 +5,7 @@ import { guestApi } from "../../api/client.ts";
 import type { pods, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import type { IframeFrameSpec } from "../../components/ui/IframePool.tsx";
-import { nestedHttpRouteUrl } from "../network/addresses.ts";
+import { useHttpRouteTicket } from "../network/routeAccess.ts";
 import { useCodeFrame } from "./CodeFramePool.tsx";
 import { DEFAULT_CODE_FOLDER } from "./folders.ts";
 import { useCodeSessions } from "./state.ts";
@@ -27,6 +27,9 @@ export function CodeView({
   const pendingTargets = useRef(new Set<string>());
   const session = sessions.value?.codeSessions.find((candidate) =>
     candidate.podId === pod.id && candidate.folder === folder
+  );
+  const routeAccess = useHttpRouteTicket(
+    session?.status.status === "Running" ? session.hostnamePrefix : undefined,
   );
   const targetKey = `${workspace}:${pod.id}:${folder}`;
   const currentTarget = useRef(targetKey);
@@ -62,23 +65,25 @@ export function CodeView({
   }, [ensureSession, targetKey]);
 
   const frame = useMemo<IframeFrameSpec | undefined>(() =>
-    session?.status.status === "Running" ? {
+    session?.status.status === "Running" && routeAccess.url ? {
       id: `${targetKey}:${session.processId}`,
-      src: nestedHttpRouteUrl(session.hostnamePrefix),
+      src: routeAccess.url,
       title: `${pod.title} code editor · ${folder}`,
       iframeProps: { allow: "clipboard-read; clipboard-write" },
     } : undefined,
-  [folder, pod.title, session?.hostnamePrefix, session?.processId, session?.status.status, targetKey]);
+  [folder, pod.title, routeAccess.url, session?.processId, session?.status.status, targetKey]);
   useCodeFrame(frame, anchor);
 
   const failure = actionError
+    ?? routeAccess.error?.message
     ?? sessions.error?.message
     ?? (session?.status.status === "Failed" ? session.status.message : undefined);
   const exited = session?.status.status === "Exited";
   const waiting = launching
     || !sessions.ready
     || session === undefined
-    || session.status.status === "Starting";
+    || session.status.status === "Starting"
+    || routeAccess.pending;
 
   return (
     <div ref={setAnchor} className="absolute inset-0 overflow-hidden bg-canvas">

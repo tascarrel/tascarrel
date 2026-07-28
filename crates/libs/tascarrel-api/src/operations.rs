@@ -149,6 +149,9 @@ macro_rules! __with_guestd_subscriptions {
 macro_rules! with_hostd_operations {
     (actions => $macro:ident) => {
         $macro! {
+            ("auth_CreatePairingKey", auth::CreatePairingKeyAction, auth::CreatePairingKeyOutput),
+            ("auth_RevokeBrowserSession", auth::RevokeBrowserSessionAction, auth::RevokeBrowserSessionOutput),
+            ("auth_CreateHttpRouteTicket", auth::CreateHttpRouteTicketAction, auth::CreateHttpRouteTicketOutput),
             ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
             ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
             ("secrets_Reveal", secrets::RevealSecretAction, secrets::RevealSecretOutput),
@@ -176,6 +179,7 @@ macro_rules! with_hostd_operations {
     };
     (subscriptions => $macro:ident) => {
         $macro! {
+            ("auth_BrowserSessionsChanged", auth::BrowserSessionsChangedSubscription, auth::BrowserSessionsChangedEvent),
             ("config_Changed", config::ConfigChangedSubscription, config::ConfigChangedEvent),
             ("secrets_Changed", secrets::SecretsChangedSubscription, secrets::SecretsChangedEvent),
             ("network_DnsRequests", network::DnsRequestsSubscription, network::DnsRequestsEvent),
@@ -199,6 +203,9 @@ macro_rules! with_all_actions {
     ($macro:ident) => {
         $crate::__with_guestd_actions! {
             @append $macro {
+                ("auth_CreatePairingKey", auth::CreatePairingKeyAction, auth::CreatePairingKeyOutput),
+                ("auth_RevokeBrowserSession", auth::RevokeBrowserSessionAction, auth::RevokeBrowserSessionOutput),
+                ("auth_CreateHttpRouteTicket", auth::CreateHttpRouteTicketAction, auth::CreateHttpRouteTicketOutput),
                 ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
                 ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
                 ("secrets_Reveal", secrets::RevealSecretAction, secrets::RevealSecretOutput),
@@ -233,6 +240,7 @@ macro_rules! with_all_subscriptions {
     ($macro:ident) => {
         $crate::__with_guestd_subscriptions! {
             @append $macro {
+                ("auth_BrowserSessionsChanged", auth::BrowserSessionsChangedSubscription, auth::BrowserSessionsChangedEvent),
                 ("config_Changed", config::ConfigChangedSubscription, config::ConfigChangedEvent),
                 ("secrets_Changed", secrets::SecretsChangedSubscription, secrets::SecretsChangedEvent),
                 ("network_DnsRequests", network::DnsRequestsSubscription, network::DnsRequestsEvent),
@@ -322,6 +330,7 @@ mod host_operation_seal {
 }
 
 mod action_impls {
+    use crate::types::auth;
     use crate::types::changes;
     use crate::types::chats;
     use crate::types::code;
@@ -351,6 +360,7 @@ mod action_impls {
 }
 
 mod subscription_impls {
+    use crate::types::auth;
     use crate::types::changes;
     use crate::types::chats;
     use crate::types::code;
@@ -411,6 +421,7 @@ mod guest_operation_impls {
 }
 
 mod host_operation_impls {
+    use crate::types::auth;
     use crate::types::config;
     use crate::types::network;
     use crate::types::repositories;

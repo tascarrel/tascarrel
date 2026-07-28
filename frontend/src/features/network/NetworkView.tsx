@@ -15,6 +15,7 @@ import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
 import { SidebarTabs, SidebarTabsPanel } from "../../components/ui/SidebarTabs.tsx";
 import { httpRouteUrl } from "./addresses.ts";
+import { createHttpRouteTicket } from "./routeAccess.ts";
 import { HostPodForwardForm, HttpRouteForm, PodHostForwardForm } from "./NetworkForms.tsx";
 import {
   useDnsRequests,
@@ -118,6 +119,19 @@ export function NetworkView({
       setCopied(address);
     } catch (cause) {
       setActionError(`Could not copy the address: ${errorMessage(cause)}`);
+    }
+  };
+
+  const openRoute = async (route: network.HttpRoute) => {
+    const popup = window.open("", "_blank");
+    if (popup) popup.opener = null;
+    try {
+      const url = await createHttpRouteTicket(route.hostnamePrefix);
+      if (popup) popup.location.replace(url);
+      else window.location.assign(url);
+    } catch (cause) {
+      popup?.close();
+      setActionError(`Could not open the HTTP route: ${errorMessage(cause)}`);
     }
   };
 
@@ -244,6 +258,7 @@ export function NetworkView({
                             copied={copied === address}
                             open
                             onCopy={() => void copyAddress(address)}
+                            onOpen={() => void openRoute(route)}
                             onDelete={() => setDeleteTarget({ type: "route", value: route })}
                           />
                         </div>
@@ -667,12 +682,14 @@ function AddressActions({
   copied,
   open = false,
   onCopy,
+  onOpen,
   onDelete,
 }: {
   address: string;
   copied: boolean;
   open?: boolean;
   onCopy: () => void;
+  onOpen?: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -689,16 +706,15 @@ function AddressActions({
           : <Copy aria-hidden="true" className="size-3.5" />}
       </Button>
       {open ? (
-        <a
-          className="inline-flex size-8 items-center justify-center rounded-lg border border-ui-border/70 bg-surface text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          href={address}
-          target="_blank"
-          rel="noreferrer"
+        <Button
+          size="icon"
+          className="size-8"
           aria-label={`Open ${address}`}
           title="Open route"
+          onClick={onOpen}
         >
           <ExternalLink aria-hidden="true" className="size-3.5" />
-        </a>
+        </Button>
       ) : null}
       <Button size="icon" className="size-8" variant="danger" aria-label={`Delete ${address}`} title="Delete" onClick={onDelete}>
         <Trash2 aria-hidden="true" className="size-3.5" />

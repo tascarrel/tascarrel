@@ -157,6 +157,41 @@
         font-size: 12px;
       }
 
+      #pairing-form {
+        display: grid;
+        gap: 14px;
+        margin-top: 28px;
+      }
+
+      #pairing-form label {
+        display: grid;
+        gap: 7px;
+        color: #d8dee1;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      #pairing-form input {
+        min-height: 42px;
+        padding: 8px 11px;
+        border: 1px solid #3d484d;
+        border-radius: 7px;
+        background: #171c1f;
+        color: inherit;
+        font: inherit;
+      }
+
+      #pairing-form input:focus {
+        border-color: #55b9df;
+        outline: 2px solid rgb(85 185 223 / 30%);
+        outline-offset: 1px;
+      }
+
+      #pairing-error {
+        color: #f1a4a4;
+        font-size: 13px;
+      }
+
       [hidden] {
         display: none !important;
       }
@@ -165,7 +200,23 @@
   <body>
     <main>
       <h1>Tascarrel</h1>
-      <section aria-live="polite">
+      <section id="pairing" aria-live="polite" hidden>
+        <h2>Pair This Browser</h2>
+        <p>Run <code>tascarrelctl auth pair</code> on the Tascarrel host, then enter the single-use key.</p>
+        <form id="pairing-form">
+          <label>
+            Pairing key
+            <input id="pairing-key" type="password" autocomplete="one-time-code" required />
+          </label>
+          <label>
+            Device label (optional)
+            <input id="pairing-label" type="text" autocomplete="off" maxlength="80" placeholder="Work laptop" />
+          </label>
+          <p id="pairing-error" role="alert"></p>
+          <button class="primary" id="pair" type="submit">Pair browser</button>
+        </form>
+      </section>
+      <section id="startup" aria-live="polite" hidden>
         <h2 id="title">Starting</h2>
         <p id="detail">Connecting to the Tascarrel server…</p>
         <progress id="progress"></progress>
@@ -180,6 +231,13 @@
     </main>
     <script>
       const title = document.querySelector("#title");
+      const pairing = document.querySelector("#pairing");
+      const startup = document.querySelector("#startup");
+      const pairingForm = document.querySelector("#pairing-form");
+      const pairingKey = document.querySelector("#pairing-key");
+      const pairingLabel = document.querySelector("#pairing-label");
+      const pairingError = document.querySelector("#pairing-error");
+      const pair = document.querySelector("#pair");
       const detail = document.querySelector("#detail");
       const progress = document.querySelector("#progress");
       const progressDetail = document.querySelector("#progress-detail");
@@ -291,17 +349,66 @@
 
       reload.addEventListener("click", () => location.reload());
 
-      const events = new EventSource("/api/v1/server/status/events");
-      events.onmessage = (event) => render(JSON.parse(event.data));
-      events.onerror = () => {
-        title.textContent = "Connecting";
-        detail.textContent =
-          "The Tascarrel server connection was interrupted. Reconnecting…";
-        progress.hidden = false;
-        progress.removeAttribute("value");
-        progressDetail.textContent = "";
-        reload.hidden = false;
-      };
+      pairingForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        pair.disabled = true;
+        pairingError.textContent = "";
+        try {
+          const response = await fetch("/api/v1/auth/pair", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pairingKey: pairingKey.value.trim(),
+              ...(pairingLabel.value.trim() ? { label: pairingLabel.value.trim() } : {}),
+            }),
+          });
+          if (!response.ok) throw new Error("That pairing key is invalid, expired, or already used.");
+          pairing.hidden = true;
+          startStatus();
+        } catch (error) {
+          pairingError.textContent = error instanceof Error
+            ? error.message
+            : "Tascarrel could not pair this browser.";
+        } finally {
+          pair.disabled = false;
+        }
+      });
+
+      async function initialize() {
+        try {
+          const response = await fetch("/api/v1/auth/session", { cache: "no-store" });
+          if (response.status === 204) {
+            startStatus();
+            return;
+          }
+          if (response.status !== 401) {
+            throw new Error("Tascarrel could not verify this browser session.");
+          }
+        } catch (error) {
+          pairingError.textContent = error instanceof Error
+            ? error.message
+            : "Tascarrel could not verify this browser session.";
+        }
+        pairing.hidden = false;
+        pairingKey.focus();
+      }
+
+      function startStatus() {
+        startup.hidden = false;
+        const events = new EventSource("/api/v1/server/status/events");
+        events.onmessage = (event) => render(JSON.parse(event.data));
+        events.onerror = () => {
+          title.textContent = "Connecting";
+          detail.textContent =
+            "The Tascarrel server connection was interrupted. Reconnecting…";
+          progress.hidden = false;
+          progress.removeAttribute("value");
+          progressDetail.textContent = "";
+          reload.hidden = false;
+        };
+      }
+
+      void initialize();
     </script>
   </body>
 </html>

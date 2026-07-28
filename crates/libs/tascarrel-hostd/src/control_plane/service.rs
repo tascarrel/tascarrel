@@ -8,6 +8,7 @@ use reportify::ErrorExt as _;
 use reportify::Report;
 use serde::de::DeserializeOwned;
 use tascarrel_api::ArcStr;
+use tascarrel_api::types::auth;
 use tascarrel_api::types::config;
 use tascarrel_api::types::network;
 use tascarrel_api::types::protocol as wire;
@@ -20,6 +21,7 @@ use tascarrel_protocol::control_plane::Transport;
 use tascarrel_protocol::control_plane::policy::topology;
 use tascarrel_protocol::control_plane::server;
 
+use super::ConnectionPrincipal;
 use super::HostState;
 use super::InvocationCtx;
 use super::SubscriptionCtx;
@@ -65,8 +67,37 @@ impl HostControlService {
     where
         T: Transport + 'static,
     {
-        self.serve_until_shutdown(transport, client_id, pending())
-            .await
+        self.serve_until_shutdown(
+            transport,
+            client_id,
+            ConnectionPrincipal::LocalAdmin,
+            pending(),
+        )
+        .await
+    }
+
+    /// Serves one browser transport authenticated by `session_id`.
+    pub(crate) async fn serve_browser_until_shutdown<T, S>(
+        &self,
+        transport: T,
+        client_id: wire::ClientId,
+        session: crate::services::auth::AuthenticatedSession,
+        shutdown: S,
+    ) -> control_plane::Result<()>
+    where
+        T: Transport + 'static,
+        S: Future<Output = ()> + Send + 'static,
+    {
+        self.serve_until_shutdown(
+            transport,
+            client_id,
+            ConnectionPrincipal::Browser {
+                session_id: session.id,
+                origin: session.origin,
+            },
+            shutdown,
+        )
+        .await
     }
 
     /// Serves one authenticated client until the link exits or `shutdown`
@@ -76,13 +107,14 @@ impl HostControlService {
         &self,
         transport: T,
         client_id: wire::ClientId,
+        principal: ConnectionPrincipal,
         shutdown: S,
     ) -> control_plane::Result<()>
     where
         T: Transport + 'static,
         S: Future<Output = ()> + Send + 'static,
     {
-        self.server()
+        self.server(principal)
             .serve_until_shutdown(
                 transport,
                 topology::client_to_hostd(&client_id),
@@ -106,7 +138,7 @@ impl HostControlService {
         T: Transport + 'static,
     {
         let workspace = tascarrel_api::types::workspaces::WorkspaceName::new(workspace.as_str());
-        self.server().connect(
+        self.server(ConnectionPrincipal::Internal).connect(
             transport,
             topology::guestd_to_hostd(&workspace),
             control_plane::Config::default(),
@@ -114,10 +146,11 @@ impl HostControlService {
     }
 
     /// Creates an operation server for one adjacent control-plane link.
-    fn server(&self) -> server::Server {
+    fn server(&self, principal: ConnectionPrincipal) -> server::Server {
         server::Server::new(
             HostOperations {
                 state: self.inner.state.clone(),
+                principal,
             },
             HostRouter {
                 state: self.inner.state.clone(),
@@ -131,6 +164,7 @@ impl HostControlService {
 #[derive(Clone)]
 struct HostOperations {
     state: HostState,
+    principal: ConnectionPrincipal,
 }
 
 impl server::Service for HostOperations {
@@ -139,7 +173,8 @@ impl server::Service for HostOperations {
         invocation: wire::RpcInvocation,
     ) -> server::OperationFuture<'static, serde_json::Value> {
         let state = self.state.clone();
-        Box::pin(async move { execute_rpc(&state, invocation).await })
+        let principal = self.principal.clone();
+        Box::pin(async move { execute_rpc(&state, &principal, invocation).await })
     }
 
     fn subscribe(
@@ -147,7 +182,8 @@ impl server::Service for HostOperations {
         start: wire::SubscriptionStart,
     ) -> server::OperationFuture<'static, Box<dyn server::EventSource>> {
         let state = self.state.clone();
-        Box::pin(async move { open_subscription(&state, &start).await })
+        let principal = self.principal.clone();
+        Box::pin(async move { open_subscription(&state, &principal, &start).await })
     }
 }
 
@@ -156,11 +192,12 @@ macro_rules! define_action_dispatch {
         /// Selects and executes one registered hostd action.
         async fn execute_rpc(
             state: &HostState,
+            principal: &ConnectionPrincipal,
             invocation: wire::RpcInvocation,
         ) -> server::OperationResult<serde_json::Value> {
             match invocation.procedure.as_ref() {
                 $(
-                    $name => execute_action::<$action>(state, &invocation).await,
+                    $name => execute_action::<$action>(state, principal, &invocation).await,
                 )*
                 _ => Err(invalid_request("unknown host procedure")),
             }
@@ -175,11 +212,12 @@ macro_rules! define_subscription_dispatch {
         /// Selects and opens one registered hostd subscription.
         async fn open_subscription(
             state: &HostState,
+            principal: &ConnectionPrincipal,
             start: &wire::SubscriptionStart,
         ) -> server::OperationResult<Box<dyn server::EventSource>> {
             match start.subscription.as_ref() {
                 $(
-                    $name => open_typed_subscription::<$subscription>(state, start).await,
+                    $name => open_typed_subscription::<$subscription>(state, principal, start).await,
                 )*
                 _ => Err(invalid_request("unknown host subscription")),
             }
@@ -192,13 +230,14 @@ tascarrel_api::with_hostd_operations!(subscriptions => define_subscription_dispa
 /// Authorizes, decodes, and executes one selected action type.
 async fn execute_action<A>(
     state: &HostState,
+    principal: &ConnectionPrincipal,
     invocation: &wire::RpcInvocation,
 ) -> server::OperationResult<serde_json::Value>
 where
     A: ExecuteAction,
 {
-    let action = decode::<A>(invocation.input.clone())?;
-    let context = InvocationCtx::new(state, invocation);
+    let action = decode_typed::<A>(invocation.input.clone())?;
+    let context = InvocationCtx::new(state, invocation, principal);
     action.check_permissions(&context).await?;
     let output = action.execute(context).await?;
     serde_json::to_value(output).map_err(|error| {
@@ -213,13 +252,14 @@ where
 /// Authorizes, decodes, and opens one selected subscription type.
 async fn open_typed_subscription<S>(
     state: &HostState,
+    principal: &ConnectionPrincipal,
     start: &wire::SubscriptionStart,
 ) -> server::OperationResult<Box<dyn server::EventSource>>
 where
     S: OpenSubscription,
 {
-    let subscription = decode::<S>(start.input.clone())?;
-    let context = SubscriptionCtx::new(state, start);
+    let subscription = decode_typed::<S>(start.input.clone())?;
+    let context = SubscriptionCtx::new(state, start, principal);
     subscription.check_permissions(&context).await?;
     let source = subscription.open(context).await?;
     Ok(Box::new(TypedEventSource(source)))
@@ -272,7 +312,12 @@ impl server::Router for HostRouter {
 }
 
 /// Decodes one schema-typed operation input.
-fn decode<T: DeserializeOwned>(
+///
+/// # Errors
+///
+/// Returns an invalid-request operation error when the wire value does not
+/// satisfy the selected Sidex type.
+pub(crate) fn decode_typed<T: DeserializeOwned>(
     value: serde_json::Value,
 ) -> Result<T, Report<wire::OperationError>> {
     serde_json::from_value(value)

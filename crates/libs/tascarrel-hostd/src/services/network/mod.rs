@@ -19,4 +19,6 @@ pub use service::NetworkServiceConfig;
 pub use service::NetworkServiceError;
 pub use service::PodHostForwardListSubscription;
 pub use service::PortForwardListSubscription;
+pub(crate) use service::ResolvedHttpRoute;
 pub use service::TcpFlowsSubscription;
+pub(crate) use service::validate_hostname_suffix;

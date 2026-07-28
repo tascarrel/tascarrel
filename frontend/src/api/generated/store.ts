@@ -2,6 +2,7 @@
 /* eslint-disable */
 
 import * as __sidex_types from "@sidex/types";
+import * as __schema_auth from "./auth";
 import * as __schema_changes from "./changes";
 import * as __schema_chats from "./chats";
 import * as __schema_code from "./code";

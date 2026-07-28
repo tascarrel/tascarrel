@@ -30,6 +30,7 @@ import { SecretsSettings } from "../secrets/SecretsSettings.tsx";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
 import { TasciSettings } from "./TasciSettings.tsx";
 import { WorkspaceRuntimeSettings } from "./WorkspaceRuntimeSettings.tsx";
+import { RemoteAccessSettings } from "./RemoteAccessSettings.tsx";
 
 export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspace }) {
   const running = workspace.state.status === "Running";
@@ -59,6 +60,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
             label: "Secrets",
           },
           {
+            value: "remote-access",
+            label: "Remote Access",
+          },
+          {
             value: "danger",
             label: "Danger Zone",
             tone: "danger",
@@ -81,6 +86,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
 
         <SidebarTabsPanel value="secrets">
           <SecretsSettings workspace={workspace.name} />
+        </SidebarTabsPanel>
+
+        <SidebarTabsPanel value="remote-access">
+          <RemoteAccessSettings />
         </SidebarTabsPanel>
 
         <SidebarTabsPanel value="danger">

@@ -11,11 +11,14 @@ use tascarrel_api::types::protocol::ClientId;
 use tascarrel_protocol::control_plane::StreamTransport;
 use thiserror::Error;
 use tokio::net::UnixListener;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::debug;
 use tracing::warn;
 
 use crate::HostControlService;
+use crate::control_plane::BootstrapControlService;
+use crate::services::auth::AuthService;
 
 const DEFAULT_MAX_CLIENTS: usize = 64;
 
@@ -30,16 +33,22 @@ pub enum BrokerError {
 /// Serves authenticated control-plane clients on the local host socket.
 pub struct Broker {
     listener: UnixListener,
-    control: HostControlService,
+    auth: AuthService,
+    control: watch::Receiver<Option<HostControlService>>,
     max_clients: usize,
 }
 
 impl Broker {
     /// Creates a broker for an already bound private Unix socket.
     #[must_use]
-    pub fn new(listener: UnixListener, control: HostControlService) -> Self {
+    pub fn new(
+        listener: UnixListener,
+        auth: AuthService,
+        control: watch::Receiver<Option<HostControlService>>,
+    ) -> Self {
         Self {
             listener,
+            auth,
             control,
             max_clients: DEFAULT_MAX_CLIENTS,
         }
@@ -60,6 +69,7 @@ impl Broker {
     pub async fn run(self) -> Result<(), BrokerError> {
         let Self {
             listener,
+            auth,
             control,
             max_clients,
         } = self;
@@ -74,12 +84,20 @@ impl Broker {
                         drop(stream);
                         continue;
                     }
-                    let control = control.clone();
+                    let control = control.borrow().clone();
+                    let auth = auth.clone();
                     clients.spawn(async move {
-                        if let Err(error) = control
-                            .serve(StreamTransport::new(stream), ClientId::generate())
-                            .await
-                        {
+                        let result = match control {
+                            Some(control) => control
+                                .serve(StreamTransport::new(stream), ClientId::generate())
+                                .await,
+                            None => {
+                                BootstrapControlService::new(auth)
+                                    .serve(StreamTransport::new(stream), ClientId::generate())
+                                    .await
+                            }
+                        };
+                        if let Err(error) = result {
                             debug!(%error, "local control-plane client closed");
                         }
                     });

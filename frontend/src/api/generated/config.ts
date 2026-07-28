@@ -2,6 +2,7 @@
 /* eslint-disable */
 
 import * as __sidex_types from "@sidex/types";
+import * as __schema_auth from "./auth";
 import * as __schema_changes from "./changes";
 import * as __schema_chats from "./chats";
 import * as __schema_code from "./code";
@@ -130,6 +131,30 @@ import * as __schema_workspaces from "./workspaces";
                                             * Human-readable failure diagnostic without configuration values.
                                             */
                                                         "message": __sidex_types.builtins.String };
+/**
+ * Raw TOML shape of the host-wide `server.toml` file.
+ */
+ export type ServerConfig = { /**
+                                            * Settings for publishing the browser interface outside the host.
+                                            */
+                                                        "remote-access"?: ServerRemoteAccessConfig, /**
+                                            * Browser-authentication key settings.
+                                            */
+                                                        "authentication"?: ServerAuthenticationConfig };
+/**
+ * Settings for publishing the browser interface and HTTP routes.
+ */
+ export type ServerRemoteAccessConfig = { /**
+                                            * Externally visible HTTPS origin of the Tascarrel browser interface.
+                                            */
+                                                        "public-origin": __sidex_types.builtins.String };
+/**
+ * Host-owned browser-authentication key settings.
+ */
+ export type ServerAuthenticationConfig = { /**
+                                            * External private 32-byte key file, resolved beside `server.toml` when relative.
+                                            */
+                                                        "secret-file"?: __sidex_types.builtins.String };
 /**
  * Portable user preferences from one workspace's `settings.json` file.
  */

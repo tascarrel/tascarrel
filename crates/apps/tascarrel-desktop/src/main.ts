@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
-import { connect } from "node:net";
 
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, shell, type Session } from "electron";
+
+import { createPairingKey } from "./control.js";
 
 const SERVER_ADDRESS = "127.0.0.1";
 const SERVER_PORT = 8272;
@@ -13,6 +15,7 @@ const SERVER_PROBE_TIMEOUT_MS = 250;
 const SERVER_START_TIMEOUT_MS = 30_000;
 const APPLICATION_HOSTNAME = "tascarrel.localhost";
 const APPLICATION_ORIGIN = `http://${APPLICATION_HOSTNAME}:${SERVER_PORT}`;
+const DEFAULT_CONTROL_SOCKET_PATH = join("state", "runtime", "control.sock");
 const protocolVersion = Number(
   readFileSync(join(__dirname, "protocol-version"), "utf8").trim(),
 );
@@ -94,11 +97,38 @@ async function showMainWindow(): Promise<void> {
   startupUrl.searchParams.set("desktopVersion", app.getVersion());
   startupUrl.searchParams.set("desktopProtocolVersion", String(protocolVersion));
   try {
+    await ensureDesktopBrowserSession(window.webContents.session);
     await window.loadURL(startupUrl.toString());
     if (!window.isVisible()) window.show();
   } catch (cause) {
     window.destroy();
     throw new Error("Failed to load the Tascarrel interface", { cause });
+  }
+}
+
+async function ensureDesktopBrowserSession(electronSession: Session): Promise<void> {
+  const status = await electronSession.fetch(`${APPLICATION_ORIGIN}/api/v1/auth/session`, {
+    cache: "no-store",
+    credentials: "include",
+    headers: { origin: APPLICATION_ORIGIN },
+  });
+  if (status.status === 204) return;
+  const label = `Tascarrel Desktop (${process.platform})`;
+  const pairingKey = await createPairingKey(controlSocketPath(), label);
+  const paired = await electronSession.fetch(`${APPLICATION_ORIGIN}/api/v1/auth/pair`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      origin: APPLICATION_ORIGIN,
+    },
+    body: JSON.stringify({
+      pairingKey,
+      label,
+    }),
+  });
+  if (paired.status !== 204) {
+    throw new Error(`Tascarrel rejected desktop browser pairing (HTTP ${paired.status})`);
   }
 }
 
@@ -180,6 +210,17 @@ function tascarrelHome(): string {
     throw new Error("The current user's home directory must be an absolute path");
   }
   return join(home, ".tascarrel");
+}
+
+function controlSocketPath(): string {
+  const configured = process.env.TASCARREL_SOCKET;
+  if (configured) {
+    if (!isAbsolute(configured)) {
+      throw new Error("TASCARREL_SOCKET must be an absolute path");
+    }
+    return configured;
+  }
+  return join(tascarrelHome(), DEFAULT_CONTROL_SOCKET_PATH);
 }
 
 function graphicalApplicationPath(): string {

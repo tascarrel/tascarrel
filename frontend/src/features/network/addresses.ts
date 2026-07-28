@@ -3,11 +3,9 @@ import { CONTROL_API_PATH } from "../../api/paths.ts";
 
 export function httpRouteUrl(prefix: network.HostnamePrefix): string {
   const url = new URL(CONTROL_API_PATH, window.location.origin);
-  return prefixedOrigin(url, prefix);
-}
-
-export function nestedHttpRouteUrl(prefix: network.HostnamePrefix): string {
-  const url = new URL(window.location.origin);
+  if (CONTROL_API_PATH.startsWith("/.tascarrel/")) {
+    url.hostname = url.hostname.slice(url.hostname.indexOf(".") + 1);
+  }
   return prefixedOrigin(url, prefix);
 }
 

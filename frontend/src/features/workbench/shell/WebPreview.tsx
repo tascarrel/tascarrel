@@ -2,6 +2,7 @@ import { ExternalLink, Monitor, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { Button } from "../../../components/ui/Button.tsx";
+import type { network } from "../../../api/generated/index.ts";
 import type { IframeFrameSpec } from "../../../components/ui/IframePool.tsx";
 import { ShellPlaceholder } from "./ShellPlaceholder.tsx";
 import { useWebPreviewFrame } from "./WebPreviewFramePool.tsx";
@@ -10,6 +11,9 @@ export type WebPreview = {
   id: string;
   title: string;
   url: string;
+  hostnamePrefix?: network.HostnamePrefix;
+  routeAccessError?: string;
+  routeAccessPending?: boolean;
 };
 
 export function WebPreviewView({
@@ -85,8 +89,15 @@ export function WebPreviewView({
         {!preview.url ? (
           <ShellPlaceholder
             icon={Monitor}
-            title="New web preview"
-            detail="Enter an address above to load a site."
+            title={preview.routeAccessError
+              ? "Could Not Open Preview"
+              : preview.routeAccessPending
+                ? "Authorizing Preview"
+                : "New Web Preview"}
+            detail={preview.routeAccessError
+              ?? (preview.routeAccessPending
+                ? "Tascarrel is issuing route access…"
+                : "Enter an address above to load a site.")}
           />
         ) : null}
       </div>

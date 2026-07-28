@@ -33,7 +33,6 @@ import {
 import { useRepositoryStatuses } from "../changes/state.ts";
 import { FilesView } from "../files/FilesView.tsx";
 import { ImagesView } from "../images/ImagesView.tsx";
-import { nestedHttpRouteUrl } from "../network/addresses.ts";
 import { NetworkView } from "../network/NetworkView.tsx";
 import { useHttpRoutes } from "../network/state.ts";
 import { isPodStarting, PodStartupScreen } from "../pods/PodStartupScreen.tsx";
@@ -633,7 +632,8 @@ function httpRoutePreviews(
     .map((route) => ({
       id: httpRoutePreviewId(route),
       title: route.title,
-      url: nestedHttpRouteUrl(route.hostnamePrefix),
+      url: "",
+      hostnamePrefix: route.hostnamePrefix,
     }));
 }
 

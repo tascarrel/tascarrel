@@ -441,6 +441,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cookie"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+dependencies = [
+ "time",
+ "version_check",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -608,6 +618,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1003,6 +1014,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -2927,17 +2947,20 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "cookie",
  "fs2",
  "futures-util",
  "globset",
  "hickory-proto",
  "hickory-resolver",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
  "jiff",
  "nix",
  "notify",
+ "rand 0.9.5",
  "rcgen",
  "reportify",
  "rustix",
@@ -2948,6 +2971,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "sha2",
+ "subtle",
  "sysinfo",
  "tascarrel-api",
  "tascarrel-git",
@@ -2958,6 +2982,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rusqlite",
  "tokio-rustls",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",

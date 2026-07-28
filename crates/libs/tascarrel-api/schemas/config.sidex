@@ -1,10 +1,11 @@
-//! Workspace configuration-file contracts and host-owned configuration change API.
+//! Host and workspace configuration-file contracts and the workspace configuration change API.
 //!
-//! [`WorkspaceConfig`] describes the raw `config.toml` shape shared by Tascarrel components, while
-//! [`WorkspaceSettings`] describes portable user preferences from `settings.json`. Fields with
-//! product defaults remain optional so one configuration domain can apply and validate those
-//! defaults after decoding. Configuration-file fields use `kebab-case` on the wire to match TOML,
-//! while settings and subscription types follow the ordinary Tascarrel API encoding.
+//! [`ServerConfig`] describes host-wide `server.toml`. [`WorkspaceConfig`] describes the raw
+//! `config.toml` shape shared by Tascarrel components, while [`WorkspaceSettings`] describes
+//! portable user preferences from `settings.json`. Fields with product defaults remain optional
+//! so one configuration domain can apply and validate those defaults after decoding.
+//! Configuration-file fields use `kebab-case` on the wire to match TOML, while settings and
+//! subscription types follow the ordinary Tascarrel API encoding.
 //!
 //! The host daemon owns discovery and parsing of workspace configuration files. Its subscription
 //! emits the selected workspace's current configuration, settings, and recursive input modification
@@ -108,6 +109,29 @@ opaque ConfigInstanceId
 record ConfigError {
     /// Human-readable failure diagnostic without configuration values.
     message: string,
+}
+
+/// Raw TOML shape of the host-wide `server.toml` file.
+#[json(rename_all = "kebab-case")]
+record ServerConfig {
+    /// Settings for publishing the browser interface outside the host.
+    remote_access?: ServerRemoteAccessConfig,
+    /// Browser-authentication key settings.
+    authentication?: ServerAuthenticationConfig,
+}
+
+/// Settings for publishing the browser interface and HTTP routes.
+#[json(rename_all = "kebab-case")]
+record ServerRemoteAccessConfig {
+    /// Externally visible HTTPS origin of the Tascarrel browser interface.
+    public_origin: string,
+}
+
+/// Host-owned browser-authentication key settings.
+#[json(rename_all = "kebab-case")]
+record ServerAuthenticationConfig {
+    /// External private 32-byte key file, resolved beside `server.toml` when relative.
+    secret_file?: string,
 }
 
 /// Portable user preferences from one workspace's `settings.json` file.

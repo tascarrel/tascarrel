@@ -25,6 +25,9 @@ pub use operations::Subscription;
 /// Maximum accepted byte length of one workspace configuration input file.
 pub const MAX_WORKSPACE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Maximum accepted byte length of the host-wide server configuration file.
+pub const MAX_SERVER_CONFIG_BYTES: u64 = 64 * 1024;
+
 pub mod ids;
 
 pub mod types {

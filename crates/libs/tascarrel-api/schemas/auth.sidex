@@ -1,0 +1,113 @@
+//! Host-owned browser authentication and session management API.
+//! The local control socket is the authority for creating pairing keys. A
+//! browser exchanges one pairing key over HTTP for a durable browser session.
+//! Authenticated browser sessions may inspect and revoke sessions and create
+//! short-lived access tickets for host-published HTTP routes.
+
+import common::Timestamp
+import network::HostnamePrefix
+
+// RPC
+
+/// Creates a short-lived, single-use browser pairing key.
+/// Hostd permits this action only over its private local control socket.
+record CreatePairingKeyAction {
+    /// Suggested session label retained when the browser supplies no label.
+    label?: string,
+}
+
+/// Pairing key that may be entered in one browser before its expiration.
+record CreatePairingKeyOutput {
+    /// Secret single-use pairing key.
+    pairing_key: string,
+    /// Time after which hostd rejects the pairing key.
+    expires_at: Timestamp,
+}
+
+/// Revokes one durable browser session and every route grant derived from it.
+record RevokeBrowserSessionAction {
+    /// Session to revoke.
+    session_id: BrowserSessionId,
+}
+
+/// Acknowledges that the browser session was revoked.
+record RevokeBrowserSessionOutput {}
+
+/// Creates a short-lived, single-use access ticket for one HTTP route.
+record CreateHttpRouteTicketAction {
+    /// Host-issued label identifying the target HTTP route.
+    hostname_prefix: HostnamePrefix,
+    /// Absolute path, query, and fragment to open after the ticket exchange.
+    return_to?: string,
+}
+
+/// Browser URL that exchanges the ticket before opening the target route.
+record CreateHttpRouteTicketOutput {
+    /// Route authorization bridge URL containing the ticket in its fragment.
+    url: string,
+}
+
+// Subscriptions
+
+/// Subscribes to durable browser sessions and their current connection state.
+record BrowserSessionsChangedSubscription {}
+
+/// Complete browser-session inventory emitted initially and after each change.
+record BrowserSessionsChangedEvent {
+    /// Current non-revoked browser sessions.
+    sessions: [BrowserSession],
+    /// Session authenticating this subscriber, when it is a browser.
+    current_session_id?: BrowserSessionId,
+}
+
+// Domain Types
+
+/// Identifies one durable authenticated browser session.
+#[json(type = "string")]
+#[rust(type = "crate::ids::BrowserSessionId")]
+opaque BrowserSessionId
+
+/// Unauthenticated HTTP request that exchanges a pairing key for a browser
+/// session cookie.
+record PairBrowserRequest {
+    /// Secret single-use pairing key created through the local control socket.
+    pairing_key: string,
+    /// Optional browser or device label shown in session management.
+    label?: string,
+}
+
+/// Runtime API location exposed to a Tascarrel frontend.
+record BrowserAuthContext {
+    /// Same-origin root below which the frontend reaches hostd's HTTP API.
+    api_root: string,
+}
+
+/// Same-origin HTTP request that exchanges a route ticket for a route cookie.
+record ExchangeHttpRouteTicketRequest {
+    /// Secret single-use route ticket issued to an authenticated browser.
+    ticket: string,
+}
+
+/// Clean route target restored after a route ticket exchange.
+record ExchangeHttpRouteTicketOutput {
+    /// Absolute path, query, and fragment to open on the authorized route.
+    return_to: string,
+}
+
+/// Metadata retained for one authenticated browser.
+record BrowserSession {
+    /// Stable session identifier.
+    id: BrowserSessionId,
+    /// User-provided device or browser label.
+    label: string,
+    /// Canonical browser origin at which the session was paired.
+    origin: string,
+    /// Time at which the session was created.
+    created_at: Timestamp,
+    /// Most recent time at which hostd observed the session.
+    last_seen_at: Timestamp,
+    /// Absolute time after which the session is no longer accepted.
+    expires_at: Timestamp,
+    /// Number of currently connected control WebSockets.
+    active_connections: u32,
+}

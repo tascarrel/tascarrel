@@ -18,6 +18,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 bytes.workspace = true
 clap = { version = "4.5.40", features = ["derive", "env"] }
+cookie.workspace = true
 fs2 = "0.4.3"
 futures-util = "0.3.31"
 globset.workspace = true
@@ -26,9 +27,11 @@ hyper.workspace = true
 hyper-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
+hmac.workspace = true
 jiff.workspace = true
 nix = { workspace = true, features = ["net", "user"] }
 notify.workspace = true
+rand.workspace = true
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 reportify.workspace = true
 rustix = { workspace = true, features = ["fs"] }
@@ -39,10 +42,12 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored.workspace = true
 serde_json = "1"
 sha2 = "0.10"
+subtle.workspace = true
 sysinfo = { workspace = true, features = ["system"] }
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = "0.26"
+tokio-rusqlite.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 tower = { workspace = true, features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }

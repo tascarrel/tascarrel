@@ -11,6 +11,7 @@ mod control_plane;
 pub mod daemon;
 pub mod guest;
 pub mod paths;
+mod server_config;
 pub mod services;
 pub mod socket;
 pub mod startup;

@@ -19,6 +19,11 @@ crate::ids::define_ids! {
         "Identifier for one running host daemon instance."
     ),
     (
+        BrowserSessionId,
+        "browser_session_",
+        "Identifier for one durable authenticated browser session."
+    ),
+    (
         ConfigInstanceId,
         "config_instance_",
         "Identifier for one host read of workspace configuration inputs."

@@ -72,6 +72,12 @@ impl TascarrelHome {
         self.root.join("config")
     }
 
+    /// Returns the host-wide server configuration file.
+    #[must_use]
+    pub fn server_config(&self) -> PathBuf {
+        self.config().join("server.toml")
+    }
+
     /// Returns the configured-workspace directory.
     #[must_use]
     pub fn workspaces(&self) -> PathBuf {
@@ -120,6 +126,10 @@ mod tests {
     fn derives_config_state_runtime_and_socket_from_one_root() {
         let home = TascarrelHome::from_path("/srv/tascarrel-data").unwrap();
         assert_eq!(home.config(), Path::new("/srv/tascarrel-data/config"));
+        assert_eq!(
+            home.server_config(),
+            Path::new("/srv/tascarrel-data/config/server.toml")
+        );
         assert_eq!(
             home.workspaces(),
             Path::new("/srv/tascarrel-data/config/workspaces")

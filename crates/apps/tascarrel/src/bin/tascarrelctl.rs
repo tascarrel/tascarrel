@@ -12,6 +12,7 @@ use clap::Subcommand;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
+use tascarrel_api::types::auth;
 use tascarrel_api::types::store::StoreEvent;
 use tascarrel_api::types::workspaces;
 use tascarrel_cli::control;
@@ -59,6 +60,32 @@ enum Command {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+    /// Manage browser pairing and remote sessions.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Create a short-lived, single-use browser pairing key.
+    Pair {
+        /// Suggested browser or device label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List active browser sessions.
+    Sessions {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke one browser session and its HTTP route grants.
+    Revoke {
+        /// Browser session identifier shown by `auth sessions`.
+        session_id: auth::BrowserSessionId,
     },
 }
 
@@ -157,6 +184,14 @@ enum ClientError {
     InspectService,
     #[error("failed to read Tascarrel user service logs")]
     ReadServiceLogs,
+    #[error("failed to create a Tascarrel browser pairing key")]
+    CreatePairingKey,
+    #[error("failed to read Tascarrel browser sessions")]
+    ReadBrowserSessions,
+    #[error("failed to serialize Tascarrel browser sessions")]
+    SerializeBrowserSessions,
+    #[error("failed to revoke Tascarrel browser session {session_id}")]
+    RevokeBrowserSession { session_id: String },
 }
 
 type ClientResult<T> = Result<T, Report<ClientError>>;
@@ -294,6 +329,65 @@ async fn run(cli: Cli) -> ClientResult<i32> {
                         },
                     )?;
                     println!("Deleted workspace {name}");
+                }
+            }
+            Ok(0)
+        }
+        Command::Auth { command } => {
+            let socket = resolved_control_socket(cli.socket.as_deref())?;
+            let client = report_anyhow(
+                control::ControlClient::connect(&socket).await,
+                ClientError::ConnectControlSocket,
+            )?;
+            match command {
+                AuthCommand::Pair { label } => {
+                    let pairing = report_anyhow(
+                        client
+                            .invoke(auth::CreatePairingKeyAction {
+                                label: label.clone().map(Into::into),
+                            })
+                            .await,
+                        ClientError::CreatePairingKey,
+                    )?;
+                    println!("{}", pairing.pairing_key);
+                    eprintln!("Expires at {}", pairing.expires_at);
+                }
+                AuthCommand::Sessions { json } => {
+                    let event = report_anyhow(
+                        client
+                            .first_event(auth::BrowserSessionsChangedSubscription {})
+                            .await,
+                        ClientError::ReadBrowserSessions,
+                    )?;
+                    if *json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&event.sessions)
+                                .escalate(ClientError::SerializeBrowserSessions)?
+                        );
+                    } else if event.sessions.is_empty() {
+                        println!("No active browser sessions");
+                    } else {
+                        for session in event.sessions {
+                            println!(
+                                "{}\t{}\t{}\tlast seen {}",
+                                session.id.0, session.label, session.origin, session.last_seen_at
+                            );
+                        }
+                    }
+                }
+                AuthCommand::Revoke { session_id } => {
+                    report_anyhow(
+                        client
+                            .invoke(auth::RevokeBrowserSessionAction {
+                                session_id: session_id.clone(),
+                            })
+                            .await,
+                        ClientError::RevokeBrowserSession {
+                            session_id: session_id.0.to_string(),
+                        },
+                    )?;
+                    println!("Revoked browser session {}", session_id.0);
                 }
             }
             Ok(0)
