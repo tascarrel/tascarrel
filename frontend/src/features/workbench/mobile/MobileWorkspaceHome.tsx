@@ -10,7 +10,7 @@ import { useChatList } from "../../chat/state.ts";
 import { usePods } from "../../pods/state.ts";
 import { MobileRepositoryApprovals } from "../../repositories/MobileRepositoryApprovals.tsx";
 import { useRepositoryApprovals } from "../../repositories/state.ts";
-import { MobileChatRow, mobileChatSummary } from "./MobileTaskList.tsx";
+import { MobileChatRow, mobileChatSummary } from "./MobilePodList.tsx";
 
 export function MobileWorkspaceHome({
   workspaces: availableWorkspaces,
@@ -28,7 +28,7 @@ export function MobileWorkspaceHome({
           <TascarrelLogo className="size-8 shrink-0" />
           <span>
             <span className="block text-sm font-semibold text-foreground">Tascarrel</span>
-            <span className="block text-[10px] text-subtle">Mobile task client</span>
+            <span className="block text-[10px] text-subtle">Mobile pod client</span>
           </span>
         </span>
       </header>
@@ -38,7 +38,7 @@ export function MobileWorkspaceHome({
           <div className="mb-5">
             <h1 className="text-xl font-semibold tracking-tight text-foreground">Workspaces</h1>
             <p className="mt-1 text-sm leading-6 text-muted">
-              Choose where you want to start or continue a task.
+              Choose where you want to start or continue a pod.
             </p>
           </div>
 
@@ -146,7 +146,7 @@ function MobileWorkspaceActivity({
             <MobileChatRow
               chat={chat}
               key={chat.id}
-              podTitle={podState.value?.podTitlesById?.get(chat.podId) ?? "Unknown task"}
+              podTitle={podState.value?.podTitlesById?.get(chat.podId) ?? "Unknown pod"}
               onClick={() => onOpenChat(chat.podId, chat.id)}
             />
           ))}
@@ -201,7 +201,7 @@ function workspaceStateTone(status: workspaces.WorkspaceState["status"]): BadgeT
 }
 
 function workspaceStateDetail(status: workspaces.WorkspaceState["status"]): string {
-  if (status === "Running") return "Ready for tasks";
+  if (status === "Running") return "Ready for pods";
   if (status === "Stopped") return "Starts when opened";
   if (status === "Failed") return "Needs attention";
   return `Workspace is ${status.toLowerCase()}`;

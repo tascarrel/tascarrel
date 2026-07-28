@@ -64,7 +64,7 @@ import type {
 } from "./shell/WorkbenchShell.tsx";
 import type { WebPreview } from "./shell/WebPreview.tsx";
 import { MobileWorkbenchShell } from "./mobile/MobileWorkbenchShell.tsx";
-import { mobileChatSummary } from "./mobile/MobileTaskList.tsx";
+import { mobileChatSummary } from "./mobile/MobilePodList.tsx";
 import { MobileWorkspaceStatus } from "./mobile/MobileWorkspaceHome.tsx";
 
 type WorkspaceConnection = "idle" | "connecting" | "live" | "reconnecting";
@@ -600,6 +600,8 @@ export function WorkspaceWorkbench({
           selectedWorkspace={workspace}
           pods={pods}
           podChangeSummaries={podChangeSummaries}
+          podChangeSummariesVerified={repositoryStatusState.ready
+            && !repositoryStatusState.error}
           selectedPodId={selectedPodId}
           selectedChatId={startingChat ? undefined : selectedSummary?.chatId}
           route={route}
@@ -647,6 +649,9 @@ export function WorkspaceWorkbench({
           }}
           onStopPod={async (podId) => {
             await guestApi(workspace).execute("pods_Stop", { podId });
+          }}
+          onDestroyPod={async (podId) => {
+            await guestApi(workspace).execute("pods_Destroy", { podId });
           }}
           onSelectChat={selectWorkspaceChat}
           onNewChat={newChat}

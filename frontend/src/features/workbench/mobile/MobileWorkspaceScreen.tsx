@@ -8,7 +8,7 @@ import {
   MobilePodRow,
   MobileSectionHeading,
   type MobileChatSummary,
-} from "./MobileTaskList.tsx";
+} from "./MobilePodList.tsx";
 
 export function MobileWorkspaceScreen({
   pods: workspacePods,
@@ -30,7 +30,7 @@ export function MobileWorkspaceScreen({
       <div className="mx-auto grid w-full min-w-0 max-w-2xl gap-6">
         <Button className="h-12 w-full rounded-xl text-sm" variant="primary" onClick={onCreatePod}>
           <Plus aria-hidden="true" className="size-4" />
-          Start a New Task
+          Start a New Pod
         </Button>
 
         {approvalsView}
@@ -38,28 +38,32 @@ export function MobileWorkspaceScreen({
         <section className="min-w-0" aria-labelledby="mobile-pods-title">
           <MobileSectionHeading
             id="mobile-pods-title"
-            title="Tasks"
+            title="Pods"
             count={workspacePods.length}
           />
           <div className="mt-3 grid min-w-0 gap-2">
-            {workspacePods.map((pod) => (
-              <MobilePodRow
-                key={pod.id}
-                pod={pod}
-                changeSummary={podChangeSummaries.get(pod.id)}
-                attention={workspaceChats.some((chat) =>
-                  chat.podId === pod.id
-                  && (chat.attention || chat.status === "needs-input" || chat.status === "failed")
-                )}
-                working={workspaceChats.some(
-                  (chat) => chat.podId === pod.id && chat.status === "working",
-                )}
-                onClick={() => onSelectPod(pod.id)}
-              />
-            ))}
+            {workspacePods
+              .toSorted((left, right) =>
+                String(right.createdAt).localeCompare(String(left.createdAt))
+              )
+              .map((pod) => (
+                <MobilePodRow
+                  key={pod.id}
+                  pod={pod}
+                  changeSummary={podChangeSummaries.get(pod.id)}
+                  attention={workspaceChats.some((chat) =>
+                    chat.podId === pod.id
+                    && (chat.attention || chat.status === "needs-input" || chat.status === "failed")
+                  )}
+                  working={workspaceChats.some(
+                    (chat) => chat.podId === pod.id && chat.status === "working",
+                  )}
+                  onClick={() => onSelectPod(pod.id)}
+                />
+              ))}
             {!workspacePods.length ? (
               <div className="rounded-2xl border border-dashed border-ui-border p-6 text-center text-sm leading-6 text-subtle">
-                No tasks yet. Start a new task above.
+                No pods yet. Start a new pod above.
               </div>
             ) : null}
           </div>

@@ -88,7 +88,7 @@ export function MobileRepositoryApprovals({
           <MobileRepositoryApprovalCard
             approval={approval}
             key={approval.id}
-            podTitle={podTitlesById?.get(approval.podId) ?? "Unknown task"}
+            podTitle={podTitlesById?.get(approval.podId) ?? "Unknown pod"}
             submitting={submittingId === approval.id}
             workspace={workspace}
             onDecide={(decision) => setDecisionTarget({ approval, decision })}

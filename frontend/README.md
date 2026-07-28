@@ -13,15 +13,17 @@ failures remain visible in their owning feature.
 
 The frontend selects one of two presentation shells while sharing routes, backend state, and
 feature components. The desktop workbench provides the multi-panel development environment. The
-mobile client focuses on starting tasks, monitoring chats, resolving input requests, approving
-repository publications, starting and stopping task pods, and reviewing individual changed-file diffs.
+mobile client focuses on creating pods, monitoring chats, resolving input requests, approving
+repository publications, managing pod lifecycles, and reviewing individual changed-file diffs.
 Its workspace index subscribes to every running workspace and collects active chats and unblock
-requests into one live attention view. Within a workspace, users open a task pod before choosing or
-starting a chat.
+requests into one live attention view. Within a workspace, users open a pod before choosing or
+starting a chat, with the most recently created pods listed first. Mobile pod screens stay within
+the viewport, while intrinsically wide artifacts such as code and diffs scroll inside their dedicated
+viewers.
 
 Code editing, terminals, arbitrary file browsing, network configuration, image management, and
 advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless
-they directly help a user start a task or unblock ongoing work.
+they directly help a user create a pod or unblock ongoing work.
 
 Chat operation names in `src/api/actions.ts` are maintained manually while the backend operation
 registry is developed in parallel. Sidex types can be refreshed with:

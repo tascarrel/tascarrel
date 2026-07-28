@@ -1,4 +1,4 @@
-import { FileDiff, LoaderCircle, Plus, Square } from "lucide-react";
+import { FileDiff, LoaderCircle, Plus, Square, Trash2 } from "lucide-react";
 
 import type { chats, pods } from "../../../api/generated/index.ts";
 import { Badge, type BadgeTone } from "../../../components/ui/Badge.tsx";
@@ -8,76 +8,97 @@ import {
   MobileChatRow,
   MobileSectionHeading,
   type MobileChatSummary,
-} from "./MobileTaskList.tsx";
+} from "./MobilePodList.tsx";
 
 export function MobilePodScreen({
   pod,
   chats: podChats,
   changeSummary,
-  pendingAction,
+  pendingOperation,
   actionError,
   onSelectChat,
   onNewChat,
   onOpenChanges,
   onStart,
   onStop,
+  onDelete,
 }: {
   pod: pods.Pod;
   chats: readonly MobileChatSummary[];
   changeSummary?: PodChangeSummary;
-  pendingAction?: string;
+  pendingOperation?: "start" | "stop" | "destroy";
   actionError?: string;
   onSelectChat: (chatId: chats.ChatId) => void;
   onNewChat: () => void;
   onOpenChanges: () => void;
   onStart: () => void;
   onStop: () => void;
+  onDelete: () => void;
 }) {
-  const pending = pendingAction?.endsWith(`:${pod.id}`) ?? false;
+  const pending = pendingOperation !== undefined;
 
   return (
     <div className="mobile-client-content min-h-0 flex-1 overflow-y-auto pt-4">
-      <div className="mx-auto grid w-full min-w-0 max-w-2xl gap-6">
-        <section className="rounded-2xl border border-ui-border bg-surface/70 p-4">
+      <div className="mx-auto grid w-full min-w-0 max-w-2xl grid-cols-[minmax(0,1fr)] gap-6">
+        <section className="min-w-0 max-w-full overflow-hidden rounded-2xl border border-ui-border bg-surface/70 p-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <h2 className="truncate text-base font-semibold text-foreground">
-                {pod.title || "Untitled task"}
+                {pod.title || "Untitled pod"}
               </h2>
               <p className="mt-1 break-all font-mono text-[10px] text-subtle">{pod.id}</p>
             </div>
-            <Badge tone={podStatusTone(pod.status.status)}>{pod.status.status}</Badge>
+            <Badge className="shrink-0" tone={podStatusTone(pod.status.status)}>
+              {pod.status.status}
+            </Badge>
           </div>
           {pod.status.status === "Failed" ? (
             <p
-              className="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs leading-5 text-red-200"
+              className="mt-3 [overflow-wrap:anywhere] rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs leading-5 text-red-200"
               role="alert"
             >
               {pod.status.message}
             </p>
           ) : null}
           {actionError ? (
-            <p className="mt-3 text-xs leading-5 text-red-200" role="alert">{actionError}</p>
+            <p className="mt-3 [overflow-wrap:anywhere] text-xs leading-5 text-red-200" role="alert">
+              {actionError}
+            </p>
           ) : null}
           <div className="mt-4 flex flex-wrap gap-2">
             {(pod.status.status === "Stopped" || pod.status.status === "Failed") ? (
               <Button className="h-11 flex-1" disabled={pending} onClick={onStart}>
-                {pending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : null}
+                {pendingOperation === "start"
+                  ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+                  : null}
                 Start
               </Button>
             ) : null}
             {pod.status.status === "Running" ? (
               <Button className="h-11 flex-1" disabled={pending} onClick={onStop}>
-                {pending
+                {pendingOperation === "stop"
                   ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
                   : <Square aria-hidden="true" className="size-3.5" />}
                 Stop
               </Button>
             ) : null}
+            {pod.status.status !== "Destroying" ? (
+              <Button
+                className="h-11 flex-1"
+                variant="danger"
+                disabled={pending}
+                onClick={onDelete}
+              >
+                {pendingOperation === "destroy"
+                  ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+                  : <Trash2 aria-hidden="true" className="size-4" />}
+                Delete Pod
+              </Button>
+            ) : null}
           </div>
         </section>
 
-        <section aria-labelledby="mobile-chats-title">
+        <section className="min-w-0 max-w-full" aria-labelledby="mobile-chats-title">
           <div className="flex items-center justify-between gap-3">
             <MobileSectionHeading id="mobile-chats-title" title="Chats" count={podChats.length} />
             <Button
@@ -102,7 +123,7 @@ export function MobilePodScreen({
               ))}
             {!podChats.length ? (
               <div className="rounded-2xl border border-dashed border-ui-border p-6 text-center text-sm leading-6 text-subtle">
-                This task has no chats yet.
+                This pod has no chats yet.
               </div>
             ) : null}
           </div>
@@ -111,7 +132,7 @@ export function MobilePodScreen({
         {changeSummary
           && (changeSummary.changedFileCount > 0 || changeSummary.unpushedCommitCount > 0) ? (
           <Button
-            className="min-h-16 w-full justify-start rounded-2xl p-4 text-left"
+            className="min-h-16 w-full min-w-0 max-w-full overflow-hidden justify-start rounded-2xl p-4 text-left"
             onClick={onOpenChanges}
           >
             <FileDiff aria-hidden="true" className="size-5 shrink-0 text-accent-text" />

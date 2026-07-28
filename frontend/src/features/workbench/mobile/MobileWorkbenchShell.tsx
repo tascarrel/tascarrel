@@ -8,8 +8,9 @@ import { Badge } from "../../../components/ui/Badge.tsx";
 import { ConnectionOverlay } from "../../../components/ui/ConnectionOverlay.tsx";
 import { CountBadge } from "../../../components/ui/CountBadge.tsx";
 import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
+import { PodDestructionDialog } from "../../pods/PodDestructionDialog.tsx";
 import { MobilePodScreen } from "./MobilePodScreen.tsx";
-import type { MobileChatSummary } from "./MobileTaskList.tsx";
+import type { MobileChatSummary } from "./MobilePodList.tsx";
 import { MobileWorkspaceScreen } from "./MobileWorkspaceScreen.tsx";
 
 export function MobileWorkbenchShell({
@@ -17,6 +18,7 @@ export function MobileWorkbenchShell({
   selectedWorkspace,
   pods: workspacePods,
   podChangeSummaries,
+  podChangeSummariesVerified,
   selectedPodId,
   selectedChatId,
   route,
@@ -34,6 +36,7 @@ export function MobileWorkbenchShell({
   onCreatePod,
   onStartPod,
   onStopPod,
+  onDestroyPod,
   onSelectChat,
   onNewChat,
 }: {
@@ -41,6 +44,7 @@ export function MobileWorkbenchShell({
   selectedWorkspace: workspaces.WorkspaceName;
   pods: readonly pods.Pod[];
   podChangeSummaries: ReadonlyMap<pods.PodId, PodChangeSummary>;
+  podChangeSummariesVerified: boolean;
   selectedPodId?: pods.PodId;
   selectedChatId?: chats.ChatId;
   route: WorkbenchRoute;
@@ -58,13 +62,15 @@ export function MobileWorkbenchShell({
   onCreatePod: () => void;
   onStartPod: (podId: pods.PodId) => Promise<void>;
   onStopPod: (podId: pods.PodId) => Promise<void>;
+  onDestroyPod: (podId: pods.PodId) => Promise<void>;
   onSelectChat: (podId: pods.PodId, chatId: chats.ChatId) => void;
   onNewChat: () => void;
 }) {
   const navigate = useNavigate();
   const selectedPod = workspacePods.find((pod) => pod.id === selectedPodId);
   const selectedChat = workspaceChats.find((chat) => chat.id === selectedChatId);
-  const [pendingPodAction, setPendingPodAction] = useState<string>();
+  const [pendingPodAction, setPendingPodAction] = useState<PendingPodAction>();
+  const [destroyTarget, setDestroyTarget] = useState<pods.Pod>();
   const [podActionError, setPodActionError] = useState<string>();
   const workspaceExists = availableWorkspaces.some(
     (workspace) => workspace.name === selectedWorkspace,
@@ -90,13 +96,18 @@ export function MobileWorkbenchShell({
       search: {},
     });
   };
-  const runPodAction = async (pod: pods.Pod, operation: "start" | "stop") => {
+  const runPodAction = async (pod: pods.Pod, operation: PendingPodAction["operation"]) => {
     if (pendingPodAction) return;
-    setPendingPodAction(`${operation}:${pod.id}`);
+    setPendingPodAction({ operation, podId: pod.id });
     setPodActionError(undefined);
     try {
       if (operation === "start") await onStartPod(pod.id);
-      else await onStopPod(pod.id);
+      else if (operation === "stop") await onStopPod(pod.id);
+      else {
+        await onDestroyPod(pod.id);
+        setDestroyTarget(undefined);
+        openWorkspace();
+      }
     } catch (cause) {
       setPodActionError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -127,13 +138,19 @@ export function MobileWorkbenchShell({
       pod={selectedPod}
       chats={podChats}
       changeSummary={podChangeSummaries.get(selectedPod.id)}
-      pendingAction={pendingPodAction}
+      pendingOperation={pendingPodAction?.podId === selectedPod.id
+        ? pendingPodAction.operation
+        : undefined}
       actionError={podActionError}
       onSelectChat={(chatId) => onSelectChat(selectedPod.id, chatId)}
       onNewChat={onNewChat}
       onOpenChanges={() => openChanges(selectedPod.id)}
       onStart={() => void runPodAction(selectedPod, "start")}
       onStop={() => void runPodAction(selectedPod, "stop")}
+      onDelete={() => {
+        setPodActionError(undefined);
+        setDestroyTarget(selectedPod);
+      }}
     />
   ) : (
     <MobileWorkspaceScreen
@@ -147,52 +164,79 @@ export function MobileWorkbenchShell({
   );
 
   return (
-    <main className="mobile-client">
-      <ConnectionOverlay connection={workspaceConnection} attempt={workspaceConnectionAttempt} />
-      <header className="mobile-app-header">
-        <button
-          className="flex size-11 shrink-0 items-center justify-center rounded-xl text-muted active:bg-surface-raised active:text-foreground"
-          type="button"
-          aria-label={navigation.backLabel}
-          onClick={navigation.onBack}
-        >
-          <ArrowLeft aria-hidden="true" className="size-5" />
-        </button>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-foreground">{navigation.title}</h1>
-          <p className="truncate text-[10px] text-subtle">{navigation.detail}</p>
-        </div>
-        {!workspaceExists ? (
-          <Badge tone="danger">Unavailable</Badge>
-        ) : approvalCount > 0 && selectedPod ? (
+    <>
+      <PodDestructionDialog
+        action="delete"
+        error={podActionError}
+        pending={destroyTarget
+          ? pendingPodAction?.operation === "destroy"
+            && pendingPodAction.podId === destroyTarget.id
+          : false}
+        pod={destroyTarget}
+        summary={destroyTarget ? podChangeSummaries.get(destroyTarget.id) : undefined}
+        verified={podChangeSummariesVerified}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDestroyTarget(undefined);
+            setPodActionError(undefined);
+          }
+        }}
+        onConfirm={() => {
+          if (destroyTarget) void runPodAction(destroyTarget, "destroy");
+        }}
+      />
+      <main className="mobile-client">
+        <ConnectionOverlay connection={workspaceConnection} attempt={workspaceConnectionAttempt} />
+        <header className="mobile-app-header">
           <button
-            className="relative flex size-11 shrink-0 items-center justify-center rounded-xl text-amber-300 active:bg-amber-500/10"
+            className="flex size-11 shrink-0 items-center justify-center rounded-xl text-muted active:bg-surface-raised active:text-foreground"
             type="button"
-            aria-label={`${approvalCount} publication ${approvalCount === 1 ? "approval" : "approvals"}`}
-            onClick={openWorkspace}
+            aria-label={navigation.backLabel}
+            onClick={navigation.onBack}
           >
-            <Bell aria-hidden="true" className="size-5" />
-            <CountBadge
-              className="absolute right-1.5 top-1.5"
-              count={approvalCount}
-              size="xs"
-              tone="warning"
-            />
+            <ArrowLeft aria-hidden="true" className="size-5" />
           </button>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-sm font-semibold text-foreground">{navigation.title}</h1>
+            <p className="truncate text-[10px] text-subtle">{navigation.detail}</p>
+          </div>
+          {!workspaceExists ? (
+            <Badge tone="danger">Unavailable</Badge>
+          ) : approvalCount > 0 && selectedPod ? (
+            <button
+              className="relative flex size-11 shrink-0 items-center justify-center rounded-xl text-amber-300 active:bg-amber-500/10"
+              type="button"
+              aria-label={`${approvalCount} publication ${approvalCount === 1 ? "approval" : "approvals"}`}
+              onClick={openWorkspace}
+            >
+              <Bell aria-hidden="true" className="size-5" />
+              <CountBadge
+                className="absolute right-1.5 top-1.5"
+                count={approvalCount}
+                size="xs"
+                tone="warning"
+              />
+            </button>
+          ) : null}
+        </header>
+        {error && !workspaceScreen && !route.chat && !creatingChat ? (
+          <p
+            className="mobile-client-horizontal break-all border-b border-red-500/20 bg-red-500/5 py-2.5 text-xs leading-5 text-red-200"
+            role="alert"
+          >
+            {error}
+          </p>
         ) : null}
-      </header>
-      {error && !workspaceScreen && !route.chat && !creatingChat ? (
-        <p
-          className="mobile-client-horizontal break-all border-b border-red-500/20 bg-red-500/5 py-2.5 text-xs leading-5 text-red-200"
-          role="alert"
-        >
-          {error}
-        </p>
-      ) : null}
-      {content}
-    </main>
+        {content}
+      </main>
+    </>
   );
 }
+
+type PendingPodAction = {
+  operation: "start" | "stop" | "destroy";
+  podId: pods.PodId;
+};
 
 type MobileNavigation = {
   title: string;
@@ -222,14 +266,14 @@ function mobileNavigation({
 }): MobileNavigation {
   if (selectedPod) {
     return {
-      title: selectedPod.title || "Untitled task",
+      title: selectedPod.title || "Untitled pod",
       detail: selectedChat
         ? selectedChat.title
         : route.view === "changes"
           ? "Changed files"
           : creatingChat
             ? "New chat"
-            : "Task",
+            : "Pod",
       backLabel: "Workspace",
       onBack: route.chat || creatingChat || route.view === "changes"
         ? () => onSelectPod(selectedPod.id)
@@ -238,7 +282,7 @@ function mobileNavigation({
   }
   return {
     title: String(selectedWorkspace),
-    detail: route.creatingPod ? "New task" : "Task inbox",
+    detail: route.creatingPod ? "New pod" : "Pod list",
     backLabel: route.creatingPod ? "Workspace" : "All workspaces",
     onBack: route.creatingPod ? openWorkspace : openWorkspaces,
   };
@@ -250,7 +294,7 @@ function MobileDesktopOnlyView() {
       <div className="max-w-sm">
         <h2 className="text-sm font-semibold text-foreground">Available on Desktop</h2>
         <p className="mt-2 text-xs leading-5 text-subtle">
-          This workbench view is intentionally omitted from the mobile task client.
+          This workbench view is intentionally omitted from the mobile pod client.
         </p>
       </div>
     </div>

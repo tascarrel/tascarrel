@@ -98,7 +98,7 @@ export function MobilePodRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">
-          {pod.title || "Untitled task"}
+          {pod.title || "Untitled pod"}
         </span>
         <span className="mt-1 block truncate text-[11px] text-subtle">
           {pod.status.status}

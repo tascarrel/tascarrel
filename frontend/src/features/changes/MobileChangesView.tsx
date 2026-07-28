@@ -83,7 +83,7 @@ export function MobileChangesView({
             <LoaderCircle aria-hidden="true" className="mx-auto size-6 animate-spin text-accent-text" />
           )}
           <p className="mt-3 text-sm text-subtle">
-            {statusState.ready ? "This task has no changed files." : "Loading changed files…"}
+            {statusState.ready ? "This pod has no changed files." : "Loading changed files…"}
           </p>
         </div>
       </div>
