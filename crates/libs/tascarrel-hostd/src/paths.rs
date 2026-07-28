@@ -1,11 +1,12 @@
 //! Resolution of Tascarrel's unified host-side data directory.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
 use thiserror::Error;
@@ -19,7 +20,7 @@ pub struct TascarrelHome {
 }
 
 impl TascarrelHome {
-    /// Resolves `TASCARREL_HOME`, defaulting to `.tascarrel` in the current
+    /// Resolves `TASCARREL_HOME`, defaulting to `.tascarrel` in the user's home
     /// directory.
     ///
     /// Relative configured paths are resolved against the process's current
@@ -28,7 +29,8 @@ impl TascarrelHome {
     ///
     /// # Errors
     ///
-    /// Returns an error when the current directory cannot be resolved.
+    /// Returns an error when the user home is unavailable or relative, or when
+    /// a relative configured path cannot be resolved.
     #[tracing::instrument(
         name = "tascarrel_host.paths.discover",
         level = "debug",
@@ -37,10 +39,9 @@ impl TascarrelHome {
         err
     )]
     pub fn discover() -> Result<Self, Report<TascarrelHomeError>> {
-        let configured = env::var_os("TASCARREL_HOME")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| OsString::from(DEFAULT_TASCARREL_HOME));
-        Self::from_path(configured)
+        let configured = env::var_os("TASCARREL_HOME");
+        let user_home = env::var_os("HOME");
+        discover_from_environment(configured.as_deref(), user_home.as_deref())
     }
 
     /// Resolves an explicit Tascarrel home path.
@@ -106,6 +107,15 @@ impl TascarrelHome {
 /// Failure to resolve the unified Tascarrel data directory.
 #[derive(Debug, Error)]
 pub enum TascarrelHomeError {
+    /// The user home environment variable is unavailable.
+    #[error("failed to resolve Tascarrel home: HOME is unset or empty")]
+    MissingUserHome,
+    /// The user home environment variable does not name an absolute path.
+    #[error("failed to resolve Tascarrel home: HOME is not an absolute path: {path}")]
+    RelativeUserHome {
+        /// Configured user home.
+        path: PathBuf,
+    },
     /// A relative path could not be made absolute.
     #[error("failed to resolve Tascarrel home path {path}")]
     Resolve {
@@ -115,6 +125,27 @@ pub enum TascarrelHomeError {
         #[source]
         source: io::Error,
     },
+}
+
+/// Resolves a Tascarrel home from the relevant process environment.
+fn discover_from_environment(
+    configured: Option<&OsStr>,
+    user_home: Option<&OsStr>,
+) -> Result<TascarrelHome, Report<TascarrelHomeError>> {
+    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
+        return TascarrelHome::from_path(configured);
+    }
+    let user_home = user_home
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TascarrelHomeError::MissingUserHome.report())?;
+    let user_home = Path::new(user_home);
+    if !user_home.is_absolute() {
+        return Err(TascarrelHomeError::RelativeUserHome {
+            path: user_home.to_owned(),
+        }
+        .report());
+    }
+    TascarrelHome::from_path(user_home.join(DEFAULT_TASCARREL_HOME))
 }
 
 #[cfg(test)]
@@ -141,7 +172,19 @@ mod tests {
         );
     }
 
-    /// Verifies the `.tascarrel` default can be represented as an absolute
+    /// Verifies the default home and control socket do not depend on the
+    /// process working directory.
+    #[test]
+    fn defaults_to_the_user_home_directory() {
+        let home = discover_from_environment(None, Some(OsStr::new("/home/tascarrel"))).unwrap();
+        assert_eq!(home.root(), Path::new("/home/tascarrel/.tascarrel"));
+        assert_eq!(
+            home.control_socket(),
+            Path::new("/home/tascarrel/.tascarrel/state/runtime/control.sock")
+        );
+    }
+
+    /// Verifies an explicit relative home can be represented as an absolute
     /// root.
     #[test]
     fn resolves_relative_home_paths_against_the_current_directory() {

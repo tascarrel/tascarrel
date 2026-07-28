@@ -71,9 +71,9 @@ operations start the selected VM lazily through hostd. Persistent state lives be
 remains private below the Tascarrel runtime directory. Local clients never
 connect directly to a VM chardev.
 
-`TASCARREL_HOME` defaults to `.tascarrel` in the current directory on Linux and
-macOS. Native aarch64 guests use HVF automatically; TCG remains available as an
-explicit fallback.
+`TASCARREL_HOME` defaults to `$HOME/.tascarrel` on Linux and macOS. Native
+aarch64 guests use HVF automatically; TCG remains available as an explicit
+fallback.
 
 The Nix store and generated `/etc` are immutable. The root, `/run`, `/tmp`,
 logs, and caches are ephemeral; only `/var/lib/tascarrel` uses the persistent
