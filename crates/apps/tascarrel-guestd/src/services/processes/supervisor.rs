@@ -187,17 +187,7 @@ impl ProcessSupervisor {
             log_stdout: None,
             profile: api::ProcessExecutionProfile::SystemService,
         };
-        let (output_sender, mut observed) =
-            mpsc::channel::<OwnedProcessOutput>(self.inner.config.output_queue_capacity.get());
-        let (output_forwarder, output) =
-            mpsc::channel(self.inner.config.output_queue_capacity.get());
-        tokio::spawn(async move {
-            while let Some(chunk) = observed.recv().await {
-                if output_forwarder.send(chunk.data).await.is_err() {
-                    break;
-                }
-            }
-        });
+        let (output_sender, output) = self.internal_output();
         let (completed_sender, completed) = oneshot::channel();
         let process_id = self.admit(
             input,
@@ -208,6 +198,48 @@ impl ProcessSupervisor {
                 network_service: None,
             },
             Some(pod.clone()),
+            Some(output_sender),
+            Some(completed_sender),
+        )?;
+        Ok(InternalProcess {
+            process_id,
+            output,
+            completed,
+        })
+    }
+
+    /// Runs one hidden user command inside an already-running durable pod.
+    pub(crate) fn spawn_internal_user(
+        &self,
+        pods: &PodService,
+        pod_id: PodId,
+        title: impl Into<tascarrel_api::ArcStr>,
+        executable: impl Into<tascarrel_api::ArcStr>,
+        arguments: Vec<tascarrel_api::ArcStr>,
+    ) -> Result<InternalProcess, Report<ProcessSupervisorError>> {
+        let input = api::SpawnProcessAction {
+            pod_id,
+            start_pod: Some(false),
+            title: title.into(),
+            executable: executable.into(),
+            arguments: arguments.into(),
+            environment: HashMap::new(),
+            working_directory: Some("/workspace".into()),
+            terminal: None,
+            log_stdout: None,
+            profile: api::ProcessExecutionProfile::User,
+        };
+        let (output_sender, output) = self.internal_output();
+        let (completed_sender, completed) = oneshot::channel();
+        let process_id = self.admit(
+            input,
+            ProcessCommand::Specified,
+            Actor::Host,
+            ProcessOperationServices {
+                pods: pods.clone(),
+                network_service: None,
+            },
+            None,
             Some(output_sender),
             Some(completed_sender),
         )?;
@@ -431,17 +463,33 @@ impl ProcessSupervisor {
                 Ok(())
             }
             api::ProcessState::Exited(exit) => Err(internal_error(format!(
-                "setup process exited unsuccessfully (code {:?}, signal {:?})",
+                "internal process exited unsuccessfully (code {:?}, signal {:?})",
                 exit.code, exit.signal
             ))),
             api::ProcessState::Failed(failure) => Err(internal_error(format!(
-                "setup process failed: {}",
+                "internal process failed: {}",
                 failure.message
             ))),
             _ => Err(internal_error(
                 "internal process completed without a terminal state",
             )),
         }
+    }
+
+    /// Creates the raw-output bridge used by a hidden internal process.
+    fn internal_output(&self) -> (mpsc::Sender<OwnedProcessOutput>, mpsc::Receiver<Vec<u8>>) {
+        let (output_sender, mut observed) =
+            mpsc::channel::<OwnedProcessOutput>(self.inner.config.output_queue_capacity.get());
+        let (output_forwarder, output) =
+            mpsc::channel(self.inner.config.output_queue_capacity.get());
+        tokio::spawn(async move {
+            while let Some(chunk) = observed.recv().await {
+                if output_forwarder.send(chunk.data).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (output_sender, output)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Admission atomically constructs all process supervision state.
@@ -467,6 +515,7 @@ impl ProcessSupervisor {
                 .field_display("pod_id", &input.pod_id.0)
         })?;
 
+        let internal = completed.is_some();
         let process_id = api::ProcessId::generate();
         let process = api::Process {
             id: process_id.clone(),
@@ -505,10 +554,10 @@ impl ProcessSupervisor {
             ManagedProcess {
                 state: Arc::clone(&state),
                 controls,
-                internal: ephemeral_pod.is_some(),
+                internal,
             },
         );
-        if ephemeral_pod.is_none() {
+        if !internal {
             self.inner
                 .store
                 .apply(api::ProcessListMutation::Upsert(process));
@@ -518,9 +567,7 @@ impl ProcessSupervisor {
         let supervisor = self.clone();
         let max_line_bytes = self.inner.config.max_log_line_bytes.get();
         let output_queue_capacity = self.inner.config.output_queue_capacity.get();
-        let setup_timeout = ephemeral_pod
-            .as_ref()
-            .map(|_| self.inner.config.setup_process_timeout);
+        let internal_timeout = internal.then_some(self.inner.config.internal_process_timeout);
         let task_state = Arc::clone(&state);
         let task_process_id = process_id.clone();
         tokio::spawn(async move {
@@ -542,7 +589,7 @@ impl ProcessSupervisor {
                 supervisor,
             ));
             let mut timed_out = false;
-            let joined = if let Some(duration) = setup_timeout {
+            let joined = if let Some(duration) = internal_timeout {
                 if let Ok(joined) = timeout(duration, &mut task).await {
                     joined
                 } else {
@@ -551,7 +598,7 @@ impl ProcessSupervisor {
                         .send(ExecControl::Signal(Signal::Kill))
                         .await
                     {
-                        warn!(%error, "could not stop timed-out setup process");
+                        warn!(%error, "could not stop timed-out internal process");
                     }
                     task.await
                 }
@@ -576,7 +623,7 @@ impl ProcessSupervisor {
                     &monitor_state,
                     &monitor_process_id,
                     api::ProcessState::Failed(api::ProcessFailure {
-                        message: "setup process exceeded its time limit".into(),
+                        message: "internal process exceeded its time limit".into(),
                         failed_at: Timestamp::now(),
                     }),
                 );
@@ -871,8 +918,8 @@ async fn wait_for_completion(
 pub struct ProcessSupervisorConfig {
     /// Maximum time a process waits for implicit pod startup.
     pub pod_start_timeout: Duration,
-    /// Maximum runtime allowed for one internal image setup process.
-    pub setup_process_timeout: Duration,
+    /// Maximum runtime allowed for one hidden internal process.
+    pub internal_process_timeout: Duration,
     /// Mutations retained for process-list resumption.
     pub store_history_limit: NonZeroUsize,
     /// Sanitized lines retained for each process.
@@ -895,7 +942,7 @@ impl Default for ProcessSupervisorConfig {
     fn default() -> Self {
         Self {
             pod_start_timeout: Duration::from_secs(30),
-            setup_process_timeout: Duration::from_mins(30),
+            internal_process_timeout: Duration::from_mins(30),
             store_history_limit: NonZeroUsize::new(1024).expect("default is non-zero"),
             log_capacity: NonZeroUsize::new(2048).expect("default is non-zero"),
             log_batch_capacity: NonZeroUsize::new(16).expect("default is non-zero"),
@@ -925,7 +972,7 @@ type ProcessStore = Store<api::ProcessList, api::ProcessListMutation>;
 pub(crate) type ProcessListSubscription =
     tascarrel_store::Subscription<api::ProcessList, api::ProcessListMutation>;
 
-/// A hidden setup process owned by another guestd feature.
+/// A hidden process owned by another guestd feature.
 pub(crate) struct InternalProcess {
     /// Supervisor identifier used to remove the retained process state.
     process_id: api::ProcessId,

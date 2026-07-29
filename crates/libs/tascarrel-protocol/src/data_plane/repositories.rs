@@ -29,6 +29,12 @@ pub struct PodGitRequest {
     pub path: String,
     /// Smart-protocol service to open.
     pub service: PodGitService,
+    /// Exact host cache identity required by an internal pod materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_cache_id: Option<String>,
+    /// Exact tracked-ref version required by an internal pod materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<u64>,
 }
 
 /// Initial request on a host-served Git data channel.
@@ -79,4 +85,30 @@ pub enum GitOpenResponse {
     },
     /// The Git data channel was rejected before switching to raw bytes.
     Error { error: RemoteError },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keeps ordinary pod Git clients compatible with requests that predate
+    /// exact cache-version selection.
+    #[test]
+    fn pod_git_request_defaults_exact_cache_fields() {
+        let request: PodGitRequest =
+            serde_json::from_str(r#"{"path":"repository","service":"upload_pack"}"#).unwrap();
+        assert_eq!(
+            request,
+            PodGitRequest {
+                path: "repository".to_owned(),
+                service: PodGitService::UploadPack,
+                expected_cache_id: None,
+                expected_version: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"path":"repository","service":"upload_pack"}"#
+        );
+    }
 }

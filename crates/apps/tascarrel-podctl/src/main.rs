@@ -9,6 +9,7 @@ mod client;
 mod device;
 mod error;
 mod git;
+mod repository_import;
 
 use std::io;
 use std::io::Write as _;
@@ -35,6 +36,7 @@ use crate::error::PodctlError;
 use crate::error::PodctlResult;
 use crate::git::run_git_receive_pack;
 use crate::git::run_git_remote_helper;
+use crate::repository_import::run_repository_import;
 
 const CONTROL_SOCKET: &str = "/run/tascarrel/guestd-control.sock";
 
@@ -86,6 +88,22 @@ enum Command {
     DeviceRemove {
         #[arg(long)]
         path: PathBuf,
+    },
+    /// Internal guestd helper for importing one configured repository.
+    #[command(hide = true)]
+    RepositoryImport {
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        git: PathBuf,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        cache_id: String,
+        #[arg(long)]
+        cache_version: u64,
+        #[arg(long)]
+        marker: String,
     },
 }
 
@@ -202,6 +220,23 @@ async fn run_cli() -> PodctlResult<()> {
             return create_device_link(&path, &source);
         }
         Command::DeviceRemove { path } => return remove_device_node(&path),
+        Command::RepositoryImport {
+            path,
+            git,
+            branch,
+            cache_id,
+            cache_version,
+            marker,
+        } => {
+            return run_repository_import(
+                &git,
+                &path,
+                branch.as_deref(),
+                &cache_id,
+                cache_version,
+                &marker,
+            );
+        }
         _ => {}
     }
 
@@ -227,7 +262,9 @@ async fn run_cli() -> PodctlResult<()> {
         Command::Chats { command } => run_chat_command(&client, command).await?,
         Command::Ports { command } => run_port_command(&client, command).await?,
         Command::Http { command } => run_http_command(&client, command).await?,
-        Command::DeviceLink { .. } | Command::DeviceRemove { .. } => unreachable!(),
+        Command::DeviceLink { .. }
+        | Command::DeviceRemove { .. }
+        | Command::RepositoryImport { .. } => unreachable!(),
     }
     Ok(())
 }

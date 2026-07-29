@@ -19,6 +19,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use futures_util::StreamExt as _;
 use futures_util::TryStreamExt as _;
 use jiff::Timestamp;
@@ -30,6 +32,7 @@ use serde::Serialize;
 use sha2::Digest as _;
 use sha2::Sha256;
 use tascarrel_api::ids::RepositoryCacheId;
+use tascarrel_api::types::pods as pod_api;
 use tascarrel_api::types::repositories::RepositoryCacheVersion;
 use tascarrel_git::ReferenceName;
 use tascarrel_protocol::ErrorCode;
@@ -56,6 +59,7 @@ use crate::runtime::pod::ImageConfig;
 use crate::runtime::pod::ImageId;
 use crate::services::pods::PodExecution;
 use crate::services::pods::PodService;
+use crate::services::processes::ProcessSupervisor;
 
 const DEFAULT_RECONCILIATION_CONCURRENCY: usize = 4;
 const CHECKOUT_MARKER_SCHEMA: u32 = 1;
@@ -64,6 +68,7 @@ const CHECKOUT_MARKER_SCHEMA: u32 = 1;
 const CHECKOUT_SCHEMA: u32 = 2;
 const CHECKOUT_MARKER_FILE: &str = "tascarrel-cache.json";
 const MAX_CHECKOUT_MARKER_BYTES: u64 = 64 * 1024;
+const MAX_IMPORT_HELPER_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Failure while serving a Git operation from an authenticated pod channel.
 #[derive(Debug, Error)]
@@ -77,6 +82,17 @@ pub enum PodGitError {
     /// Git protocol bytes could not be relayed between the pod and host.
     #[error("failed to relay pod Git data")]
     Relay,
+}
+
+/// Failure while importing a configured repository into an existing pod.
+#[derive(Debug, Error)]
+pub(crate) enum RepositoryImportError {
+    /// The requested pod, repository, or lifecycle state is not importable.
+    #[error("invalid repository import request: {0}")]
+    InvalidRequest(String),
+    /// Guest infrastructure could not complete the repository import.
+    #[error("repository import failed: {0}")]
+    Internal(String),
 }
 
 /// Supplies the current repository declarations for a managed workspace.
@@ -239,6 +255,98 @@ impl RepositoryPreparation {
             .update_image_seed_versioned(image, &self.repositories, &self.versions)
             .await
     }
+
+    /// Imports one configured checkout into an already-running durable pod.
+    #[tracing::instrument(level = "debug", skip_all, fields(pod_id = %pod_id.0, path), err)]
+    pub(crate) async fn import_into_running_pod(
+        &self,
+        pod_id: &pod_api::PodId,
+        path: &str,
+        pods: &PodService,
+        processes: &ProcessSupervisor,
+    ) -> Result<pod_api::PodRepositoryImportResult, Report<RepositoryImportError>> {
+        let pod = pods
+            .pod_snapshot()
+            .into_iter()
+            .find(|pod| pod.id == *pod_id)
+            .ok_or_else(|| invalid_import("pod does not exist"))?;
+        if !matches!(pod.status, pod_api::PodState::Running) {
+            return Err(invalid_import("pod must be running to import a repository"));
+        }
+        let repository = self
+            .repositories
+            .get(path)
+            .ok_or_else(|| invalid_import("repository path is not configured"))?;
+        let version = self
+            .versions
+            .get(path)
+            .ok_or_else(|| internal_import("repository cache version is unavailable"))?;
+        let marker = CheckoutMarker::new(&repository.source, repository.branch.as_deref(), version);
+        marker
+            .validate()
+            .map_err(|error| internal_import(format!("checkout marker is invalid: {error}")))?;
+        let marker = serde_json::to_vec(&marker).map_err(|error| {
+            internal_import(format!("failed to encode checkout marker: {error}"))
+        })?;
+        let git = self
+            .manager
+            .git
+            .to_str()
+            .ok_or_else(|| internal_import("configured Git path is not valid UTF-8"))?;
+        let mut arguments = vec![
+            "repository-import".into(),
+            "--git".into(),
+            git.into(),
+            "--path".into(),
+            path.to_owned().into(),
+            "--cache-id".into(),
+            version.cache_id.0.to_string().into(),
+            "--cache-version".into(),
+            version.version.to_string().into(),
+            "--marker".into(),
+            STANDARD.encode(marker).into(),
+        ];
+        if let Some(branch) = &repository.branch {
+            arguments.push("--branch".into());
+            arguments.push(branch.clone().into());
+        }
+        let process = processes
+            .spawn_internal_user(
+                pods,
+                pod_id.clone(),
+                format!("Import /workspace/{path}"),
+                "/usr/local/bin/podctl",
+                arguments,
+            )
+            .map_err(|error| {
+                error.escalate(RepositoryImportError::Internal(
+                    "failed to start the pod import helper".to_owned(),
+                ))
+            })?;
+        let mut output = Vec::new();
+        processes
+            .wait_internal(process, |bytes| {
+                let remaining = MAX_IMPORT_HELPER_OUTPUT_BYTES.saturating_sub(output.len());
+                output.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+            })
+            .await
+            .map_err(|error| {
+                let diagnostic = bounded_import_output(&output);
+                error.escalate(RepositoryImportError::Internal(if diagnostic.is_empty() {
+                    "pod import helper failed".to_owned()
+                } else {
+                    format!("pod import helper failed: {diagnostic}")
+                }))
+            })?;
+        match bounded_import_output(&output).as_str() {
+            "imported" => Ok(pod_api::PodRepositoryImportResult::Imported),
+            "already-present" => Ok(pod_api::PodRepositoryImportResult::AlreadyPresent),
+            "destination-occupied" => Ok(pod_api::PodRepositoryImportResult::DestinationOccupied),
+            _ => Err(internal_import(
+                "pod import helper returned an invalid outcome",
+            )),
+        }
+    }
 }
 
 impl std::fmt::Debug for GuestRepositoryManager {
@@ -277,10 +385,29 @@ impl GuestRepositoryManager {
         let pod_id = tascarrel_protocol::PodId(pod_id.0.to_string());
         match request.service {
             PodGitService::UploadPack => {
-                self.serve_pod_fetch(framed, pod_id, request.path, pods)
-                    .await
+                self.serve_pod_fetch(
+                    framed,
+                    pod_id,
+                    request.path,
+                    request.expected_cache_id,
+                    request.expected_version,
+                    pods,
+                )
+                .await
             }
             PodGitService::ReceivePack => {
+                if request.expected_cache_id.is_some() || request.expected_version.is_some() {
+                    framed
+                        .write(&GitOpenResponse::Error {
+                            error: RemoteError::new(
+                                ErrorCode::InvalidRequest,
+                                "receive-pack cannot select a repository cache version",
+                            ),
+                        })
+                        .await
+                        .escalate(PodGitError::Protocol)?;
+                    return Ok(());
+                }
                 self.serve_pod_push(framed, pod_id, request.path, pods)
                     .await
             }
@@ -293,6 +420,8 @@ impl GuestRepositoryManager {
         mut framed: Framed<tascarrel_mux::Channel>,
         pod_id: tascarrel_protocol::PodId,
         path: String,
+        expected_cache_id: Option<String>,
+        expected_version: Option<u64>,
         pods: &PodService,
     ) -> Result<(), Report<PodGitError>> {
         let Some(repository) = self.repositories.read().await.get(&path).cloned() else {
@@ -314,6 +443,24 @@ impl GuestRepositoryManager {
                 .escalate(PodGitError::Protocol)?;
             return Ok(());
         }
+        let exact_cache = match (expected_cache_id, expected_version) {
+            (None, None) => None,
+            (Some(cache_id), Some(version)) if !cache_id.is_empty() && version > 0 => {
+                Some((cache_id, version))
+            }
+            _ => {
+                framed
+                    .write(&GitOpenResponse::Error {
+                        error: RemoteError::new(
+                            ErrorCode::InvalidRequest,
+                            "repository cache identity and version must be supplied together",
+                        ),
+                    })
+                    .await
+                    .escalate(PodGitError::Protocol)?;
+                return Ok(());
+            }
+        };
         let channel = self
             .network_service
             .open_channel(MUX_GIT_HOST_ENDPOINT)
@@ -322,9 +469,9 @@ impl GuestRepositoryManager {
         let mut host = Framed::new(channel);
         host.write(&GitHostRequest::UploadPack {
             source: repository.source,
-            refresh: true,
-            expected_cache_id: None,
-            expected_version: None,
+            refresh: exact_cache.is_none(),
+            expected_cache_id: exact_cache.as_ref().map(|(cache_id, _)| cache_id.clone()),
+            expected_version: exact_cache.map(|(_, version)| version),
         })
         .await
         .escalate(PodGitError::Protocol)?;
@@ -342,7 +489,10 @@ impl GuestRepositoryManager {
             .write(&response)
             .await
             .escalate(PodGitError::Protocol)?;
-        if !matches!(response, GitOpenResponse::Ready) {
+        if !matches!(
+            response,
+            GitOpenResponse::Ready | GitOpenResponse::VersionedReady { .. }
+        ) {
             return Ok(());
         }
         let mut pod = framed.into_inner();
@@ -1249,6 +1399,33 @@ fn remove_empty_checkout_parents(workspace: &Path, checkout: &Path) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Creates a contract report for an invalid repository import request.
+fn invalid_import(message: impl Into<String>) -> Report<RepositoryImportError> {
+    RepositoryImportError::InvalidRequest(message.into()).report()
+}
+
+/// Creates an internal report for an import infrastructure failure.
+fn internal_import(message: impl Into<String>) -> Report<RepositoryImportError> {
+    RepositoryImportError::Internal(message.into()).report()
+}
+
+/// Sanitizes the bounded helper output retained by the process supervisor.
+fn bounded_import_output(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len());
+    for character in String::from_utf8_lossy(bytes).chars() {
+        let character = if character == '\n' || character == '\t' || !character.is_control() {
+            character
+        } else {
+            '�'
+        };
+        if output.len() + character.len_utf8() > MAX_IMPORT_HELPER_OUTPUT_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output.trim().to_owned()
 }
 
 fn remote_error(error: impl std::fmt::Display) -> RemoteError {

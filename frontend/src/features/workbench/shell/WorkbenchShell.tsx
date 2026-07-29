@@ -23,7 +23,12 @@ import {
   type ReactNode,
 } from "react";
 
-import type { pods, workspaces } from "../../../api/generated/index.ts";
+import type {
+  changes,
+  pods,
+  repositories,
+  workspaces,
+} from "../../../api/generated/index.ts";
 import { ConnectionOverlay } from "../../../components/ui/ConnectionOverlay.tsx";
 import {
   createHttpRouteTicket,
@@ -106,6 +111,11 @@ type WorkbenchShellProps = {
   publishedWebPreviewsReady: boolean;
   retainedPublishedWebPreviewIds?: readonly string[];
   podProcessView?: ReactNode;
+  repositories?: readonly repositories.Repository[];
+  repositoriesReady?: boolean;
+  repositoriesError?: string;
+  repositoryStatuses?: readonly changes.RepositoryStatusEntry[];
+  repositoryStatusesReady?: boolean;
   agentTabs: AgentWorkbenchTab[];
   selectedAgentId?: string;
   creatingAgent?: boolean;
@@ -247,6 +257,11 @@ export function WorkbenchShell({
   publishedWebPreviewsReady,
   retainedPublishedWebPreviewIds = INITIAL_WEB_PREVIEW_IDS,
   podProcessView,
+  repositories = [],
+  repositoriesReady = false,
+  repositoriesError,
+  repositoryStatuses = [],
+  repositoryStatusesReady = false,
   agentTabs,
   selectedAgentId,
   creatingAgent = false,
@@ -837,6 +852,11 @@ export function WorkbenchShell({
                     workspace={selectedWorkspace}
                     pod={pods.find((candidate) => candidate.id === selectedPodId)}
                     processView={podProcessView}
+                    repositories={repositories}
+                    repositoriesReady={repositoriesReady}
+                    repositoriesError={repositoriesError}
+                    repositoryStatuses={repositoryStatuses}
+                    repositoryStatusesReady={repositoryStatusesReady}
                   />
                 ) : null}
                 {mode === "images" ? imagesView : null}

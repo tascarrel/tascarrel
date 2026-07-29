@@ -324,13 +324,13 @@ import * as __schema_workspaces from "./workspaces";
                                             * Pod and configured repository represented by this entry.
                                             */
                                                         "target": RepositoryTarget, /**
-                                            * Current repository status or inspection failure.
+                                            * Current repository presence and inspection state.
                                             */
                                                         "state": RepositoryStatusState };
 /**
- * Current inspection state of one configured repository.
+ * Current presence and inspection state of one configured repository.
  */
- export type RepositoryStatusState = (({ "status": "Ready" } & RepositoryStatus) | ({ "status": "Failed" } & RepositoryInspectionFailure));
+ export type RepositoryStatusState = ({ "status": "Missing" } | ({ "status": "Ready" } & RepositoryStatus) | ({ "status": "Failed" } & RepositoryInspectionFailure));
 /**
  * Current lightweight Git status for one configured repository.
  */

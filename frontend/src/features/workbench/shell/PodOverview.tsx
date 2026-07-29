@@ -1,19 +1,35 @@
 import { Box } from "lucide-react";
 import type { ReactNode } from "react";
 
-import type { pods, workspaces } from "../../../api/generated/index.ts";
+import type {
+  changes,
+  pods,
+  repositories,
+  workspaces,
+} from "../../../api/generated/index.ts";
 import { Badge, type BadgeTone } from "../../../components/ui/Badge.tsx";
 import { SidebarTabs, SidebarTabsPanel } from "../../../components/ui/SidebarTabs.tsx";
+import { PodRepositories } from "../../pods/PodRepositories.tsx";
 import { ShellPlaceholder } from "./ShellPlaceholder.tsx";
 
 export function PodOverview({
   workspace,
   pod,
   processView,
+  repositories: configuredRepositories = [],
+  repositoriesReady = false,
+  repositoriesError,
+  repositoryStatuses = [],
+  repositoryStatusesReady = false,
 }: {
   workspace?: workspaces.WorkspaceName;
   pod?: pods.Pod;
   processView?: ReactNode;
+  repositories?: readonly repositories.Repository[];
+  repositoriesReady?: boolean;
+  repositoriesError?: string;
+  repositoryStatuses?: readonly changes.RepositoryStatusEntry[];
+  repositoryStatusesReady?: boolean;
 }) {
   if (!pod) {
     return (
@@ -41,6 +57,10 @@ export function PodOverview({
                 label: "Processes",
               }]
             : []),
+          {
+            value: "repositories",
+            label: "Repositories",
+          },
         ]}
       >
         <SidebarTabsPanel contentClassName="max-w-5xl" value="overview">
@@ -80,6 +100,20 @@ export function PodOverview({
         {processView ? (
           <SidebarTabsPanel contentClassName="max-w-6xl" value="processes">
             {processView}
+          </SidebarTabsPanel>
+        ) : null}
+
+        {workspace ? (
+          <SidebarTabsPanel contentClassName="max-w-5xl" value="repositories">
+            <PodRepositories
+              workspace={workspace}
+              pod={pod}
+              repositories={configuredRepositories}
+              repositoriesReady={repositoriesReady}
+              repositoriesError={repositoriesError}
+              statuses={repositoryStatuses}
+              statusesReady={repositoryStatusesReady}
+            />
           </SidebarTabsPanel>
         ) : null}
       </SidebarTabs>

@@ -301,13 +301,15 @@ variant RepositoryStatusListMutation {
 record RepositoryStatusEntry {
     /// Pod and configured repository represented by this entry.
     target: RepositoryTarget,
-    /// Current repository status or inspection failure.
+    /// Current repository presence and inspection state.
     state: RepositoryStatusState,
 }
 
-/// Current inspection state of one configured repository.
+/// Current presence and inspection state of one configured repository.
 #[json(tag = "status")]
 variant RepositoryStatusState {
+    /// The configured repository destination does not exist in this pod.
+    Missing,
     /// Repository was inspected successfully.
     Ready: RepositoryStatus,
     /// Repository could not currently be inspected.

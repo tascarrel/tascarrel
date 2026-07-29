@@ -42,6 +42,7 @@ export type GuestActions = {
   "pods_Stop": { input: types.pods.StopPodAction; output: types.pods.StopPodOutput };
   "pods_Destroy": { input: types.pods.DestroyPodAction; output: types.pods.DestroyPodOutput };
   "pods_SetTitle": { input: types.pods.SetPodTitleAction; output: types.pods.SetPodTitleOutput };
+  "pods_ImportRepository": { input: types.pods.ImportPodRepositoryAction; output: types.pods.ImportPodRepositoryOutput };
   "processes_GetPodProcesses": { input: types.processes.GetPodProcessesAction; output: types.processes.GetPodProcessesOutput };
   "processes_Spawn": { input: types.processes.SpawnProcessAction; output: types.processes.SpawnProcessOutput };
   "processes_SpawnTerminal": { input: types.processes.SpawnProcessTerminalAction; output: types.processes.SpawnProcessTerminalOutput };

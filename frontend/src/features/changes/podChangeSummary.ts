@@ -16,11 +16,13 @@ export function summarizePodChanges(
 
   for (const repository of repositories) {
     const current = summaries.get(repository.target.podId);
-    if (repository.state.status === "Failed") {
-      summaries.set(repository.target.podId, {
-        ...emptySummary(current),
-        inspectionFailureCount: (current?.inspectionFailureCount ?? 0) + 1,
-      });
+    if (repository.state.status !== "Ready") {
+      if (repository.state.status === "Failed") {
+        summaries.set(repository.target.podId, {
+          ...emptySummary(current),
+          inspectionFailureCount: (current?.inspectionFailureCount ?? 0) + 1,
+        });
+      }
       continue;
     }
 

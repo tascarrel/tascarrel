@@ -86,6 +86,25 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type SetPodTitleOutput = Record<string, never>;
 /**
+ * Imports one configured workspace repository into an existing pod.
+ * The destination must either be absent or already contain a Tascarrel-managed
+ * checkout. Existing unmanaged files are never replaced.
+ */
+ export type ImportPodRepositoryAction = { /**
+                                            * Running pod which receives the configured repository.
+                                            */
+                                                        "podId": PodId, /**
+                                            * Configured repository path below `/workspace`.
+                                            */
+                                                        "path": __sidex_types.builtins.String };
+/**
+ * Outcome of importing one configured repository into a pod.
+ */
+ export type ImportPodRepositoryOutput = { /**
+                                            * Materialization outcome for the requested destination.
+                                            */
+                                                        "result": PodRepositoryImportResult };
+/**
  * Subscribes to the workspace-wide pod list.
  */
  export type PodListChangedSubscription = { /**
@@ -103,6 +122,10 @@ import * as __schema_workspaces from "./workspaces";
  * Identifies one pod within a workspace.
  */
  export type PodId = __sidex_types.Nominal<(string), "::tascarrel_api::pods::PodId">;
+/**
+ * Outcome of materializing one configured repository in a pod workspace.
+ */
+ export type PodRepositoryImportResult = ({ "status": "Imported" } | { "status": "AlreadyPresent" } | { "status": "DestinationOccupied" });
 /**
  * One pod managed by the workspace guest daemon.
  */

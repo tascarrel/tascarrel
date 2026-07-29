@@ -12,6 +12,7 @@ use crate::control_plane::operations::EventSource;
 use crate::control_plane::operations::ExecuteAction;
 use crate::control_plane::operations::OpenSubscription;
 use crate::control_plane::operations::store_event;
+use crate::repositories::RepositoryImportError;
 use crate::services::pods::PodListSubscription;
 use crate::services::pods::PodServiceError;
 
@@ -191,6 +192,62 @@ impl ExecuteAction for api::SetPodTitleAction {
 }
 
 #[async_trait]
+impl ExecuteAction for api::ImportPodRepositoryAction {
+    fn check_permissions(
+        &self,
+        context: &InvocationCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        if context
+            .require_routing_context()?
+            .caller
+            .is_host_or_client()
+        {
+            Ok(())
+        } else {
+            Err(wire::OperationError::forbidden())
+        }
+    }
+
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        let preparation = context.repository_preparation().await?.ok_or_else(|| {
+            Report::new(wire::OperationError::InvalidRequest(
+                operation_error_details("workspace repository imports are unavailable"),
+            ))
+        })?;
+        let result = preparation
+            .import_into_running_pod(
+                &self.pod_id,
+                self.path.as_ref(),
+                context.state().pods(),
+                context.state().processes(),
+            )
+            .await
+            .map_err(repository_import_error)?;
+        if let Err(error) = context
+            .state()
+            .changes()
+            .refresh_inventory(
+                context.state().pods().clone(),
+                context.state().repositories().cloned(),
+                context.state().repository_config().cloned(),
+            )
+            .await
+        {
+            tracing::warn!(
+                pod_id = %self.pod_id.0,
+                path = %self.path,
+                %error,
+                "could not refresh repository status after pod import"
+            );
+        }
+        Ok(api::ImportPodRepositoryOutput { result })
+    }
+}
+
+#[async_trait]
 impl OpenSubscription for api::PodListChangedSubscription {
     fn check_permissions(
         &self,
@@ -237,6 +294,19 @@ fn pod_error(report: Report<PodServiceError>) -> Report<wire::OperationError> {
             wire::OperationError::InvalidRequest(operation_error_details(message.clone()))
         }
         PodServiceError::Internal(message) => {
+            wire::OperationError::Internal(operation_error_details(message.clone()))
+        }
+    };
+    report.escalate(error)
+}
+
+/// Maps a repository import report to its control-plane error category.
+fn repository_import_error(report: Report<RepositoryImportError>) -> Report<wire::OperationError> {
+    let error = match report.error() {
+        RepositoryImportError::InvalidRequest(message) => {
+            wire::OperationError::InvalidRequest(operation_error_details(message.clone()))
+        }
+        RepositoryImportError::Internal(message) => {
             wire::OperationError::Internal(operation_error_details(message.clone()))
         }
     };

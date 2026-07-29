@@ -30,6 +30,27 @@ pub(crate) enum PodctlError {
     /// A Git repository path was not a normal UTF-8 path below `/workspace`.
     #[error("invalid Tascarrel Git repository path")]
     InvalidRepositoryPath,
+    /// An internal repository import received an invalid pinned cache version.
+    #[error("invalid repository import cache version")]
+    InvalidRepositoryCacheVersion,
+    /// An internal repository import received an invalid managed-checkout
+    /// marker.
+    #[error("invalid repository import checkout marker")]
+    InvalidRepositoryImportMarker,
+    /// A pod-local repository import filesystem operation failed.
+    #[error("failed to {action} during repository import")]
+    RepositoryImportIo {
+        /// Filesystem operation which failed.
+        action: &'static str,
+    },
+    /// A pod-local Git command failed while importing a repository.
+    #[error("failed to {action} during repository import: {detail}")]
+    RepositoryImportCommand {
+        /// Git operation which failed.
+        action: &'static str,
+        /// Bounded, display-safe command diagnostic.
+        detail: String,
+    },
     /// A Git helper standard stream could not be opened.
     #[error("failed to open Git helper {stream}")]
     OpenGitStream {

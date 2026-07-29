@@ -103,6 +103,7 @@ macro_rules! __with_guestd_actions {
             ("pods_Stop", pods::StopPodAction, pods::StopPodOutput),
             ("pods_Destroy", pods::DestroyPodAction, pods::DestroyPodOutput),
             ("pods_SetTitle", pods::SetPodTitleAction, pods::SetPodTitleOutput),
+            ("pods_ImportRepository", pods::ImportPodRepositoryAction, pods::ImportPodRepositoryOutput),
             ("processes_GetPodProcesses", processes::GetPodProcessesAction, processes::GetPodProcessesOutput),
             ("processes_Spawn", processes::SpawnProcessAction, processes::SpawnProcessOutput),
             ("processes_SpawnTerminal", processes::SpawnProcessTerminalAction, processes::SpawnProcessTerminalOutput),

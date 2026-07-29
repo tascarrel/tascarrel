@@ -67,6 +67,22 @@ record SetPodTitleAction {
 /// Result of changing one pod title.
 record SetPodTitleOutput {}
 
+/// Imports one configured workspace repository into an existing pod.
+/// The destination must either be absent or already contain a Tascarrel-managed
+/// checkout. Existing unmanaged files are never replaced.
+record ImportPodRepositoryAction {
+    /// Running pod which receives the configured repository.
+    pod_id: PodId,
+    /// Configured repository path below `/workspace`.
+    path: string,
+}
+
+/// Outcome of importing one configured repository into a pod.
+record ImportPodRepositoryOutput {
+    /// Materialization outcome for the requested destination.
+    result: PodRepositoryImportResult,
+}
+
 // Subscriptions
 
 
@@ -89,6 +105,17 @@ record PodListChangedEvent {
 #[json(type = "string")]
 #[rust(type = "crate::ids::PodId")]
 opaque PodId
+
+/// Outcome of materializing one configured repository in a pod workspace.
+#[json(tag = "status")]
+variant PodRepositoryImportResult {
+    /// The configured repository was cloned and published at its destination.
+    Imported,
+    /// A Tascarrel-managed checkout already occupies the destination.
+    AlreadyPresent,
+    /// Another file or unmanaged directory occupies the destination.
+    DestinationOccupied,
+}
 
 /// One pod managed by the workspace guest daemon.
 record Pod {

@@ -31,6 +31,10 @@ use crate::client::PodClient;
 use crate::error::PodctlError;
 use crate::error::PodctlResult;
 
+pub(crate) const EXPECTED_CACHE_ID_ENVIRONMENT: &str = "TASCARREL_REPOSITORY_EXPECTED_CACHE_ID";
+pub(crate) const EXPECTED_CACHE_VERSION_ENVIRONMENT: &str =
+    "TASCARREL_REPOSITORY_EXPECTED_CACHE_VERSION";
+
 /// Implements Git's blocking remote-helper protocol for managed fetches.
 #[tracing::instrument(level = "debug", skip_all, err)]
 pub(crate) fn run_git_remote_helper() -> PodctlResult<()> {
@@ -155,7 +159,11 @@ fn connect_blocking_git(
             runtime.block_on(async move {
                 let (mut channel, _session, response) = open_git_channel(path, service).await?;
                 match (service, response) {
-                    (PodGitService::UploadPack, tascarrel_protocol::GitOpenResponse::Ready)
+                    (
+                        PodGitService::UploadPack,
+                        tascarrel_protocol::GitOpenResponse::Ready
+                        | tascarrel_protocol::GitOpenResponse::VersionedReady { .. },
+                    )
                     | (
                         PodGitService::ReceivePack,
                         tascarrel_protocol::GitOpenResponse::ReceivePackReady { .. },
@@ -306,8 +314,14 @@ async fn open_git_channel(
         .await
         .map_err(|error| error.escalate(PodctlError::Multiplexer))?;
     let mut framed = Framed::new(channel);
+    let (expected_cache_id, expected_version) = expected_cache_version(service)?;
     framed
-        .write(&PodGitRequest { path, service })
+        .write(&PodGitRequest {
+            path,
+            service,
+            expected_cache_id,
+            expected_version,
+        })
         .await
         .map_err(|error| error.escalate(PodctlError::GitHandshake))?;
     let response = framed
@@ -347,7 +361,7 @@ async fn relay_git_stream(
 }
 
 /// Validates a configured path relative to the workspace root.
-fn validate_repository_path(path: &Path) -> PodctlResult<String> {
+pub(crate) fn validate_repository_path(path: &Path) -> PodctlResult<String> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -358,6 +372,27 @@ fn validate_repository_path(path: &Path) -> PodctlResult<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| PodctlError::InvalidRepositoryPath.report())
+}
+
+/// Reads an optional exact host cache requirement for an internal clone.
+fn expected_cache_version(service: PodGitService) -> PodctlResult<(Option<String>, Option<u64>)> {
+    if service != PodGitService::UploadPack {
+        return Ok((None, None));
+    }
+    let cache_id = std::env::var(EXPECTED_CACHE_ID_ENVIRONMENT).ok();
+    let version = std::env::var(EXPECTED_CACHE_VERSION_ENVIRONMENT).ok();
+    match (cache_id, version) {
+        (None, None) => Ok((None, None)),
+        (Some(cache_id), Some(version)) if !cache_id.is_empty() => {
+            let version = version
+                .parse::<u64>()
+                .ok()
+                .filter(|version| *version > 0)
+                .ok_or_else(|| PodctlError::InvalidRepositoryCacheVersion.report())?;
+            Ok((Some(cache_id), Some(version)))
+        }
+        _ => Err(PodctlError::InvalidRepositoryCacheVersion.report()),
+    }
 }
 
 /// Converts a blocking bridge failure to tascarrel-git's I/O category.

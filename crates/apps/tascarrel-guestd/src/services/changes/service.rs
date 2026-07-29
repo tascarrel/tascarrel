@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
+use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -119,6 +121,25 @@ impl ChangesService {
         if let Err(error) = initialized_rx.await {
             warn!(%error, "repository tracker stopped before initialization completed");
         }
+    }
+
+    /// Reconciles configured repository paths immediately after an explicit
+    /// mutation.
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    pub(crate) async fn refresh_inventory(
+        &self,
+        pods: PodService,
+        repositories: Option<Arc<GuestRepositoryManager>>,
+        repository_config: Option<Arc<dyn RepositoryConfigProvider>>,
+    ) -> Result<(), Report<ChangesServiceError>> {
+        self.ensure_tracking(
+            pods.clone(),
+            repositories.clone(),
+            repository_config.clone(),
+        )
+        .await;
+        self.reconcile_inventory(&pods, repositories.as_deref(), repository_config.as_deref())
+            .await
     }
 
     /// Opens the resumable workspace-wide repository status list.
@@ -666,6 +687,14 @@ impl ChangesService {
         let generation = repository.generation.load(Ordering::Relaxed);
         let root = repository.root.read().await.clone();
         let (snapshot, state) = match root {
+            Some(root)
+                if matches!(
+                    fs::symlink_metadata(&root),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound
+                ) =>
+            {
+                (None, api::RepositoryStatusState::Missing)
+            }
             Some(root) => {
                 match git::inspect(&self.inner.git, &root, repository.target.path.as_str()).await {
                     Ok(snapshot) => {
@@ -1031,6 +1060,37 @@ mod tests {
             );
         }
         assert!(list.repositories[0].target < list.repositories[1].target);
+    }
+
+    /// Publishes an absent configured checkout as importable rather than as
+    /// a Git inspection failure.
+    #[tokio::test]
+    async fn absent_repository_is_reported_as_missing() {
+        let service =
+            ChangesService::new(ChangesServiceConfig::new(std::env::current_exe().unwrap()))
+                .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let target = api::RepositoryTarget {
+            pod_id: tascarrel_api::ids::PodId::generate(),
+            path: FilePath::new("missing"),
+        };
+        let repository = Arc::new(RepositoryCache {
+            target: target.clone(),
+            root: RwLock::new(Some(temporary.path().join("missing"))),
+            snapshot: RwLock::new(None),
+            generation: AtomicU64::new(0),
+            refresh: Mutex::new(()),
+        });
+
+        service.refresh_repository(repository).await;
+
+        let snapshot = service.inner.store.snapshot();
+        assert_eq!(snapshot.value.repositories.len(), 1);
+        assert_eq!(snapshot.value.repositories[0].target, target);
+        assert!(matches!(
+            snapshot.value.repositories[0].state,
+            api::RepositoryStatusState::Missing
+        ));
     }
 
     /// Keeps published diagnostics within their byte bound without splitting

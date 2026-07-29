@@ -788,6 +788,12 @@ export function WorkspaceWorkbench({
                 </DesktopPanel>
               )
               : undefined}
+            repositories={repositories}
+            repositoriesReady={repositoryState.ready && !repositoryState.error}
+            repositoriesError={repositoryState.error?.message}
+            repositoryStatuses={repositoryStatusState.value?.repositories ?? []}
+            repositoryStatusesReady={repositoryStatusState.ready
+              && !repositoryStatusState.error}
             agentTabs={agentTabs}
             selectedAgentId={startingChat ? undefined : selectedSummary?.chatId}
             creatingAgent={startingChat}
