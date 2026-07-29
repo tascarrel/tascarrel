@@ -12,6 +12,7 @@ mod transport;
 
 pub(crate) use policy::NetworkPolicy;
 pub use service::DnsRequestsSubscription;
+pub use service::HttpRequestsSubscription;
 pub use service::HttpRouteListSubscription;
 pub use service::NetworkProxyError;
 pub use service::NetworkService;

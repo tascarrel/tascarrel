@@ -18,13 +18,14 @@
 //! port on the host loopback interface. The mapping applies only to the selected pod and does not
 //! expose the host service on a physical host interface.
 //!
-//! DNS requests and TCP flows are exposed as separate, bounded, in-memory streams for each
-//! workspace. Each stream assigns positions independently within the workspace and running host
-//! instance. A retained cursor resumes with every later retained entry. An absent cursor starts
-//! with the complete retained history. A cursor for another host instance, older than retained
-//! history, or later than the current position rebases to the oldest retained entry. Subscriptions
-//! emit non-empty ordered batches of consecutive entries. Each batch carries the cursor of its
-//! final entry, so a jump between batches indicates that intervening entries were evicted.
+//! DNS requests, mediated HTTP requests, and TCP flows are exposed as separate, bounded, in-memory
+//! streams for each workspace. Each stream assigns positions independently within the workspace
+//! and running host instance. A retained cursor resumes with every later retained entry. An absent
+//! cursor starts with the complete retained history. A cursor for another host instance, older
+//! than retained history, or later than the current position rebases to the oldest retained entry.
+//! Subscriptions emit non-empty ordered batches of consecutive entries. Each batch carries the
+//! cursor of its final entry, so a jump between batches indicates that intervening entries were
+//! evicted.
 
 import common::Timestamp
 import host::HostInstanceId
@@ -227,6 +228,22 @@ record DnsRequestsEvent {
     requests: [DnsRequest],
 }
 
+/// Subscribes to retained and live mediated HTTP requests attributed to one workspace.
+record HttpRequestsSubscription {
+    /// Workspace whose mediated HTTP requests are observed.
+    workspace: WorkspaceName,
+    /// Cursor of the last HTTP request observed by the consumer, or absent for retained history.
+    cursor?: HttpRequestCursor,
+}
+
+/// One non-empty ordered batch from a workspace's mediated HTTP request stream.
+record HttpRequestsEvent {
+    /// Cursor of the final request in this batch.
+    cursor: HttpRequestCursor,
+    /// Consecutive mediated HTTP requests in ascending position order.
+    requests: [MediatedHttpRequest],
+}
+
 /// Subscribes to retained and live TCP flow lifecycle events attributed to one workspace.
 record TcpFlowsSubscription {
     /// Workspace whose TCP flow lifecycle events are observed.
@@ -276,6 +293,14 @@ record DnsRequestCursor {
     /// Host daemon instance that assigned the position.
     host_instance_id: HostInstanceId,
     /// Monotonic position within the workspace's DNS request stream, starting at one.
+    position: u64,
+}
+
+/// Position in one workspace's mediated HTTP request stream.
+record HttpRequestCursor {
+    /// Host daemon instance that assigned the position.
+    host_instance_id: HostInstanceId,
+    /// Monotonic position within the workspace's HTTP request stream, starting at one.
     position: u64,
 }
 
@@ -456,6 +481,27 @@ record DnsResponseSummary {
     resolved_addresses: [string],
     /// Whether additional resolved addresses were omitted from the summary.
     addresses_truncated: bool,
+}
+
+/// One HTTP request inspected by the host network proxy. The path excludes the query string
+/// because request queries commonly contain credentials.
+record MediatedHttpRequest {
+    /// Identifier of the TCP flow carrying the request.
+    tcp_flow_id: TcpFlowId,
+    /// Time at which the host network proxy received the request.
+    occurred_at: Timestamp,
+    /// Guest workload or service that issued the request.
+    source: NetworkRequestSource,
+    /// Normalized HTTP host, when the request supplied a valid host.
+    host?: string,
+    /// HTTP request method.
+    method: string,
+    /// HTTP request path without its query string.
+    path: string,
+    /// Whether the retained path was shortened to its configured size limit.
+    path_truncated: bool,
+    /// Whether at least one configured secret placeholder was replaced in the request headers.
+    secrets_injected: bool,
 }
 
 /// One lifecycle event for a TCP flow handled by the host network service.

@@ -13,6 +13,7 @@ use crate::control_plane::operations::ExecuteAction;
 use crate::control_plane::operations::OpenSubscription;
 use crate::control_plane::operations::store_event;
 use crate::services::network::DnsRequestsSubscription;
+use crate::services::network::HttpRequestsSubscription;
 use crate::services::network::HttpRouteListSubscription;
 use crate::services::network::NetworkServiceError;
 use crate::services::network::PodHostForwardListSubscription;
@@ -382,6 +383,44 @@ impl EventSource for DnsRequestsSubscription {
     async fn recv(&mut self) -> Result<Option<Self::Event>, Report<wire::OperationError>> {
         Ok(self.recv().await.map(|batch| api::DnsRequestsEvent {
             cursor: api::DnsRequestCursor {
+                host_instance_id: self.host_instance_id().clone(),
+                position: batch.position,
+            },
+            requests: batch.entries.into(),
+        }))
+    }
+}
+
+#[async_trait]
+impl OpenSubscription for api::HttpRequestsSubscription {
+    async fn check_permissions(
+        &self,
+        context: &SubscriptionCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        require_host_or_client(&context.require_routing_context()?.caller)
+    }
+
+    type Source = HttpRequestsSubscription;
+
+    async fn open(
+        self,
+        context: SubscriptionCtx<'_>,
+    ) -> Result<Self::Source, Report<wire::OperationError>> {
+        context
+            .state()
+            .network()
+            .subscribe_http_requests(&self, context.state().workspaces())
+            .map_err(network_error)
+    }
+}
+
+#[async_trait]
+impl EventSource for HttpRequestsSubscription {
+    type Event = api::HttpRequestsEvent;
+
+    async fn recv(&mut self) -> Result<Option<Self::Event>, Report<wire::OperationError>> {
+        Ok(self.recv().await.map(|batch| api::HttpRequestsEvent {
+            cursor: api::HttpRequestCursor {
                 host_instance_id: self.host_instance_id().clone(),
                 position: batch.position,
             },

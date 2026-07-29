@@ -283,7 +283,7 @@ impl NetworkService {
             workspace,
             &tcp_flow_id,
             &request,
-            source,
+            source.clone(),
             destination.effective_address(),
             Some(mode),
         );
@@ -308,6 +308,8 @@ impl NetworkService {
                 .await
             {
                 Ok(()) => {
+                    let request_recorder =
+                        self.http_request_recorder(workspace, tcp_flow_id.clone(), source.clone());
                     let proxy_service = HttpProxy::new(
                         policy.clone(),
                         authority,
@@ -322,6 +324,7 @@ impl NetworkService {
                                     destination.port(),
                                     workspace.clone(),
                                     secrets.clone(),
+                                    request_recorder,
                                 )
                                 .await
                         }
@@ -332,6 +335,7 @@ impl NetworkService {
                                     destination.port(),
                                     workspace.clone(),
                                     secrets.clone(),
+                                    request_recorder,
                                 )
                                 .await
                         }

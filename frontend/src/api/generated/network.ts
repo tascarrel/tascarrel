@@ -258,6 +258,26 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "requests": __sidex_types.builtins.Sequence<DnsRequest> };
 /**
+ * Subscribes to retained and live mediated HTTP requests attributed to one workspace.
+ */
+ export type HttpRequestsSubscription = { /**
+                                            * Workspace whose mediated HTTP requests are observed.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Cursor of the last HTTP request observed by the consumer, or absent for retained history.
+                                            */
+                                                        "cursor"?: HttpRequestCursor };
+/**
+ * One non-empty ordered batch from a workspace's mediated HTTP request stream.
+ */
+ export type HttpRequestsEvent = { /**
+                                            * Cursor of the final request in this batch.
+                                            */
+                                                        "cursor": HttpRequestCursor, /**
+                                            * Consecutive mediated HTTP requests in ascending position order.
+                                            */
+                                                        "requests": __sidex_types.builtins.Sequence<MediatedHttpRequest> };
+/**
  * Subscribes to retained and live TCP flow lifecycle events attributed to one workspace.
  */
  export type TcpFlowsSubscription = { /**
@@ -308,6 +328,16 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "hostInstanceId": __schema_host.HostInstanceId, /**
                                             * Monotonic position within the workspace's DNS request stream, starting at one.
+                                            */
+                                                        "position": __sidex_types.builtins.U64 };
+/**
+ * Position in one workspace's mediated HTTP request stream.
+ */
+ export type HttpRequestCursor = { /**
+                                            * Host daemon instance that assigned the position.
+                                            */
+                                                        "hostInstanceId": __schema_host.HostInstanceId, /**
+                                            * Monotonic position within the workspace's HTTP request stream, starting at one.
                                             */
                                                         "position": __sidex_types.builtins.U64 };
 /**
@@ -485,6 +515,35 @@ import * as __schema_workspaces from "./workspaces";
                                             * Whether additional resolved addresses were omitted from the summary.
                                             */
                                                         "addressesTruncated": __sidex_types.builtins.Bool };
+/**
+ * One HTTP request inspected by the host network proxy. The path excludes the query string
+ * because request queries commonly contain credentials.
+ */
+ export type MediatedHttpRequest = { /**
+                                            * Identifier of the TCP flow carrying the request.
+                                            */
+                                                        "tcpFlowId": TcpFlowId, /**
+                                            * Time at which the host network proxy received the request.
+                                            */
+                                                        "occurredAt": __schema_common.Timestamp, /**
+                                            * Guest workload or service that issued the request.
+                                            */
+                                                        "source": NetworkRequestSource, /**
+                                            * Normalized HTTP host, when the request supplied a valid host.
+                                            */
+                                                        "host"?: __sidex_types.builtins.String, /**
+                                            * HTTP request method.
+                                            */
+                                                        "method": __sidex_types.builtins.String, /**
+                                            * HTTP request path without its query string.
+                                            */
+                                                        "path": __sidex_types.builtins.String, /**
+                                            * Whether the retained path was shortened to its configured size limit.
+                                            */
+                                                        "pathTruncated": __sidex_types.builtins.Bool, /**
+                                            * Whether at least one configured secret placeholder was replaced in the request headers.
+                                            */
+                                                        "secretsInjected": __sidex_types.builtins.Bool };
 /**
  * One lifecycle event for a TCP flow handled by the host network service.
  */

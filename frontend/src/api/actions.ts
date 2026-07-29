@@ -78,6 +78,7 @@ export type HostSubscriptions = {
   "network_PortForwardsChanged": { input: types.network.PortForwardListChangedSubscription; output: types.network.PortForwardListChangedEvent };
   "network_PodHostForwardsChanged": { input: types.network.PodHostForwardListChangedSubscription; output: types.network.PodHostForwardListChangedEvent };
   "network_DnsRequests": { input: types.network.DnsRequestsSubscription; output: types.network.DnsRequestsEvent };
+  "network_HttpRequests": { input: types.network.HttpRequestsSubscription; output: types.network.HttpRequestsEvent };
   "network_TcpFlows": { input: types.network.TcpFlowsSubscription; output: types.network.TcpFlowsEvent };
   "repositories_ApprovalRequestsChanged": { input: types.repositories.RepositoryApprovalRequestListChangedSubscription; output: types.repositories.RepositoryApprovalRequestListChangedEvent };
   "repositories_PushStatusChanged": { input: types.repositories.RepositoryPushStatusChangedSubscription; output: types.repositories.RepositoryPushStatusChangedEvent };

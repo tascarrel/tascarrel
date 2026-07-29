@@ -19,6 +19,7 @@ import { openHttpRouteInNewTab } from "./routeAccess.ts";
 import { HostPodForwardForm, HttpRouteForm, PodHostForwardForm } from "./NetworkForms.tsx";
 import {
   useDnsRequests,
+  useHttpRequests,
   useHttpRoutes,
   usePodHostForwards,
   usePortForwards,
@@ -43,11 +44,13 @@ export function NetworkView({
   const forwardState = usePortForwards(workspace);
   const podHostForwardState = usePodHostForwards(workspace);
   const dnsState = useDnsRequests(workspace);
+  const httpState = useHttpRequests(workspace);
   const tcpState = useTcpFlows(workspace);
   const routes = routeState.value?.httpRoutes ?? [];
   const forwards = forwardState.value?.portForwards ?? [];
   const podHostForwards = podHostForwardState.value?.podHostForwards ?? [];
   const dnsRequests = dnsState.value?.requests ?? [];
+  const httpRequests = httpState.value?.requests ?? [];
   const tcpFlows = correlateTcpFlows(tcpState.value?.events ?? []);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>();
   const [deleting, setDeleting] = useState(false);
@@ -136,6 +139,7 @@ export function NetworkView({
     ?? forwardState.error?.message
     ?? podHostForwardState.error?.message
     ?? dnsState.error?.message
+    ?? httpState.error?.message
     ?? tcpState.error?.message;
   const noPodDetail = workspacePods.length === 0
     ? "Start the workspace to discover pods and create new network entries. Existing host-owned entries remain available below."
@@ -178,6 +182,10 @@ export function NetworkView({
           {
             value: "dns-requests",
             label: "DNS Requests",
+          },
+          {
+            value: "http-requests",
+            label: "HTTP Requests",
           },
           {
             value: "tcp-flows",
@@ -430,6 +438,53 @@ export function NetworkView({
                         {resolvedAddressesLabel(request.outcome)}
                       </p>
                     ) : null}
+                  </li>
+                ))}
+              </NetworkList>
+            </NetworkCollection>
+          </NetworkPage>
+        </SidebarTabsPanel>
+
+        <SidebarTabsPanel
+          contentClassName="max-w-6xl"
+          value="http-requests"
+        >
+          <NetworkPage
+            title="HTTP Requests"
+            detail="Inspect requests mediated by the host HTTP proxy. Query strings are not retained."
+            count={httpRequests.length}
+            connection={httpState.connection}
+          >
+            <NetworkCollection>
+              <NetworkList
+                ready={httpState.ready}
+                empty="No mediated HTTP requests have been observed for this workspace."
+              >
+                {httpRequests.toReversed().map((request, index) => (
+                  <li
+                    className="px-4 py-3"
+                    key={`${request.occurredAt}-${request.tcpFlowId}-${index}`}
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <code className="break-all font-mono text-xs text-foreground">
+                        {request.method} {request.path}{request.pathTruncated ? "…" : ""}
+                      </code>
+                      <Badge
+                        className="normal-case"
+                        size="xs"
+                        tone={request.secretsInjected ? "primary" : "muted"}
+                      >
+                        {request.secretsInjected ? "Secrets injected" : "No secrets injected"}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 break-all text-[10px] text-subtle">
+                      {request.host ?? "Host unavailable"} · {" "}
+                      <NetworkSource
+                        source={request.source}
+                        workspace={workspace}
+                        podTitlesById={podTitlesById}
+                      /> · {formatTimestamp(request.occurredAt)} · Flow {shortId(request.tcpFlowId)}
+                    </p>
                   </li>
                 ))}
               </NetworkList>

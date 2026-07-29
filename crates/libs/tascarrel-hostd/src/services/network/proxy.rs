@@ -60,12 +60,22 @@ use tracing::debug;
 use super::policy::MAX_SECRET_BYTES;
 use super::policy::NetworkPolicy;
 use super::policy::forbidden_secret_header;
+use super::service::HttpRequestRecorder;
 use crate::WorkspaceAuthority;
 use crate::services::secrets::SecretsService;
 
 type ProxyBody = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 type ProxyResult<T> = Result<T, Report<HttpProxyError>>;
 type UpgradeTask = Arc<Mutex<Option<JoinHandle<ProxyResult<()>>>>>;
+
+struct HttpConnectionContext {
+    port: u16,
+    tls_host: Option<String>,
+    upstream_tls: bool,
+    workspace_name: WorkspaceName,
+    secrets: SecretsService,
+    request_recorder: HttpRequestRecorder,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum HttpProxyError {
@@ -80,6 +90,26 @@ struct ForwardContext<T> {
     cleanup_io: SharedIo<T>,
     upgraded: Arc<AtomicBool>,
     upgrade_task: UpgradeTask,
+}
+
+struct HttpRequestAudit {
+    occurred_at: jiff::Timestamp,
+    host: Option<String>,
+    method: Method,
+    path: String,
+    secrets_injected: bool,
+}
+
+impl HttpRequestAudit {
+    fn new(request: &Request<Incoming>) -> Self {
+        Self {
+            occurred_at: jiff::Timestamp::now(),
+            host: None,
+            method: request.method().clone(),
+            path: request.uri().path().to_owned(),
+            secrets_injected: false,
+        }
+    }
 }
 
 struct SharedIo<T> {
@@ -183,12 +213,23 @@ impl HttpProxy {
         port: u16,
         workspace_name: WorkspaceName,
         secrets: SecretsService,
+        request_recorder: HttpRequestRecorder,
     ) -> ProxyResult<()>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        self.serve_connection(channel, port, None, false, workspace_name, secrets)
-            .await
+        self.serve_connection(
+            channel,
+            HttpConnectionContext {
+                port,
+                tls_host: None,
+                upstream_tls: false,
+                workspace_name,
+                secrets,
+                request_recorder,
+            },
+        )
+        .await
     }
 
     pub async fn serve_https<T>(
@@ -197,6 +238,7 @@ impl HttpProxy {
         port: u16,
         workspace_name: WorkspaceName,
         secrets: SecretsService,
+        request_recorder: HttpRequestRecorder,
     ) -> ProxyResult<()>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -234,8 +276,18 @@ impl HttpProxy {
                 "failed to complete pod-facing TLS handshake: {error}"
             ))
         })?;
-        self.serve_connection(stream, port, Some(host), true, workspace_name, secrets)
-            .await
+        self.serve_connection(
+            stream,
+            HttpConnectionContext {
+                port,
+                tls_host: Some(host),
+                upstream_tls: true,
+                workspace_name,
+                secrets,
+                request_recorder,
+            },
+        )
+        .await
     }
 
     /// Resolves an admitted SNI and relays the original TLS stream unchanged.
@@ -272,18 +324,18 @@ impl HttpProxy {
         Ok(())
     }
 
-    async fn serve_connection<T>(
-        self,
-        io: T,
-        port: u16,
-        tls_host: Option<String>,
-        upstream_tls: bool,
-        workspace_name: WorkspaceName,
-        secrets: SecretsService,
-    ) -> ProxyResult<()>
+    async fn serve_connection<T>(self, io: T, context: HttpConnectionContext) -> ProxyResult<()>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let HttpConnectionContext {
+            port,
+            tls_host,
+            upstream_tls,
+            workspace_name,
+            secrets,
+            request_recorder,
+        } = context;
         let drain_timeout = self.connect_timeout;
         let io = SharedIo::new(io);
         let cleanup_io = io.clone();
@@ -305,7 +357,9 @@ impl HttpProxy {
                     let upgrade_task = Arc::clone(&service_upgrade_task);
                     let workspace_name = workspace_name.clone();
                     let secrets = secrets.clone();
+                    let request_recorder = request_recorder.clone();
                     async move {
+                        let mut audit = HttpRequestAudit::new(&request);
                         let context = ForwardContext {
                             port,
                             tls_host,
@@ -315,7 +369,7 @@ impl HttpProxy {
                             upgrade_task,
                         };
                         let response = match proxy
-                            .forward(request, context, &workspace_name, &secrets)
+                            .forward(request, context, &workspace_name, &secrets, &mut audit)
                             .await
                         {
                             Ok(response) => response,
@@ -324,6 +378,13 @@ impl HttpProxy {
                                 error_response(&error)
                             }
                         };
+                        request_recorder.record(
+                            audit.occurred_at,
+                            audit.host,
+                            &audit.method,
+                            &audit.path,
+                            audit.secrets_injected,
+                        );
                         Ok::<_, Infallible>(response)
                     }
                 }),
@@ -352,6 +413,7 @@ impl HttpProxy {
         context: ForwardContext<T>,
         workspace_name: &WorkspaceName,
         secrets: &SecretsService,
+        audit: &mut HttpRequestAudit,
     ) -> ProxyResult<Response<ProxyBody>>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -363,19 +425,21 @@ impl HttpProxy {
         let wants_upgrade = requests_upgrade(request.headers())?;
         let pod_upgrade = wants_upgrade.then(|| hyper::upgrade::on(&mut request));
         let host = request_host(&request)?;
+        audit.host = Some(host.clone());
         self.require_host(&host)?;
         if context.tls_host.as_deref().is_some_and(|sni| sni != host) {
             return Err(proxy_error("HTTP Host does not match TLS SNI"));
         }
         let method = request.method().clone();
-        self.inject_secrets(
-            request.headers_mut(),
-            &host,
-            &method,
-            workspace_name,
-            secrets,
-        )
-        .await?;
+        audit.secrets_injected = self
+            .inject_secrets(
+                request.headers_mut(),
+                &host,
+                &method,
+                workspace_name,
+                secrets,
+            )
+            .await?;
         strip_hop_by_hop(request.headers_mut(), wants_upgrade);
         *request.uri_mut() = request
             .uri()
@@ -459,7 +523,7 @@ impl HttpProxy {
         method: &Method,
         workspace_name: &WorkspaceName,
         secrets: &SecretsService,
-    ) -> ProxyResult<()> {
+    ) -> ProxyResult<bool> {
         if self.policy.injects_secret_for_host(host)
             && !self.policy.allows_secret_injection_method(host, method)
         {
@@ -467,6 +531,7 @@ impl HttpProxy {
                 "HTTP method {method} is denied for secret-injection host {host:?}"
             )));
         }
+        let mut secrets_injected = false;
         for rule in &self.policy.secret_injection {
             if !NetworkPolicy::rule_matches(&rule.host, host) || !rule.methods.contains(method) {
                 continue;
@@ -495,10 +560,13 @@ impl HttpProxy {
                 {
                     continue;
                 }
-                *value = inject_header_value(header_name, value, &rule.placeholder, &secret)?;
+                let (injected_value, changed) =
+                    inject_header_value(header_name, value, &rule.placeholder, &secret)?;
+                *value = injected_value;
+                secrets_injected |= changed;
             }
         }
-        Ok(())
+        Ok(secrets_injected)
     }
 }
 
@@ -728,7 +796,7 @@ fn inject_header_value(
     value: &HeaderValue,
     placeholder: &str,
     secret: &str,
-) -> ProxyResult<HeaderValue> {
+) -> ProxyResult<(HeaderValue, bool)> {
     let text = value
         .to_str()
         .map_err(|error| proxy_error(format!("secret-bearing header is not text: {error}")))?;
@@ -744,16 +812,19 @@ fn inject_header_value(
         let (replaced, changed) =
             replace_bytes(&decoded, placeholder.as_bytes(), secret.as_bytes());
         if changed {
-            return HeaderValue::from_str(&format!("Basic {}", BASE64.encode(replaced))).map_err(
-                |error| {
+            return HeaderValue::from_str(&format!("Basic {}", BASE64.encode(replaced)))
+                .map(|value| (value, true))
+                .map_err(|error| {
                     proxy_error(format!(
                         "failed to encode injected Basic authorization header: {error}"
                     ))
-                },
-            );
+                });
         }
     }
-    HeaderValue::from_str(&text.replace(placeholder, secret))
+    let replaced = text.replace(placeholder, secret);
+    let changed = replaced != text;
+    HeaderValue::from_str(&replaced)
+        .map(|value| (value, changed))
         .map_err(|error| proxy_error(format!("failed to encode injected HTTP header: {error}")))
 }
 
@@ -896,17 +967,28 @@ fn interception_client_config(authority: &WorkspaceAuthority) -> Arc<ClientConfi
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::num::NonZeroUsize;
     use std::os::unix::fs::PermissionsExt;
 
     use http_body_util::Empty;
     use hyper::header::AUTHORIZATION;
+    use tascarrel_api::types::host::HostInstanceId;
+    use tascarrel_api::types::network as api;
     use tokio::io::duplex;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
     use crate::services::network::NetworkPolicy;
+    use crate::services::network::activity::ActivityStream;
+    use crate::services::network::activity::ActivitySubscription;
     use crate::services::secrets::SecretsServiceConfig;
+
+    struct InterceptedTestRequest {
+        method: Method,
+        uri: &'static str,
+        recorder: HttpRequestRecorder,
+    }
 
     /// Exercises hostname admission and encrypted pass-through for an SNI that
     /// does not match the configured secret-injection rule.
@@ -967,7 +1049,7 @@ mod tests {
         let proxy = HttpProxy::new(policy, None, Duration::from_secs(5));
         let (client_io, proxy_io) = duplex(256 * 1024);
         let proxy_task =
-            tokio::spawn(proxy.serve_https(proxy_io, upstream_port, workspace_name, secrets));
+            spawn_unobserved_proxy(proxy, proxy_io, upstream_port, workspace_name, secrets);
 
         let mut roots = RootCertStore::empty();
         roots.add(upstream_authority.certificate_der()).unwrap();
@@ -1078,13 +1160,19 @@ mod tests {
         });
 
         let proxy = HttpProxy::new(policy, Some(Arc::clone(&authority)), Duration::from_secs(5));
+        let (request_stream, mut request_activity) = test_request_stream();
+        let (admitted_recorder, admitted_flow_id) = test_request_recorder(&request_stream);
         let (status, body) = send_intercepted_https_request(
             proxy.clone(),
             &authority,
             upstream_port,
             workspace_name.clone(),
             secrets.clone(),
-            Method::GET,
+            InterceptedTestRequest {
+                method: Method::GET,
+                uri: "/v1/models?token=query-secret",
+                recorder: admitted_recorder,
+            },
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -1094,19 +1182,30 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        let (denied_recorder, denied_flow_id) = test_request_recorder(&request_stream);
         let (status, body) = send_intercepted_https_request(
             proxy,
             &authority,
             upstream_port,
             workspace_name,
             secrets,
-            Method::POST,
+            InterceptedTestRequest {
+                method: Method::POST,
+                uri: "/v1/responses?token=query-secret",
+                recorder: denied_recorder,
+            },
         )
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body.starts_with(
             b"Tascarrel network denied: HTTP proxy failed: HTTP method POST is denied",
         ));
+
+        let batch = timeout(Duration::from_secs(5), request_activity.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_request_activity(&batch.entries, &admitted_flow_id, &denied_flow_id);
     }
 
     /// Sends one request through an intercepting HTTPS proxy and returns its
@@ -1117,11 +1216,17 @@ mod tests {
         upstream_port: u16,
         workspace_name: WorkspaceName,
         secrets: SecretsService,
-        method: Method,
+        request: InterceptedTestRequest,
     ) -> (StatusCode, Bytes) {
         let (client_io, proxy_io) = duplex(256 * 1024);
-        let proxy_task =
-            tokio::spawn(proxy.serve_https(proxy_io, upstream_port, workspace_name, secrets));
+        let proxy_task = spawn_proxy(
+            proxy,
+            proxy_io,
+            upstream_port,
+            workspace_name,
+            secrets,
+            request.recorder,
+        );
         let mut roots = RootCertStore::empty();
         roots.add(authority.certificate_der()).unwrap();
         let mut client_config = ClientConfig::builder()
@@ -1138,8 +1243,8 @@ mod tests {
         let (mut sender, connection) = client_http1::handshake(TokioIo::new(tls)).await.unwrap();
         let client_connection = tokio::spawn(connection);
         let request = Request::builder()
-            .method(method)
-            .uri("/")
+            .method(request.method)
+            .uri(request.uri)
             .header(HOST, "localhost")
             .header(AUTHORIZATION, "Bearer tascarrel-secret:api-token")
             .body(Empty::<Bytes>::new())
@@ -1159,6 +1264,96 @@ mod tests {
             .unwrap()
             .unwrap();
         (status, body)
+    }
+
+    /// Starts one proxy task for an attributed HTTPS test flow.
+    fn spawn_proxy<T>(
+        proxy: HttpProxy,
+        proxy_io: T,
+        upstream_port: u16,
+        workspace_name: WorkspaceName,
+        secrets: SecretsService,
+        recorder: HttpRequestRecorder,
+    ) -> JoinHandle<ProxyResult<()>>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        tokio::spawn(proxy.serve_https(proxy_io, upstream_port, workspace_name, secrets, recorder))
+    }
+
+    /// Starts a proxy test flow whose request stream is intentionally ignored.
+    fn spawn_unobserved_proxy<T>(
+        proxy: HttpProxy,
+        proxy_io: T,
+        upstream_port: u16,
+        workspace_name: WorkspaceName,
+        secrets: SecretsService,
+    ) -> JoinHandle<ProxyResult<()>>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (stream, _) = test_request_stream();
+        let (recorder, _) = test_request_recorder(&stream);
+        spawn_proxy(
+            proxy,
+            proxy_io,
+            upstream_port,
+            workspace_name,
+            secrets,
+            recorder,
+        )
+    }
+
+    /// Verifies admitted and denied request summaries omit sensitive values.
+    fn assert_request_activity(
+        requests: &[api::MediatedHttpRequest],
+        admitted_flow_id: &api::TcpFlowId,
+        denied_flow_id: &api::TcpFlowId,
+    ) {
+        assert_eq!(requests.len(), 2);
+        let admitted = &requests[0];
+        assert_eq!(&admitted.tcp_flow_id, admitted_flow_id);
+        assert_eq!(admitted.host.as_deref(), Some("localhost"));
+        assert_eq!(admitted.method, "GET");
+        assert_eq!(admitted.path, "/v1/models");
+        assert!(!admitted.path_truncated);
+        assert!(admitted.secrets_injected);
+        let denied = &requests[1];
+        assert_eq!(&denied.tcp_flow_id, denied_flow_id);
+        assert_eq!(denied.method, "POST");
+        assert_eq!(denied.path, "/v1/responses");
+        assert!(!denied.secrets_injected);
+        let retained = format!("{requests:?}");
+        assert!(!retained.contains("query-secret"));
+        assert!(!retained.contains("super-secret"));
+    }
+
+    /// Creates one retained HTTP request stream and its initial subscriber.
+    fn test_request_stream() -> (
+        ActivityStream<api::MediatedHttpRequest>,
+        ActivitySubscription<api::MediatedHttpRequest>,
+    ) {
+        let stream = ActivityStream::new(
+            HostInstanceId::generate(),
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+        );
+        let subscription = stream.subscribe(None);
+        (stream, subscription)
+    }
+
+    /// Binds a recorder with a fresh flow identity to the shared test stream.
+    fn test_request_recorder(
+        stream: &ActivityStream<api::MediatedHttpRequest>,
+    ) -> (HttpRequestRecorder, api::TcpFlowId) {
+        let tcp_flow_id = api::TcpFlowId::generate();
+        let recorder = HttpRequestRecorder::new(
+            stream.clone(),
+            tcp_flow_id.clone(),
+            api::NetworkRequestSource::ImageBuild,
+            NonZeroUsize::new(256).unwrap(),
+        );
+        (recorder, tcp_flow_id)
     }
 
     /// Installs the process-wide provider when another TLS test has not.

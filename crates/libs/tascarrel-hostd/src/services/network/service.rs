@@ -84,6 +84,10 @@ const DEFAULT_STORE_HISTORY_LIMIT: NonZeroUsize =
     NonZeroUsize::new(256).expect("the network store history limit is non-zero");
 const DEFAULT_DNS_REQUEST_HISTORY_LIMIT: NonZeroUsize =
     NonZeroUsize::new(4096).expect("the DNS request history limit is non-zero");
+const DEFAULT_HTTP_REQUEST_HISTORY_LIMIT: NonZeroUsize =
+    NonZeroUsize::new(4096).expect("the HTTP request history limit is non-zero");
+const DEFAULT_HTTP_REQUEST_PATH_MAX_BYTES: NonZeroUsize =
+    NonZeroUsize::new(2048).expect("the HTTP request path limit is non-zero");
 const DEFAULT_TCP_FLOW_HISTORY_LIMIT: NonZeroUsize =
     NonZeroUsize::new(8192).expect("the TCP flow history limit is non-zero");
 const DEFAULT_ACTIVITY_BATCH_LIMIT: NonZeroUsize =
@@ -108,6 +112,9 @@ pub type PodHostForwardListSubscription =
 
 /// Resumable stream of DNS request batches for one workspace.
 pub type DnsRequestsSubscription = ActivitySubscription<api::DnsRequest>;
+
+/// Resumable stream of mediated HTTP request batches for one workspace.
+pub type HttpRequestsSubscription = ActivitySubscription<api::MediatedHttpRequest>;
 
 /// Resumable stream of TCP flow lifecycle batches for one workspace.
 pub type TcpFlowsSubscription = ActivitySubscription<api::TcpFlowEvent>;
@@ -147,6 +154,11 @@ pub struct NetworkServiceConfig {
     pub store_history_limit: NonZeroUsize,
     /// Number of DNS request entries retained for each workspace.
     pub dns_request_history_limit: NonZeroUsize,
+    /// Number of mediated HTTP request entries retained for each workspace.
+    pub http_request_history_limit: NonZeroUsize,
+    /// Maximum number of UTF-8 bytes retained from one mediated HTTP request
+    /// path.
+    pub http_request_path_max_bytes: NonZeroUsize,
     /// Number of TCP lifecycle entries retained for each workspace.
     pub tcp_flow_history_limit: NonZeroUsize,
     /// Maximum number of activity entries emitted in one subscription event.
@@ -170,6 +182,8 @@ impl Default for NetworkServiceConfig {
             dns_hostname_mapping_limit: DEFAULT_DNS_HOSTNAME_MAPPING_LIMIT,
             store_history_limit: DEFAULT_STORE_HISTORY_LIMIT,
             dns_request_history_limit: DEFAULT_DNS_REQUEST_HISTORY_LIMIT,
+            http_request_history_limit: DEFAULT_HTTP_REQUEST_HISTORY_LIMIT,
+            http_request_path_max_bytes: DEFAULT_HTTP_REQUEST_PATH_MAX_BYTES,
             tcp_flow_history_limit: DEFAULT_TCP_FLOW_HISTORY_LIMIT,
             activity_batch_limit: DEFAULT_ACTIVITY_BATCH_LIMIT,
         }
@@ -186,6 +200,7 @@ impl NetworkServiceConfig {
             || self.connect_timeout.is_zero()
             || self.dns_timeout.is_zero()
             || self.activity_batch_limit > self.dns_request_history_limit
+            || self.activity_batch_limit > self.http_request_history_limit
             || self.activity_batch_limit > self.tcp_flow_history_limit
         {
             return Err(NetworkServiceError::InvalidConfiguration.report());
@@ -237,6 +252,7 @@ struct WorkspaceNetworkStores {
     pod_host_forwards: PodHostForwardStore,
     dns_hostnames: DnsHostnameMappings,
     dns_requests: ActivityStream<api::DnsRequest>,
+    http_requests: ActivityStream<api::MediatedHttpRequest>,
     tcp_flows: ActivityStream<api::TcpFlowEvent>,
 }
 
@@ -1061,6 +1077,38 @@ impl NetworkService {
         ))
     }
 
+    /// Opens a resumable mediated HTTP request subscription for one workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid cursor or unknown workspace.
+    #[tracing::instrument(level = "debug", skip(self, input, workspaces), fields(workspace = %input.workspace.as_str()))]
+    pub fn subscribe_http_requests(
+        &self,
+        input: &api::HttpRequestsSubscription,
+        workspaces: &WorkspaceService,
+    ) -> Result<HttpRequestsSubscription, Report<NetworkServiceError>> {
+        let workspace = runtime_workspace(&input.workspace)?;
+        workspaces
+            .validate_workspace(&workspace)
+            .map_err(|error| unavailable(error.to_string()))?;
+        let mut state = lock(&self.inner.state);
+        let stream = state
+            .workspace_stores(
+                &input.workspace,
+                &self.inner.config,
+                &self.inner.host_instance_id,
+            )
+            .http_requests
+            .clone();
+        Ok(stream.subscribe(
+            input
+                .cursor
+                .as_ref()
+                .map(|cursor| (&cursor.host_instance_id, cursor.position)),
+        ))
+    }
+
     /// Opens a resumable TCP lifecycle subscription for one workspace.
     ///
     /// # Errors
@@ -1113,6 +1161,25 @@ impl NetworkService {
             stores.dns_requests.clone()
         };
         stream.append(request);
+    }
+
+    /// Creates a request recorder bound to one attributed HTTP proxy flow.
+    pub(crate) fn http_request_recorder(
+        &self,
+        workspace: &ApiWorkspaceName,
+        tcp_flow_id: api::TcpFlowId,
+        source: api::NetworkRequestSource,
+    ) -> HttpRequestRecorder {
+        let stream = lock(&self.inner.state)
+            .workspace_stores(workspace, &self.inner.config, &self.inner.host_instance_id)
+            .http_requests
+            .clone();
+        HttpRequestRecorder::new(
+            stream,
+            tcp_flow_id,
+            source,
+            self.inner.config.http_request_path_max_bytes,
+        )
     }
 
     /// Returns the most recently resolved hostname for one workspace
@@ -1475,12 +1542,63 @@ impl WorkspaceNetworkStores {
                 config.dns_request_history_limit,
                 config.activity_batch_limit,
             ),
+            http_requests: ActivityStream::new(
+                host_instance_id.clone(),
+                config.http_request_history_limit,
+                config.activity_batch_limit,
+            ),
             tcp_flows: ActivityStream::new(
                 host_instance_id.clone(),
                 config.tcp_flow_history_limit,
                 config.activity_batch_limit,
             ),
         }
+    }
+}
+
+/// Records request-level activity for one attributed HTTP proxy flow.
+#[derive(Clone, Debug)]
+pub(crate) struct HttpRequestRecorder {
+    stream: ActivityStream<api::MediatedHttpRequest>,
+    tcp_flow_id: api::TcpFlowId,
+    source: api::NetworkRequestSource,
+    path_max_bytes: NonZeroUsize,
+}
+
+impl HttpRequestRecorder {
+    pub(crate) fn new(
+        stream: ActivityStream<api::MediatedHttpRequest>,
+        tcp_flow_id: api::TcpFlowId,
+        source: api::NetworkRequestSource,
+        path_max_bytes: NonZeroUsize,
+    ) -> Self {
+        Self {
+            stream,
+            tcp_flow_id,
+            source,
+            path_max_bytes,
+        }
+    }
+
+    pub(crate) fn record(
+        &self,
+        occurred_at: jiff::Timestamp,
+        host: Option<String>,
+        method: &Method,
+        path: &str,
+        secrets_injected: bool,
+    ) {
+        let (path, path_truncated) = truncate_http_request_path(path, self.path_max_bytes.get());
+        self.stream.append(api::MediatedHttpRequest {
+            tcp_flow_id: self.tcp_flow_id.clone(),
+            occurred_at,
+            source: self.source.clone(),
+            host: host.map(Into::into),
+            method: method.as_str().into(),
+            path: path.into(),
+            path_truncated,
+            secrets_injected,
+        });
     }
 }
 
@@ -2253,6 +2371,17 @@ fn reduce_pod_host_forwards(
             }
         }
     }
+}
+
+fn truncate_http_request_path(path: &str, max_bytes: usize) -> (&str, bool) {
+    if path.len() <= max_bytes {
+        return (path, false);
+    }
+    let mut end = max_bytes;
+    while !path.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&path[..end], true)
 }
 
 fn invalid_request(message: impl Into<String>) -> Report<NetworkServiceError> {
@@ -3044,6 +3173,17 @@ mod tests {
         assert_eq!(
             headers[header::COOKIE],
             "application_session=one; preference=dark"
+        );
+    }
+
+    /// Verifies request paths are bounded without splitting a UTF-8 code
+    /// point.
+    #[test]
+    fn http_request_path_truncation_preserves_utf8() {
+        assert_eq!(truncate_http_request_path("/ab€cd", 4), ("/ab", true));
+        assert_eq!(
+            truncate_http_request_path("/complete", 16),
+            ("/complete", false)
         );
     }
 

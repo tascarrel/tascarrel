@@ -20,6 +20,10 @@ export function useDnsRequests(workspace: workspaces.WorkspaceName) {
   return useBackendState(dnsRequestsDefinition(workspace));
 }
 
+export function useHttpRequests(workspace: workspaces.WorkspaceName) {
+  return useBackendState(httpRequestsDefinition(workspace));
+}
+
 export function useTcpFlows(workspace: workspaces.WorkspaceName) {
   return useBackendState(tcpFlowsDefinition(workspace));
 }
@@ -30,6 +34,12 @@ export type DnsRequestReplica = Readonly<{
   lastPosition: bigint;
 }>;
 
+export type HttpRequestReplica = Readonly<{
+  requests: readonly network.MediatedHttpRequest[];
+  hostInstanceId: network.HttpRequestCursor["hostInstanceId"];
+  lastPosition: bigint;
+}>;
+
 export type TcpFlowReplica = Readonly<{
   events: readonly network.TcpFlowEvent[];
   hostInstanceId: network.TcpFlowCursor["hostInstanceId"];
@@ -37,6 +47,7 @@ export type TcpFlowReplica = Readonly<{
 }>;
 
 const DNS_REQUEST_LIMIT = 512;
+const HTTP_REQUEST_LIMIT = 512;
 const TCP_FLOW_EVENT_LIMIT = 1_024;
 
 function httpRouteListDefinition(
@@ -130,6 +141,41 @@ function dnsRequestsDefinition(
         event.requests,
         event.cursor,
         DNS_REQUEST_LIMIT,
+      );
+      const { entries, ...stream } = batch;
+      return {
+        value: { requests: entries, ...stream },
+        cursor: event.cursor,
+      };
+    },
+  };
+}
+
+function httpRequestsDefinition(
+  workspace: workspaces.WorkspaceName,
+): BackendStateDefinition<HttpRequestReplica, network.HttpRequestsEvent, network.HttpRequestCursor> {
+  return {
+    key: `host/network/${workspace}/http-requests`,
+    retention: "lru",
+    connect: (cursor, handlers) => hostApi.subscribe(
+      "network_HttpRequests",
+      () => ({ workspace, ...(cursor() ? { cursor: cursor() } : {}) }),
+      {
+        onEvent: handlers.onEvent,
+        onState: handlers.onConnection,
+        onError: handlers.onError,
+      },
+    ),
+    applyEvent: (current, event) => {
+      const batch = appendActivityBatch(
+        current && {
+          entries: current.requests,
+          hostInstanceId: current.hostInstanceId,
+          lastPosition: current.lastPosition,
+        },
+        event.requests,
+        event.cursor,
+        HTTP_REQUEST_LIMIT,
       );
       const { entries, ...stream } = batch;
       return {

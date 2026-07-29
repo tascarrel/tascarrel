@@ -326,6 +326,13 @@ case, every forwarded HTTP host must match the SNI. Each secret-injection rule
 also lists the HTTP methods it admits. When a host matches one or more rules,
 `hostd` rejects the request unless at least one matching rule admits its method.
 
+The host daemon retains bounded, in-memory activity streams for attributed DNS
+requests, mediated HTTP requests, and TCP flow lifecycles. HTTP request records
+contain the method, a bounded path without its query string, and whether secret
+injection changed at least one header value. HTTPS requests appear only when
+the host daemon already terminates TLS for secret injection; encrypted
+pass-through traffic remains opaque.
+
 The guest firewall also denies direct pod-to-guest and pod-to-pod traffic unless
 Tascarrel provides an explicit path. A pod reaches configured services on the
 host through a reserved synthetic address, which `hostd` translates only to
