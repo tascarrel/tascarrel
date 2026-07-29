@@ -151,7 +151,7 @@ async fn resolve_tasci_model(
         .default_model
         .as_ref()
         .map(ToString::to_string)
-        .or_else(|| models.keys().next().map(ToString::to_string))
+        .or_else(|| models.keys().min().map(ToString::to_string))
         .ok_or_else(|| invalid_tasci_request("Tasci has no default model"))?;
     let selected_model = input
         .model
@@ -172,7 +172,7 @@ async fn resolve_tasci_model(
         } else {
             (None, None)
         };
-    let catalog = models
+    let mut catalog = models
         .iter()
         .map(
             |(alias, configured)| -> Result<_, Report<wire::OperationError>> {
@@ -197,8 +197,8 @@ async fn resolve_tasci_model(
                 })
             },
         )
-        .collect::<Result<Vec<_>, _>>()?
-        .into();
+        .collect::<Result<Vec<_>, _>>()?;
+    catalog.sort_by(|left, right| left.id.cmp(&right.id));
     let mcp_servers = resolve_tasci_mcp_servers(tasci);
     Ok(api::ResolveTasciModelOutput {
         selected_model: selected_model.to_owned().into(),
@@ -209,7 +209,7 @@ async fn resolve_tasci_model(
         authorization_header,
         authorization_value,
         default_model: default_model.into(),
-        models: catalog,
+        models: catalog.into(),
         mcp_servers,
     })
 }
