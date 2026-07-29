@@ -19,7 +19,7 @@
     "request_count": 1,
     "system_prompt_contains": [
       "You are Tasci",
-      "- read: Read workspace file contents",
+      "- read: Read file contents",
       "- edit: Apply exact, revision-safe edits",
       "- bash: Run foreground commands",
       "- process: Inspect and control supervised background commands",
@@ -32,19 +32,19 @@
       {
         "name": "read",
         "description_contains": "one-based line paging",
-        "schema_contains": ["\"offset\"", "\"byteOffset\"", "\"limit\""],
+        "schema_contains": ["Absolute file path", "\"offset\"", "\"byteOffset\"", "\"limit\""],
         "guideline_contains": ["instead of cat"]
       },
       {
         "name": "edit",
         "description_contains": "complete multi-file batch",
-        "schema_contains": ["\"oldText\"", "\"newText\"", "\"edits\""],
+        "schema_contains": ["Absolute file path", "\"oldText\"", "\"newText\"", "\"edits\""],
         "guideline_contains": ["small as possible", "must not overlap"]
       },
       {
         "name": "write",
         "description_contains": "last read revision",
-        "schema_contains": ["\"content\""],
+        "schema_contains": ["Absolute file path", "\"content\""],
         "guideline_contains": ["complete rewrites"]
       },
       {

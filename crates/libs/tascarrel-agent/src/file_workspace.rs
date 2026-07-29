@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::ops::Range;
-use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -29,7 +28,8 @@ use crate::ToolResult;
 
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Filesystem root with optimistic revision tracking for agent mutations.
+/// Filesystem access with a relative-path base and optimistic revision
+/// tracking.
 pub struct FileWorkspace {
     root: PathBuf,
     observations: RwLock<HashMap<PathBuf, FileObservation>>,
@@ -207,27 +207,25 @@ impl FileWorkspace {
             }
             Err(source) => return Err(io_error("resolve a file path", source)),
         };
-        self.ensure_inside(canonical)
+        Ok(canonical)
     }
 
     async fn resolve_mutation_target(&self, path: &Path) -> ToolResult<MutationTarget> {
-        let relative = self.safe_mutation_relative(path)?;
-        let requested = self.root.join(&relative);
+        let requested = self.requested_path(path);
         match fs::canonicalize(&requested).await {
-            Ok(path) => self.ensure_inside(path).map(MutationTarget::Existing),
+            Ok(path) => Ok(MutationTarget::Existing(path)),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 let parent = requested.parent().ok_or_else(|| {
-                    Report::new(ToolError::PathOutsideWorkspace {
-                        path: requested.clone(),
+                    Report::new(ToolError::InvalidArguments {
+                        tool: "write".to_owned(),
+                        message: "path must identify a file".to_owned(),
                     })
                 })?;
-                let relative_parent = relative.parent().unwrap_or_else(|| Path::new(""));
-                let parent = self
-                    .resolve_or_create_parent(parent, relative_parent)
-                    .await?;
-                let name = relative.file_name().ok_or_else(|| {
-                    Report::new(ToolError::PathOutsideWorkspace {
-                        path: requested.clone(),
+                let parent = self.resolve_or_create_parent(parent).await?;
+                let name = requested.file_name().ok_or_else(|| {
+                    Report::new(ToolError::InvalidArguments {
+                        tool: "write".to_owned(),
+                        message: "path must identify a file".to_owned(),
                     })
                 })?;
                 Ok(MutationTarget::New(parent.join(name)))
@@ -236,66 +234,23 @@ impl FileWorkspace {
         }
     }
 
-    async fn resolve_or_create_parent(
-        &self,
-        requested_parent: &Path,
-        relative_parent: &Path,
-    ) -> ToolResult<PathBuf> {
-        if relative_parent.as_os_str().is_empty() {
-            return Ok(self.root.clone());
-        }
-        let mut current = self.root.clone();
-        for component in relative_parent.components() {
-            let Component::Normal(name) = component else {
-                return Err(Report::new(ToolError::PathOutsideWorkspace {
-                    path: requested_parent.to_path_buf(),
-                }));
-            };
-            let candidate = current.join(name);
-            match fs::create_dir(&candidate).await {
-                Ok(()) => {}
-                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(source) => {
-                    return Err(io_error("create a new file's parent directory", source));
-                }
-            }
-            let canonical = fs::canonicalize(&candidate)
-                .await
-                .map_err(|source| io_error("resolve a new file's parent directory", source))?;
-            current = self.ensure_inside(canonical)?;
-            let metadata = fs::metadata(&current)
-                .await
-                .map_err(|source| io_error("inspect a new file's parent directory", source))?;
-            if !metadata.is_dir() {
-                return Err(Report::new(ToolError::InvalidArguments {
-                    tool: "write".to_owned(),
-                    message: "a new file's parent path is not a directory".to_owned(),
-                }));
-            }
-        }
-        Ok(current)
-    }
-
-    fn safe_mutation_relative(&self, path: &Path) -> ToolResult<PathBuf> {
-        let relative = if path.is_absolute() {
-            path.strip_prefix(&self.root).map_err(|_| {
-                Report::new(ToolError::PathOutsideWorkspace {
-                    path: path.to_path_buf(),
-                })
-            })?
-        } else {
-            path
-        };
-        if relative.as_os_str().is_empty()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(Report::new(ToolError::PathOutsideWorkspace {
-                path: path.to_path_buf(),
+    async fn resolve_or_create_parent(&self, requested_parent: &Path) -> ToolResult<PathBuf> {
+        fs::create_dir_all(requested_parent)
+            .await
+            .map_err(|source| io_error("create a new file's parent directory", source))?;
+        let parent = fs::canonicalize(requested_parent)
+            .await
+            .map_err(|source| io_error("resolve a new file's parent directory", source))?;
+        let metadata = fs::metadata(&parent)
+            .await
+            .map_err(|source| io_error("inspect a new file's parent directory", source))?;
+        if !metadata.is_dir() {
+            return Err(Report::new(ToolError::InvalidArguments {
+                tool: "write".to_owned(),
+                message: "a new file's parent path is not a directory".to_owned(),
             }));
         }
-        Ok(relative.to_path_buf())
+        Ok(parent)
     }
 
     fn requested_path(&self, path: &Path) -> PathBuf {
@@ -304,13 +259,6 @@ impl FileWorkspace {
         } else {
             self.root.join(path)
         }
-    }
-
-    fn ensure_inside(&self, path: PathBuf) -> ToolResult<PathBuf> {
-        if path.starts_with(&self.root) {
-            return Ok(path);
-        }
-        Err(Report::new(ToolError::PathOutsideWorkspace { path }))
     }
 }
 
@@ -458,8 +406,9 @@ impl PreparedMutation {
 
     async fn stage(&mut self) -> ToolResult<()> {
         let parent = self.target.parent().ok_or_else(|| {
-            Report::new(ToolError::PathOutsideWorkspace {
-                path: self.target.clone(),
+            Report::new(ToolError::InvalidArguments {
+                tool: "write".to_owned(),
+                message: "path must identify a file".to_owned(),
             })
         })?;
         let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -788,20 +737,26 @@ fn file_change(root: &Path, mutation: &PreparedMutation) -> ToolResult<Option<Fi
             path: mutation.target.clone(),
         })
     })?;
-    let relative_path = mutation
+    let change_path = mutation
         .target
         .strip_prefix(root)
-        .map_err(|_| {
-            Report::new(ToolError::PathOutsideWorkspace {
-                path: mutation.target.clone(),
-            })
-        })?
-        .to_path_buf();
-    let display_path = relative_path.to_string_lossy();
-    let old_header = mutation
-        .original_revision
-        .map_or_else(|| "/dev/null".to_owned(), |_| format!("a/{display_path}"));
-    let new_header = format!("b/{display_path}");
+        .map_or_else(|_| mutation.target.clone(), Path::to_path_buf);
+    let display_path = change_path.to_string_lossy();
+    let old_header = mutation.original_revision.map_or_else(
+        || "/dev/null".to_owned(),
+        |_| {
+            if change_path.is_absolute() {
+                display_path.to_string()
+            } else {
+                format!("a/{display_path}")
+            }
+        },
+    );
+    let new_header = if change_path.is_absolute() {
+        display_path.to_string()
+    } else {
+        format!("b/{display_path}")
+    };
     let diff = TextDiff::from_lines(&old_content, &new_content);
     let unified_diff = diff
         .unified_diff()
@@ -826,7 +781,7 @@ fn file_change(root: &Path, mutation: &PreparedMutation) -> ToolResult<Option<Fi
         }
     }
     Ok(Some(FileChange {
-        path: relative_path,
+        path: change_path,
         operation: if mutation.original_revision.is_some() {
             FileChangeOperation::Modified
         } else {
@@ -862,4 +817,79 @@ fn read_arguments_error(message: impl Into<String>) -> Report<ToolError> {
 
 fn io_error(action: &'static str, source: std::io::Error) -> Report<ToolError> {
     Report::new(ToolError::Io { action, source })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Exercises revision-safe reads, writes, and edits for paths beyond the
+    // workspace-relative base.
+    #[tokio::test]
+    async fn file_access_supports_paths_outside_the_workspace() {
+        let directory = tempfile::tempdir().expect("create filesystem test directory");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace)
+            .await
+            .expect("create workspace directory");
+        let external = directory.path().join("external.txt");
+        fs::write(&external, "before\n")
+            .await
+            .expect("create external file");
+        let files = FileWorkspace::open(&workspace)
+            .await
+            .expect("open file workspace");
+        let cancellation = CancellationToken::new();
+        let external_relative = Path::new("../external.txt");
+
+        let read = files
+            .read_text(&external, 1, 0, 10, 1_024, &cancellation)
+            .await
+            .expect("read external file");
+        assert_eq!(read.content, "before\n");
+
+        let write_changes = files
+            .write_text(external_relative, "after\n".to_owned(), &cancellation)
+            .await
+            .expect("write external file");
+        let canonical_external = fs::canonicalize(&external)
+            .await
+            .expect("canonicalize external file");
+        assert_eq!(write_changes.len(), 1);
+        assert_eq!(write_changes[0].path, canonical_external);
+
+        files
+            .edit_text(
+                vec![TextFileEdit {
+                    path: external_relative.to_path_buf(),
+                    edits: vec![TextEdit {
+                        old_text: "after".to_owned(),
+                        new_text: "edited".to_owned(),
+                    }],
+                }],
+                &cancellation,
+            )
+            .await
+            .expect("edit external file");
+        assert_eq!(
+            fs::read_to_string(&external)
+                .await
+                .expect("read edited external file"),
+            "edited\n"
+        );
+
+        let created = directory.path().join("external/new.txt");
+        let create_changes = files
+            .write_text(&created, "new\n".to_owned(), &cancellation)
+            .await
+            .expect("create external file and parent");
+        assert_eq!(create_changes.len(), 1);
+        assert_eq!(create_changes[0].path, created);
+        assert_eq!(
+            fs::read_to_string(&created)
+                .await
+                .expect("read created external file"),
+            "new\n"
+        );
+    }
 }

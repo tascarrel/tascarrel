@@ -13,7 +13,9 @@ pub struct TasciHarnessConfiguration {
     pub base_url: String,
     /// Provider-native model identifier.
     pub model: String,
-    /// Complete authorization header, when required.
+    /// Non-secret authorization header template, when required.
+    ///
+    /// Host-side HTTP secret injection may replace a placeholder in the value.
     pub authorization: Option<HttpAuthorization>,
     /// Absolute working directory inside the pod.
     pub working_directory: String,
@@ -67,4 +69,27 @@ pub enum TasciHarnessEvent {
         /// Secret-safe failure description.
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies retry events survive the JSON line protocol without unsupported
+    /// 128-bit integers.
+    #[test]
+    fn retry_event_round_trips_through_json() {
+        let event = TasciHarnessEvent::Agent {
+            value: AgentEvent::ModelRequestRetrying {
+                step: 0,
+                attempt: 2,
+                delay_ms: 250,
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        let decoded: TasciHarnessEvent = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, event);
+    }
 }

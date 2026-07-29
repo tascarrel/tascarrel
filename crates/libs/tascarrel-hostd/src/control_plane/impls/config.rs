@@ -7,7 +7,6 @@ use tascarrel_api::ArcVec;
 use tascarrel_api::types::chats;
 use tascarrel_api::types::config as api;
 use tascarrel_api::types::protocol as wire;
-use tascarrel_api::types::secrets;
 
 use crate::control_plane::SubscriptionCtx;
 use crate::control_plane::operation_error_details;
@@ -16,7 +15,6 @@ use crate::control_plane::operations::ExecuteAction;
 use crate::control_plane::operations::OpenSubscription;
 use crate::services::config::ConfigServiceError;
 use crate::services::config::ConfigSubscription;
-use crate::services::secrets::SecretsServiceError;
 
 #[async_trait]
 impl ExecuteAction for api::UpdateWorkspaceSettingsAction {
@@ -167,47 +165,39 @@ async fn resolve_tasci_model(
         .ok_or_else(|| invalid_tasci_request("the selected Tasci endpoint is not configured"))?;
     let (authorization_header, authorization_value) =
         if let Some(authorization) = endpoint.authorization.as_ref() {
-            let revealed = context
-                .state()
-                .secrets()
-                .reveal(
-                    secrets::RevealSecretAction {
-                        workspace_name: input.workspace_name.clone(),
-                        provider_name: authorization.credential.provider.clone(),
-                        secret_name: authorization.credential.secret.clone(),
-                    },
-                    context.state().config(),
-                )
-                .await
-                .map_err(secret_error)?;
             (
                 Some(authorization.header.clone()),
-                Some(
-                    format!(
-                        "{}{}",
-                        authorization.prefix.as_deref().unwrap_or_default(),
-                        revealed.value
-                    )
-                    .into(),
-                ),
+                Some(tasci_authorization_value(authorization)?),
             )
         } else {
             (None, None)
         };
     let catalog = models
         .iter()
-        .map(|(alias, configured)| chats::ChatModel {
-            id: alias.clone(),
-            display_name: configured
-                .display_name
-                .clone()
-                .unwrap_or_else(|| alias.clone()),
-            short_name: None,
-            is_custom: true,
-            options: ArcVec::new(),
-            pricing: configured.pricing.clone(),
-        })
-        .collect::<Vec<_>>()
+        .map(
+            |(alias, configured)| -> Result<_, Report<wire::OperationError>> {
+                let configured_endpoint =
+                    endpoints.get(configured.endpoint.as_ref()).ok_or_else(|| {
+                        invalid_tasci_request(
+                            "a configured Tasci model refers to an unknown endpoint",
+                        )
+                    })?;
+                let model_name = configured.display_name.as_deref().unwrap_or(alias.as_ref());
+                let provider_name = configured_endpoint
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(configured.endpoint.as_ref());
+                Ok(chats::ChatModel {
+                    id: alias.clone(),
+                    display_name: format!("{model_name} ({provider_name})").into(),
+                    short_name: None,
+                    is_custom: true,
+                    options: ArcVec::new(),
+                    pricing: configured.pricing.clone(),
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?
         .into();
     Ok(api::ResolveTasciModelOutput {
         selected_model: selected_model.to_owned().into(),
@@ -220,16 +210,25 @@ async fn resolve_tasci_model(
     })
 }
 
-fn secret_error(report: Report<SecretsServiceError>) -> Report<wire::OperationError> {
-    let details = operation_error_details(report.to_string());
-    let error = match report.error() {
-        SecretsServiceError::InvalidRequest => wire::OperationError::InvalidRequest(details),
-        SecretsServiceError::Unavailable => wire::OperationError::Unavailable(details),
-        SecretsServiceError::InvalidConfiguration | SecretsServiceError::Internal => {
-            wire::OperationError::Internal(details)
-        }
-    };
-    report.escalate(error)
+/// Resolves only non-secret authorization metadata for the Tasci process.
+fn tasci_authorization_value(
+    authorization: &api::WorkspaceTasciAuthorization,
+) -> Result<tascarrel_api::ArcStr, Report<wire::OperationError>> {
+    if let Some(value) = &authorization.value {
+        return Ok(value.clone());
+    }
+    let credential = authorization.credential.as_ref().ok_or_else(|| {
+        invalid_tasci_request("the selected Tasci endpoint has invalid authorization settings")
+    })?;
+    let placeholder = format!(
+        "tascarrel-secret:{}",
+        credential.secret.to_ascii_lowercase().replace('_', "-")
+    );
+    Ok(format!(
+        "{}{placeholder}",
+        authorization.prefix.as_deref().unwrap_or_default()
+    )
+    .into())
 }
 
 fn invalid_tasci_request(message: &str) -> Report<wire::OperationError> {
@@ -274,5 +273,25 @@ mod tests {
         assert!(caller_may_read_workspace_config(&alpha_workspace, &alpha));
         assert!(!caller_may_read_workspace_config(&alpha_workspace, &beta));
         assert!(!caller_may_read_workspace_config(&alpha_pod, &alpha));
+    }
+
+    /// Verifies legacy Tasci secret references become non-secret network
+    /// placeholders instead of resolving a credential.
+    #[test]
+    fn legacy_tasci_authorization_uses_the_default_network_placeholder() {
+        let authorization = api::WorkspaceTasciAuthorization {
+            header: "Authorization".into(),
+            value: None,
+            prefix: Some("Bearer ".into()),
+            credential: Some(api::WorkspaceSecretReference {
+                provider: "project".into(),
+                secret: "API_TOKEN".into(),
+            }),
+        };
+
+        assert_eq!(
+            tasci_authorization_value(&authorization).unwrap().as_ref(),
+            "Bearer tascarrel-secret:api-token"
+        );
     }
 }

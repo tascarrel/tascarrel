@@ -184,8 +184,8 @@ impl HarnessManager {
         }))
     }
 
-    /// Publishes a host-resolved Tasci model and caches its secret-bearing
-    /// runtime configuration for attachments and active sessions.
+    /// Publishes a host-resolved Tasci model and caches its runtime
+    /// configuration for attachments and active sessions.
     pub(crate) fn configure_tasci(&self, output: config_api::ResolveTasciModelOutput) {
         let configuration = self.tasci_configurations.configure(output);
         self.update_harness(&api::ChatHarnessKind::Tasci, |harness| {
@@ -333,7 +333,8 @@ impl HarnessManager {
     ) -> Result<(), Report<HarnessManagerError>> {
         if kind == api::ChatHarnessKind::Tasci {
             return Err(Report::new(HarnessManagerError::InvalidRequest(
-                "Tasci credentials are configured through workspace settings".to_owned(),
+                "Tasci authorization is configured through workspace settings and network policy"
+                    .to_owned(),
             )));
         }
         if !self.credentials_are_present(&kind) {
@@ -440,7 +441,8 @@ impl HarnessManager {
     ) -> Result<(), Report<HarnessManagerError>> {
         if kind == api::ChatHarnessKind::Tasci {
             return Err(Report::new(HarnessManagerError::InvalidRequest(
-                "Tasci credentials are configured through workspace settings".to_owned(),
+                "Tasci authorization is configured through workspace settings and network policy"
+                    .to_owned(),
             )));
         }
         self.advance_credentials_revision(&kind);

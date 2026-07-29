@@ -68,6 +68,9 @@ pub enum ModelMessage {
 /// Completed assistant content retained in conversation context.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AssistantMessage {
+    /// Model reasoning retained for compatible follow-up requests.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     /// Visible assistant text.
     pub content: String,
     /// Structured tool calls in provider order.
@@ -89,6 +92,11 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelStreamEvent {
+    /// Model reasoning fragment.
+    ReasoningDelta {
+        /// Fragment to append.
+        delta: String,
+    },
     /// Visible text fragment.
     TextDelta {
         /// Fragment to append.

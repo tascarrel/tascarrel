@@ -102,6 +102,10 @@ pub(crate) enum SettingsValidationError {
     InvalidBaseUrl,
     #[error("Tasci authorization header names are invalid")]
     InvalidAuthorizationHeader,
+    #[error("Tasci authorization values must be valid non-empty HTTP header text")]
+    InvalidAuthorizationValue,
+    #[error("Tasci authorization must specify either a value or one legacy credential reference")]
+    InvalidAuthorizationShape,
     #[error("Tasci authorization prefixes must be valid HTTP header text")]
     InvalidAuthorizationPrefix,
     #[error("Tasci authorization secret references must specify a provider and secret")]
@@ -186,17 +190,32 @@ fn validate_authorization(
 ) -> Result<(), Report<SettingsValidationError>> {
     HeaderName::from_bytes(authorization.header.as_bytes())
         .map_err(|_| SettingsValidationError::InvalidAuthorizationHeader.report())?;
-    if authorization
-        .prefix
-        .as_ref()
-        .is_some_and(|prefix| HeaderValue::from_str(prefix).is_err())
-    {
-        return Err(SettingsValidationError::InvalidAuthorizationPrefix.report());
-    }
-    if !valid_secret_provider_name(authorization.credential.provider.as_ref())
-        || !valid_secret_name(authorization.credential.secret.as_ref())
-    {
-        return Err(SettingsValidationError::InvalidAuthorizationCredential.report());
+    match (&authorization.value, &authorization.credential) {
+        (Some(value), None) => {
+            if value.is_empty() || HeaderValue::from_str(value).is_err() {
+                return Err(SettingsValidationError::InvalidAuthorizationValue.report());
+            }
+            if authorization.prefix.is_some() {
+                return Err(SettingsValidationError::InvalidAuthorizationShape.report());
+            }
+        }
+        (None, Some(credential)) => {
+            if authorization
+                .prefix
+                .as_ref()
+                .is_some_and(|prefix| HeaderValue::from_str(prefix).is_err())
+            {
+                return Err(SettingsValidationError::InvalidAuthorizationPrefix.report());
+            }
+            if !valid_secret_provider_name(credential.provider.as_ref())
+                || !valid_secret_name(credential.secret.as_ref())
+            {
+                return Err(SettingsValidationError::InvalidAuthorizationCredential.report());
+            }
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(SettingsValidationError::InvalidAuthorizationShape.report());
+        }
     }
     Ok(())
 }

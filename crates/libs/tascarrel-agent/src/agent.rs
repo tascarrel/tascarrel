@@ -252,7 +252,7 @@ impl Agent {
             AgentEvent::ModelRequestRetrying {
                 step,
                 attempt,
-                delay_ms: self.config.model_retry_delay.as_millis(),
+                delay_ms: duration_millis(self.config.model_retry_delay),
             },
         );
         cancellation
@@ -401,8 +401,13 @@ pub enum AgentEvent {
         step: usize,
         /// One-based request attempt about to start.
         attempt: usize,
-        /// Configured delay before the next attempt.
-        delay_ms: u128,
+        /// Configured delay before the next attempt in milliseconds.
+        delay_ms: u64,
+    },
+    /// Model reasoning arrived.
+    ReasoningDelta {
+        /// Fragment received from the provider.
+        delta: String,
     },
     /// Visible assistant text arrived.
     TextDelta {
@@ -475,6 +480,7 @@ async fn collect_response(
     event_handler: Option<&AgentEventHandler>,
 ) -> Result<CollectedResponse, ResponseCollectionError> {
     ensure_running(cancellation).map_err(ResponseCollectionError::Agent)?;
+    let mut reasoning = String::new();
     let mut content = String::new();
     let mut calls = Vec::new();
     let mut call_indexes = HashMap::new();
@@ -493,6 +499,10 @@ async fn collect_response(
             return collection_invalid_stream("received an event after the terminal event");
         }
         match event.map_err(ResponseCollectionError::Model)? {
+            ModelStreamEvent::ReasoningDelta { delta } => {
+                reasoning.push_str(&delta);
+                record_event(events, event_handler, AgentEvent::ReasoningDelta { delta });
+            }
             ModelStreamEvent::TextDelta { delta } => {
                 content.push_str(&delta);
                 record_event(events, event_handler, AgentEvent::TextDelta { delta });
@@ -557,12 +567,26 @@ async fn collect_response(
             "stream ended without a terminal event",
         ))
     })?;
-    if calls.iter().any(|(_, call)| !call.completed) {
-        return collection_invalid_stream("stream ended with an incomplete tool call");
-    }
+    validate_collected_response(&content, &calls)?;
 
-    Ok(CollectedResponse {
+    Ok(build_collected_response(
+        reasoning,
+        content,
+        calls,
+        finish_reason,
+    ))
+}
+
+/// Assembles one validated provider response.
+fn build_collected_response(
+    reasoning: String,
+    content: String,
+    calls: Vec<(String, PendingToolCall)>,
+    finish_reason: FinishReason,
+) -> CollectedResponse {
+    CollectedResponse {
         message: AssistantMessage {
+            reasoning,
             content,
             tool_calls: calls
                 .into_iter()
@@ -574,13 +598,27 @@ async fn collect_response(
                 .collect(),
         },
         finish_reason,
-    })
+    }
 }
 
 fn collection_invalid_stream<T>(reason: impl Into<String>) -> Result<T, ResponseCollectionError> {
     Err(ResponseCollectionError::Agent(invalid_stream_report(
         reason,
     )))
+}
+
+/// Rejects terminal streams without one complete model contribution.
+fn validate_collected_response(
+    content: &str,
+    calls: &[(String, PendingToolCall)],
+) -> Result<(), ResponseCollectionError> {
+    if calls.iter().any(|(_, call)| !call.completed) {
+        return collection_invalid_stream("stream ended with an incomplete tool call");
+    }
+    if content.trim().is_empty() && calls.is_empty() {
+        return collection_invalid_stream("model returned no text or tool calls");
+    }
+    Ok(())
 }
 
 /// Retains one event after synchronously notifying the optional observer.
@@ -613,6 +651,11 @@ fn ensure_running(cancellation: &CancellationToken) -> AgentResult<()> {
         return Err(Report::new(AgentError::Cancelled));
     }
     Ok(())
+}
+
+/// Converts a retry delay into the JSON-compatible protocol representation.
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn invalid_stream<T>(reason: impl Into<String>) -> AgentResult<T> {

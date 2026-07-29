@@ -60,17 +60,25 @@ async fn interrupted_model_retry_scenario() {
     support::run_scenario("interrupted_model_retry.json").await;
 }
 
+// Exercises rejection of a terminal provider response containing neither text
+// nor tool calls.
+#[tokio::test]
+async fn empty_model_response_scenario() {
+    support::run_scenario("empty_model_response.json").await;
+}
+
+// Exercises retention and projection of provider reasoning before visible
+// assistant text.
+#[tokio::test]
+async fn reasoning_response_scenario() {
+    support::run_scenario("reasoning_response.json").await;
+}
+
 // Exercises rejection of ambiguous exact-text edits without changing the
 // file.
 #[tokio::test]
 async fn ambiguous_edit_scenario() {
     support::run_scenario("ambiguous_edit.json").await;
-}
-
-// Exercises workspace-boundary enforcement for model-supplied file paths.
-#[tokio::test]
-async fn path_escape_scenario() {
-    support::run_scenario("path_escape.json").await;
 }
 
 // Exercises dynamic system guidance and project-instruction injection.

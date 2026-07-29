@@ -54,7 +54,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "model"?: __sidex_types.builtins.String };
 /**
- * Secret-bearing runtime configuration and secret-free selectable catalog.
+ * Runtime endpoint configuration and selectable Tasci catalog.
  */
  export type ResolveTasciModelOutput = { /**
                                             * Workspace-local model alias selected for this session.
@@ -66,12 +66,12 @@ import * as __schema_workspaces from "./workspaces";
                                             * Endpoint-native model identifier sent in completion requests.
                                             */
                                                         "providerModel": __sidex_types.builtins.String, /**
-                                            * Authorization header name, when configured.
+                                            * Authorization header name, when a non-secret template is configured.
                                             */
                                                         "authorizationHeader"?: __sidex_types.builtins.String, /**
-                                            * Complete authorization header value, when configured.
+                                            * Non-secret authorization header value, when configured.
                                             * 
-                                            * This value is passed only to the selected pod's private harness process.
+                                            * Host-side HTTP secret injection may replace a placeholder in this value.
                                             */
                                                         "authorizationValue"?: __sidex_types.builtins.String, /**
                                             * Model alias selected when a new Tasci chat omits a model.
@@ -201,7 +201,7 @@ import * as __schema_workspaces from "./workspaces";
                                             * API base URL to which protocol-specific paths are appended.
                                             */
                                                         "baseUrl": __sidex_types.builtins.String, /**
-                                            * Secret-backed HTTP authorization, when the endpoint requires it.
+                                            * Non-secret authorization header template, when the endpoint requires it.
                                             */
                                                         "authorization"?: WorkspaceTasciAuthorization };
 /**
@@ -209,20 +209,26 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type WorkspaceTasciProtocol = ("OpenAiChatCompletions");
 /**
- * Secret-backed HTTP authorization for one inference endpoint.
+ * Non-secret HTTP authorization template for one inference endpoint.
  */
  export type WorkspaceTasciAuthorization = { /**
-                                            * HTTP request header carrying the credential.
+                                            * HTTP request header carrying the template.
                                             */
                                                         "header": __sidex_types.builtins.String, /**
-                                            * Text placed before the secret value, such as `"Bearer "`.
+                                            * Header value containing a host-side secret-injection placeholder.
+                                            */
+                                                        "value"?: __sidex_types.builtins.String, /**
+                                            * Legacy text placed before an inferred secret placeholder.
+                                            * New settings use `value`. This field remains only to load and migrate
+                                            * settings created before Tasci adopted host-side HTTP secret injection.
                                             */
                                                         "prefix"?: __sidex_types.builtins.String, /**
-                                            * Host-owned secret referenced without copying its value into settings.
+                                            * Legacy secret reference used only to infer a non-secret placeholder.
+                                            * The referenced secret is never resolved or passed to Tasci.
                                             */
-                                                        "credential": WorkspaceSecretReference };
+                                                        "credential"?: WorkspaceSecretReference };
 /**
- * Reference to one value in a host-owned workspace secret provider.
+ * Legacy reference retained while old Tasci endpoint settings are migrated.
  */
  export type WorkspaceSecretReference = { /**
                                             * Workspace-local secret-provider name.

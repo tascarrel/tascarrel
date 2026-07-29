@@ -14,6 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
+use tascarrel_agent::AssistantMessage;
 use tascarrel_agent::FinishReason;
 use tascarrel_agent::HttpAuthorization;
 use tascarrel_agent::ModelBackend;
@@ -145,6 +146,62 @@ async fn interrupted_openai_stream_is_a_transport_failure() {
     server.await.unwrap();
 }
 
+// Exercises reasoning, nullable OpenAI-compatible delta fields, and a
+// usage-only chunk between the finish reason and terminal marker.
+#[tokio::test]
+async fn openai_compatible_stream_accepts_nullable_fields_and_trailing_usage() {
+    let response = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"current reasoning\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"complete\",\"tool_calls\":null},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":null},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":null},\"finish_reason\":null}],\"usage\":{\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let (base_url, observed_request, server) = serve_once(response).await;
+    let backend = OpenAiChatBackend::new(&format!("{base_url}/v1"), "test-model", None).unwrap();
+    let stream = backend
+        .stream(
+            ModelRequest {
+                messages: vec![
+                    ModelMessage::Assistant(AssistantMessage {
+                        reasoning: "prior reasoning".to_owned(),
+                        content: "Prior answer.".to_owned(),
+                        tool_calls: Vec::new(),
+                    }),
+                    ModelMessage::User {
+                        content: "Respond completely.".to_owned(),
+                    },
+                ],
+                tools: Vec::new(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stream.map(|event| event.unwrap()).collect::<Vec<_>>().await,
+        vec![
+            ModelStreamEvent::ReasoningDelta {
+                delta: "current reasoning".to_owned(),
+            },
+            ModelStreamEvent::TextDelta {
+                delta: "complete".to_owned(),
+            },
+            ModelStreamEvent::Completed {
+                finish_reason: FinishReason::Stop,
+            },
+        ]
+    );
+    let observed = observed_request.await.unwrap();
+    let request: ObservedChatRequest = serde_json::from_slice(&observed.body).unwrap();
+    assert_eq!(
+        request.messages[0].reasoning_content.as_deref(),
+        Some("prior reasoning")
+    );
+    server.await.unwrap();
+}
+
 // Exercises the llama.cpp-compatible terminal marker used when the final
 // choice omits a finish reason.
 #[tokio::test]
@@ -260,6 +317,7 @@ struct ObservedHttpRequest {
 struct ObservedChatRequest {
     model: String,
     messages: Vec<ObservedMessage>,
+    #[serde(default)]
     tools: Vec<ObservedTool>,
     stream: bool,
 }
@@ -268,6 +326,7 @@ struct ObservedChatRequest {
 struct ObservedMessage {
     role: String,
     content: String,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize)]

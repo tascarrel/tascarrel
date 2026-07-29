@@ -8,6 +8,8 @@
 //! The built-in file tools share a [`FileWorkspace`]. Paged reads record both
 //! file revisions and model-visible byte ranges. Subsequent edits and writes
 //! reject stale files or changes based on content the model did not observe.
+//! Relative paths resolve from the workspace, while absolute paths may address
+//! any file available to the agent process.
 //! [`ProcessRuntime`] independently supervises local foreground and background
 //! commands without depending on a Tascarrel daemon.
 

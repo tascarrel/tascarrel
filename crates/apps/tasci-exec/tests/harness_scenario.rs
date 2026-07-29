@@ -19,6 +19,7 @@ use tascarrel_agent::TasciHarnessConfiguration;
 use tascarrel_agent::TasciHarnessEvent;
 use tempfile::tempdir;
 use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
@@ -54,6 +55,12 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
         .unwrap();
     let mut input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = tokio::spawn(async move {
+        let mut logs = String::new();
+        stderr.read_to_string(&mut logs).await.unwrap();
+        logs
+    });
 
     send_command(
         &mut input,
@@ -103,6 +110,11 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
     send_command(&mut input, TasciHarnessCommand::Stop).await;
     assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Stopped);
     assert!(child.wait().await.unwrap().success());
+    let logs = stderr_reader.await.unwrap();
+    assert!(logs.contains("Tasci harness started"));
+    assert!(logs.contains("Tasci turn started"));
+    assert!(logs.contains("Tasci turn completed"));
+    assert!(logs.contains("Tasci harness stopped"));
 
     let first_request = requests.recv().await.unwrap();
     let second_request = requests.recv().await.unwrap();
@@ -124,6 +136,75 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
             ("user", "Second question."),
         ]
     );
+    server.await.unwrap();
+}
+
+/// Exercises propagation and logging of a provider completion containing no
+/// model output.
+#[tokio::test]
+async fn harness_scenario_reports_an_empty_model_response() {
+    let (base_url, _requests, server) = serve_model_scenario([""]).await;
+    let workspace = tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tasci-exec"))
+        .arg("--harness")
+        .current_dir(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = tokio::spawn(async move {
+        let mut logs = String::new();
+        stderr.read_to_string(&mut logs).await.unwrap();
+        logs
+    });
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Start {
+            configuration: TasciHarnessConfiguration {
+                base_url: format!("{base_url}/v1"),
+                model: "empty-model".to_owned(),
+                authorization: None,
+                working_directory: workspace.path().to_string_lossy().into_owned(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Started);
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Prompt {
+            prompt: "Return a response.".to_owned(),
+            configuration: None,
+        },
+    )
+    .await;
+    loop {
+        match read_event(&mut output).await {
+            TasciHarnessEvent::TurnFinished {
+                error: Some(error),
+                cancelled: false,
+            } => {
+                assert!(error.contains("no text or tool calls"));
+                break;
+            }
+            TasciHarnessEvent::Agent { .. } => {}
+            event => panic!("unexpected harness event: {event:?}"),
+        }
+    }
+
+    send_command(&mut input, TasciHarnessCommand::Stop).await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Stopped);
+    assert!(child.wait().await.unwrap().success());
+    let logs = stderr_reader.await.unwrap();
+    assert!(logs.contains("Tasci turn failed"));
+    assert!(logs.contains("no text or tool calls"));
     server.await.unwrap();
 }
 

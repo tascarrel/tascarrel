@@ -667,11 +667,7 @@ mod tests {
                             "baseUrl": "http://host.tascarrel.internal:18080/v1",
                             "authorization": {
                                 "header": "Authorization",
-                                "prefix": "Bearer ",
-                                "credential": {
-                                    "provider": "inference",
-                                    "secret": "local_token"
-                                }
+                                "value": "Bearer tascarrel-secret:local-token"
                             }
                         }
                     },

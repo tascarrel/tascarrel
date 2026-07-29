@@ -44,9 +44,9 @@ impl Tool for ReadTool {
                 "Read a UTF-8 file with one-based line paging. Output is limited to {} lines and {} bytes per call. Existing text must be returned by read before edit can match it, and write requires the complete current file to have been read.",
                 self.line_limit, self.byte_limit
             ),
-            input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or in-workspace absolute file path"},"offset":{"type":"integer","minimum":1,"description":"One-based first line; defaults to 1"},"byteOffset":{"type":"integer","minimum":0,"description":"UTF-8 byte offset within the first selected line; used only to continue an overlong line"},"limit":{"type":"integer","minimum":1,"description":"Maximum lines to return; the harness output limit still applies"}},"required":["path"],"additionalProperties":false}"#.to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path, or path relative to the workspace"},"offset":{"type":"integer","minimum":1,"description":"One-based first line; defaults to 1"},"byteOffset":{"type":"integer","minimum":0,"description":"UTF-8 byte offset within the first selected line; used only to continue an overlong line"},"limit":{"type":"integer","minimum":1,"description":"Maximum lines to return; the harness output limit still applies"}},"required":["path"],"additionalProperties":false}"#.to_owned(),
             prompt: crate::ToolPrompt {
-                summary: "Read workspace file contents".to_owned(),
+                summary: "Read file contents".to_owned(),
                 guidelines: vec![
                     "Use read to inspect file contents instead of cat, sed, or shell pipelines."
                         .to_owned(),

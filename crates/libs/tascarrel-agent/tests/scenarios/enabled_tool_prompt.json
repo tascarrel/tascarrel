@@ -13,7 +13,7 @@
   "expected": {
     "request_count": 1,
     "system_prompt_contains": [
-      "- read: Read workspace file contents",
+      "- read: Read file contents",
       "Use read to inspect file contents"
     ],
     "system_prompt_not_contains": [

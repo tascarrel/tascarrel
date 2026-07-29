@@ -2,12 +2,11 @@ import { Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { hostApi } from "../../api/client.ts";
-import type { config, secrets, workspaces } from "../../api/generated/index.ts";
+import type { config, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
 import { SelectControl } from "../../components/ui/SelectControl.tsx";
 import { TextInput } from "../../components/ui/TextInput.tsx";
-import { useWorkspaceSecrets } from "../secrets/state.ts";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
 
@@ -30,10 +29,7 @@ type EndpointDraft = {
   baseUrl: string;
   authenticated: boolean;
   header: string;
-  prefix: string;
-  provider: string;
-  secret: string;
-  token: string;
+  value: string;
 };
 
 type ModelDraft = {
@@ -55,11 +51,9 @@ type DeleteTarget =
 
 export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceName }) {
   const configState = useWorkspaceConfig(workspace);
-  const secretsState = useWorkspaceSecrets(workspace);
   const [actionError, setActionError] = useState<string>();
   const [pendingSettings, setPendingSettings] = useState<config.WorkspaceSettings>();
   const [savingSettings, setSavingSettings] = useState(false);
-  const [secretRevisions, setSecretRevisions] = useState<Record<string, string>>({});
   const [endpointDraft, setEndpointDraft] = useState<EndpointDraft>();
   const [modelDraft, setModelDraft] = useState<ModelDraft>();
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>();
@@ -88,7 +82,6 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
     setModelDraft(undefined);
     setDeleteTarget(undefined);
     setActionError(undefined);
-    setSecretRevisions({});
   }, [workspace]);
 
   const persistTasci = async (nextTasci: config.WorkspaceTasciSettings) => {
@@ -128,7 +121,6 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
     const validationError = validateEndpointDraft(
       endpointDraft,
       tasci.endpoints,
-      secretsState.value?.providers ?? [],
     );
     if (validationError) {
       setActionError(validationError);
@@ -147,11 +139,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
         ? {
             authorization: {
               header: endpointDraft.header.trim(),
-              prefix: endpointDraft.prefix,
-              credential: {
-                provider: endpointDraft.provider,
-                secret: endpointDraft.secret.trim(),
-              },
+              value: endpointDraft.value,
             },
           }
         : {}),
@@ -166,9 +154,6 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
     );
     try {
       await persistTasci({ ...tasci, endpoints, models });
-      if (endpointDraft.authenticated && endpointDraft.token) {
-        await storeEndpointToken(workspace, endpointDraft, secretsState.value?.providers ?? [], secretRevisions, setSecretRevisions);
-      }
       setEndpointDraft(undefined);
     } catch (cause) {
       setActionError(errorMessage(cause));
@@ -263,8 +248,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
 
   const reportedError = actionError
     ?? configState.error?.message
-    ?? configState.value?.lastSettingsError?.message
-    ?? secretsState.error?.message;
+    ?? configState.value?.lastSettingsError?.message;
 
   return (
     <>
@@ -272,7 +256,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
         <div>
           <h2 className="text-sm font-semibold text-foreground">Tasci</h2>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-subtle">
-            Configure protocol-compatible inference endpoints and the model aliases routed through them. The catalog is stored in <code>settings.json</code>; credentials remain in the encrypted secret store.
+            Configure protocol-compatible inference endpoints and the model aliases routed through them. Use workspace network secret injection for authenticated endpoints so credentials remain outside the VM.
           </p>
         </div>
 
@@ -285,7 +269,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
         <section aria-labelledby="tasci-endpoints-title">
           <SectionHeader
             title="API Endpoints"
-            description="Each endpoint declares a wire protocol, base URL, and optional secret-backed authorization header."
+            description="Each endpoint declares a wire protocol, base URL, and optional placeholder-bearing authorization header."
             action={(
               <Button
                 size="small"
@@ -318,7 +302,6 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
           {endpointDraft ? (
             <EndpointEditor
               draft={endpointDraft}
-              providers={secretsState.value?.providers ?? []}
               disabled={mutationDisabled}
               onCancel={() => setEndpointDraft(undefined)}
               onChange={setEndpointDraft}
@@ -434,7 +417,7 @@ function EndpointRow({
         <p className="mt-1 truncate font-mono text-[10px] text-subtle">{endpoint.baseUrl}</p>
         <p className="mt-1 text-[10px] text-subtle">
           OpenAI Chat Completions · {endpoint.authorization
-            ? `${endpoint.authorization.header} from ${endpoint.authorization.credential.provider}.${endpoint.authorization.credential.secret}`
+            ? `${endpoint.authorization.header} template`
             : "No authentication"}
         </p>
       </div>
@@ -494,28 +477,17 @@ function ModelRow({
 
 function EndpointEditor({
   draft,
-  providers,
   disabled,
   onChange,
   onCancel,
   onSubmit,
 }: {
   draft: EndpointDraft;
-  providers: secrets.SecretProviderMetadata[];
   disabled: boolean;
   onChange: (draft: EndpointDraft) => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent) => void;
 }) {
-  const providerOptions = [
-    ...providers.map((provider) => ({ label: provider.name, value: provider.name })),
-  ];
-  if (draft.provider && !providerOptions.some((option) => option.value === draft.provider)) {
-    providerOptions.push({ label: `${draft.provider} (unavailable)`, value: draft.provider });
-  }
-  const selectedProvider = providers.find((provider) => provider.name === draft.provider);
-  const credentialExists = selectedProvider?.secrets.some((secret) => secret.name === draft.secret);
-
   return (
     <form className="mt-3 rounded-xl border border-ui-border bg-surface/60 p-4" onSubmit={onSubmit}>
       <h4 className="text-xs font-semibold text-foreground">{draft.originalAlias ? "Edit API Endpoint" : "Add API Endpoint"}</h4>
@@ -549,7 +521,7 @@ function EndpointEditor({
           type="checkbox"
           onChange={(event) => onChange({ ...draft, authenticated: event.target.checked })}
         />
-        Send a secret-backed authorization header
+        Send an authorization header template
       </label>
 
       {draft.authenticated ? (
@@ -557,43 +529,12 @@ function EndpointEditor({
           <LabeledInput label="Header">
             <TextInput className="w-full font-mono" required value={draft.header} onChange={(event) => onChange({ ...draft, header: event.target.value })} />
           </LabeledInput>
-          <LabeledInput label="Prefix">
-            <TextInput className="w-full font-mono" placeholder="Bearer " value={draft.prefix} onChange={(event) => onChange({ ...draft, prefix: event.target.value })} />
-          </LabeledInput>
-          {providerOptions.length ? (
-            <SelectControl
-              label="Secret provider"
-              options={providerOptions}
-              required
-              value={draft.provider}
-              onChange={(provider) => onChange({ ...draft, provider })}
-            />
-          ) : (
-            <LabeledInput label="Secret provider">
-              <TextInput className="w-full" disabled placeholder="Configure a provider first" value="" />
-            </LabeledInput>
-          )}
-          <LabeledInput label="Secret name">
-            <TextInput className="w-full font-mono" required value={draft.secret} onChange={(event) => onChange({ ...draft, secret: event.target.value })} />
-          </LabeledInput>
-          <div className="sm:col-span-2">
-            <LabeledInput label="Set token">
-              <TextInput
-                autoComplete="new-password"
-                className="w-full"
-                disabled={!selectedProvider?.capabilities.set}
-                placeholder={credentialExists ? "Leave blank to keep the stored token" : "Optional; stored encrypted, never written to settings.json"}
-                type="password"
-                value={draft.token}
-                onChange={(event) => onChange({ ...draft, token: event.target.value })}
-              />
+          <div>
+            <LabeledInput label="Value template">
+              <TextInput className="w-full font-mono" placeholder="Bearer tascarrel-secret:api-token" required value={draft.value} onChange={(event) => onChange({ ...draft, value: event.target.value })} />
             </LabeledInput>
             <p className="mt-1 text-[10px] text-subtle">
-              {credentialExists
-                ? "The referenced secret exists."
-                : selectedProvider?.capabilities.set
-                  ? "Enter a token to create this secret, or leave it blank to save only the reference."
-                  : "Select a writable secret provider to store a token here."}
+              Store only a placeholder here. Configure its replacement under network secret injection; never enter the credential itself.
             </p>
           </div>
         </div>
@@ -753,10 +694,7 @@ function newEndpointDraft(): EndpointDraft {
     baseUrl: "",
     authenticated: false,
     header: "Authorization",
-    prefix: "Bearer ",
-    provider: "",
-    secret: "",
-    token: "",
+    value: "Bearer tascarrel-secret:api-token",
   };
 }
 
@@ -771,10 +709,7 @@ function editEndpointDraft(
     baseUrl: endpoint.baseUrl,
     authenticated: endpoint.authorization !== undefined,
     header: endpoint.authorization?.header ?? "Authorization",
-    prefix: endpoint.authorization?.prefix ?? "Bearer ",
-    provider: endpoint.authorization?.credential.provider ?? "",
-    secret: endpoint.authorization?.credential.secret ?? "",
-    token: "",
+    value: authorizationValue(endpoint.authorization),
   };
 }
 
@@ -809,7 +744,6 @@ function editModelDraft(alias: string, model: config.WorkspaceTasciModel): Model
 function validateEndpointDraft(
   draft: EndpointDraft,
   endpoints: config.WorkspaceTasciSettings["endpoints"],
-  providers: secrets.SecretProviderMetadata[],
 ): string | undefined {
   const alias = draft.alias.trim();
   if (!alias) return "Endpoint alias is required.";
@@ -829,16 +763,7 @@ function validateEndpointDraft(
   }
   if (!draft.authenticated) return undefined;
   if (!draft.header.trim()) return "Authorization header is required.";
-  if (!draft.provider) return "Secret provider is required.";
-  if (!draft.secret.trim()) return "Secret name is required.";
-  if (draft.secret === "sops" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(draft.secret)) {
-    return "Secret name must start with a letter or underscore and contain only letters, digits, and underscores; sops is reserved.";
-  }
-  if (draft.token && !providers.find((provider) =>
-    provider.name === draft.provider
-  )?.capabilities.set) {
-    return "The selected secret provider cannot store tokens.";
-  }
+  if (!draft.value) return "Authorization value template is required.";
   return undefined;
 }
 
@@ -858,26 +783,15 @@ function validateModelDraft(
   return undefined;
 }
 
-async function storeEndpointToken(
-  workspace: workspaces.WorkspaceName,
-  draft: EndpointDraft,
-  providers: secrets.SecretProviderMetadata[],
-  revisions: Record<string, string>,
-  setRevisions: React.Dispatch<React.SetStateAction<Record<string, string>>>,
-) {
-  const provider = providers.find((candidate) => candidate.name === draft.provider);
-  if (!provider?.capabilities.set) {
-    throw new Error("The selected secret provider cannot store tokens.");
-  }
-  const expectedRevision = revisions[provider.name] ?? provider.revision;
-  const result = await hostApi.execute("secrets_Set", {
-    workspaceName: workspace,
-    providerName: provider.name,
-    secretName: draft.secret.trim(),
-    value: draft.token,
-    ...(expectedRevision ? { expectedRevision } : {}),
-  });
-  setRevisions((current) => ({ ...current, [provider.name]: result.revision }));
+function authorizationValue(
+  authorization: config.WorkspaceTasciAuthorization | undefined,
+): string {
+  if (!authorization) return "Bearer tascarrel-secret:api-token";
+  if (authorization.value !== undefined) return authorization.value;
+  const secret = authorization.credential?.secret;
+  if (!secret) return authorization.prefix ?? "";
+  const placeholder = `tascarrel-secret:${secret.toLowerCase().replaceAll("_", "-")}`;
+  return `${authorization.prefix ?? ""}${placeholder}`;
 }
 
 function positiveInteger(value: string): number | undefined {

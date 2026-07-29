@@ -1,0 +1,31 @@
+{
+  "name": "reasoning is retained before visible assistant text",
+  "prompt": "Calculate the result.",
+  "responses": [
+    {
+      "events": [
+        {
+          "kind": "reasoning_delta",
+          "delta": "I should calculate carefully."
+        },
+        {
+          "kind": "text_delta",
+          "delta": "The result is 323."
+        },
+        {
+          "kind": "completed",
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "event_kinds": [
+      "model_request_started",
+      "reasoning_delta",
+      "text_delta",
+      "completed"
+    ]
+  }
+}

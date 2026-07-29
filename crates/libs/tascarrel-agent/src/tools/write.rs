@@ -22,7 +22,7 @@ impl Tool for WriteTool {
         ToolDefinition {
             name: "write".to_owned(),
             description: "Write complete UTF-8 file content, creating parent directories for a new file. A new file is created only when the path remains absent. An existing file must have been read completely and must still match the last read revision.".to_owned(),
-            input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or in-workspace absolute file path"},"content":{"type":"string","description":"Complete replacement file content"}},"required":["path","content"],"additionalProperties":false}"#.to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path, or path relative to the workspace"},"content":{"type":"string","description":"Complete replacement file content"}},"required":["path","content"],"additionalProperties":false}"#.to_owned(),
             prompt: crate::ToolPrompt {
                 summary: "Create files or completely rewrite observed files".to_owned(),
                 guidelines: vec![

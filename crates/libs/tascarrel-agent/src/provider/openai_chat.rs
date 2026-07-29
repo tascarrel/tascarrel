@@ -42,11 +42,12 @@ pub struct OpenAiChatBackend {
 impl OpenAiChatBackend {
     /// Creates a backend for a custom compatible endpoint.
     ///
-    /// An absent token supports local APIs that do not authenticate requests.
+    /// An absent header supports local APIs that do not authenticate requests.
     ///
     /// # Errors
     ///
-    /// Returns an error when the base URL, model, or bearer token is invalid.
+    /// Returns an error when the base URL, model, or authorization header is
+    /// invalid.
     pub fn new(
         base_url: &str,
         model: impl Into<String>,
@@ -59,7 +60,8 @@ impl OpenAiChatBackend {
     ///
     /// # Errors
     ///
-    /// Returns an error when the base URL, model, or bearer token is invalid.
+    /// Returns an error when the base URL, model, or authorization header is
+    /// invalid.
     pub fn with_client(
         client: reqwest::Client,
         base_url: &str,
@@ -131,12 +133,13 @@ impl ModelBackend for OpenAiChatBackend {
     }
 }
 
-/// One complete HTTP authorization header.
+/// One complete HTTP authorization header or non-secret injection template.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HttpAuthorization {
     /// Header name, such as `authorization` or `x-api-key`.
     pub header: String,
-    /// Complete header value, including any scheme prefix.
+    /// Complete header value, including any scheme prefix or host-injected
+    /// placeholder.
     pub value: String,
 }
 
@@ -252,6 +255,8 @@ enum ChatMessage {
         content: String,
     },
     Assistant {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         content: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ChatAssistantToolCall>,
@@ -268,6 +273,8 @@ impl From<ModelMessage> for ChatMessage {
             ModelMessage::System { content } => Self::System { content },
             ModelMessage::User { content } => Self::User { content },
             ModelMessage::Assistant(message) => {
+                let reasoning_content =
+                    (!message.reasoning.is_empty()).then_some(message.reasoning);
                 let content = (!message.content.is_empty()).then_some(message.content);
                 let tool_calls = message
                     .tool_calls
@@ -282,6 +289,7 @@ impl From<ModelMessage> for ChatMessage {
                     })
                     .collect();
                 Self::Assistant {
+                    reasoning_content,
                     content,
                     tool_calls,
                 }
@@ -353,19 +361,46 @@ impl DecoderState {
             self.finished = true;
             return Ok(());
         }
-        if self.terminal {
-            return Err(protocol_error(
-                "provider emitted data after the finish reason",
-            ));
-        }
         let chunk: ChatCompletionChunk = serde_json::from_str(data)
             .map_err(|source| protocol_error(format!("invalid response chunk: {source}")))?;
         if let Some(error) = chunk.error {
             return Err(request_error(error.message));
         }
+        if self.terminal {
+            let contains_model_data = chunk.choices.iter().any(|choice| {
+                choice.finish_reason.is_some()
+                    || choice
+                        .delta
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.is_empty())
+                    || choice
+                        .delta
+                        .reasoning_content
+                        .as_ref()
+                        .is_some_and(|reasoning| !reasoning.is_empty())
+                    || choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|tool_calls| !tool_calls.is_empty())
+            });
+            if contains_model_data {
+                return Err(protocol_error(
+                    "provider emitted model data after the finish reason",
+                ));
+            }
+            return Ok(());
+        }
         for choice in chunk.choices {
             if choice.index != 0 {
                 continue;
+            }
+            if let Some(reasoning) = choice.delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                self.pending
+                    .push_back(Ok(ModelStreamEvent::ReasoningDelta { delta: reasoning }));
             }
             if let Some(content) = choice.delta.content
                 && !content.is_empty()
@@ -373,7 +408,7 @@ impl DecoderState {
                 self.pending
                     .push_back(Ok(ModelStreamEvent::TextDelta { delta: content }));
             }
-            for tool_delta in choice.delta.tool_calls {
+            for tool_delta in choice.delta.tool_calls.into_iter().flatten() {
                 self.accept_tool_delta(tool_delta)?;
             }
             if let Some(reason) = choice.finish_reason {
@@ -499,9 +534,9 @@ struct ChatChoice {
 
 #[derive(Default, Deserialize)]
 struct ChatDelta {
+    reasoning_content: Option<String>,
     content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<ChatToolCallDelta>,
+    tool_calls: Option<Vec<ChatToolCallDelta>>,
 }
 
 #[derive(Deserialize)]

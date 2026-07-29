@@ -35,7 +35,7 @@ notify = "8.2"
 rand = "0.9"
 reportify = "0.2.2"
 reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+    "rustls-tls-native-roots",
     "stream",
 ] }
 rustix = "1.0"

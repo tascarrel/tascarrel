@@ -678,6 +678,7 @@ fn event_kind(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::ModelRequestStarted { .. } => "model_request_started",
         AgentEvent::ModelRequestRetrying { .. } => "model_request_retrying",
+        AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
         AgentEvent::TextDelta { .. } => "text_delta",
         AgentEvent::ToolCallStarted { .. } => "tool_call_started",
         AgentEvent::ToolCallCompleted { .. } => "tool_call_completed",

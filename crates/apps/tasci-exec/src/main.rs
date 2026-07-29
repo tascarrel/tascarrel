@@ -54,7 +54,7 @@ async fn run() -> TasciExecResult<()> {
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(io::stderr)
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|source| TasciExecError::Logging { source }.report())?;
 
@@ -77,6 +77,7 @@ async fn run_once(prompt: String) -> TasciExecResult<()> {
     };
     let runtime = open_agent_runtime(&configuration).await?;
     let agent = build_agent(&configuration, &runtime)?;
+    tracing::info!(model = %configuration.model, "Tasci run started");
     let cancellation = CancellationToken::new();
     let printer = Arc::new(Mutex::new(EventPrinter::default()));
     let handler_printer = Arc::clone(&printer);
@@ -111,6 +112,7 @@ async fn run_once(prompt: String) -> TasciExecResult<()> {
     if let Some(source) = output_error {
         return Err(TasciExecError::Output { source }.report());
     }
+    tracing::info!("Tasci run completed");
     Ok(())
 }
 
@@ -126,6 +128,7 @@ async fn run_harness() -> TasciExecResult<()> {
     };
     let runtime = open_agent_runtime(&configuration).await?;
     let mut agent = Arc::new(build_agent(&configuration, &runtime)?);
+    tracing::info!(model = %configuration.model, "Tasci harness started");
     write_harness_event(&mut output, TasciHarnessEvent::Started).await?;
     let mut history = Vec::new();
 
@@ -144,12 +147,14 @@ async fn run_harness() -> TasciExecResult<()> {
                         .report());
                     }
                     agent = Arc::new(build_agent(&configuration, &runtime)?);
+                    tracing::info!(model = %configuration.model, "Tasci harness model changed");
                 }
                 let turn =
                     run_harness_turn(Arc::clone(&agent), history, prompt, &mut input, &mut output)
                         .await?;
                 history = turn.history;
                 if turn.stop {
+                    tracing::info!("Tasci harness stopped");
                     write_harness_event(&mut output, TasciHarnessEvent::Stopped).await?;
                     return Ok(());
                 }
@@ -165,6 +170,7 @@ async fn run_harness() -> TasciExecResult<()> {
                 .await?;
             }
             TasciHarnessCommand::Stop => {
+                tracing::info!("Tasci harness stopped");
                 write_harness_event(&mut output, TasciHarnessEvent::Stopped).await?;
                 return Ok(());
             }
@@ -190,6 +196,7 @@ async fn run_harness_turn(
     input: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     output: &mut tokio::io::Stdout,
 ) -> TasciExecResult<HarnessTurn> {
+    tracing::info!("Tasci turn started");
     let cancellation = CancellationToken::new();
     let fallback_history = history.clone();
     let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -231,6 +238,7 @@ async fn run_harness_turn(
     }
     match result {
         Ok(AgentRun { messages, .. }) => {
+            tracing::info!("Tasci turn completed");
             write_harness_event(
                 output,
                 TasciHarnessEvent::TurnFinished {
@@ -245,6 +253,7 @@ async fn run_harness_turn(
             })
         }
         Err(_error) if cancellation.is_cancelled() => {
+            tracing::info!("Tasci turn cancelled");
             write_harness_event(
                 output,
                 TasciHarnessEvent::TurnFinished {
@@ -260,6 +269,7 @@ async fn run_harness_turn(
         }
         Err(error) => {
             let message = error.to_string();
+            tracing::warn!(%error, "Tasci turn failed");
             write_harness_event(
                 output,
                 TasciHarnessEvent::TurnFinished {
@@ -434,7 +444,9 @@ impl EventPrinter {
                 self.write_artifacts(artifacts);
             }
             AgentEvent::Completed { .. } => self.ensure_newline(),
-            AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolCallCompleted { .. } => {}
+            AgentEvent::ReasoningDelta { .. }
+            | AgentEvent::ToolCallStarted { .. }
+            | AgentEvent::ToolCallCompleted { .. } => {}
         }
     }
 

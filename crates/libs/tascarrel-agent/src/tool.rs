@@ -59,7 +59,8 @@ pub struct ToolPrompt {
 /// Owned execution context supplied to a tool.
 #[derive(Clone)]
 pub struct ToolContext {
-    /// Revision-aware file workspace.
+    /// Revision-aware filesystem access with workspace-relative path
+    /// resolution.
     pub files: Arc<FileWorkspace>,
     /// Cooperative cancellation for this call.
     pub cancellation: CancellationToken,
@@ -97,10 +98,10 @@ pub enum ToolArtifact {
     },
 }
 
-/// Actual before-and-after change made to one workspace file.
+/// Actual before-and-after change made to one file.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileChange {
-    /// Workspace-relative path.
+    /// Workspace-relative path for workspace files, or an absolute path.
     pub path: PathBuf,
     /// Filesystem operation represented by the change.
     pub operation: FileChangeOperation,

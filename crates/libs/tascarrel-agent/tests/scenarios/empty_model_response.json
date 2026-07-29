@@ -1,0 +1,18 @@
+{
+  "name": "an empty terminal model response fails the run",
+  "prompt": "Explain the daemon architecture.",
+  "responses": [
+    {
+      "events": [
+        {
+          "kind": "completed",
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "request_count": 1,
+    "error_contains": "no text or tool calls"
+  }
+}

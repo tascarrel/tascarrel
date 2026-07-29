@@ -87,8 +87,8 @@ pub enum ToolError {
         /// Requested tool name.
         name: String,
     },
-    /// A file operation attempted to escape the workspace.
-    #[error("path {path} is outside the file workspace")]
+    /// A process operation attempted to use a path outside the workspace.
+    #[error("path {path} is outside the process workspace")]
     PathOutsideWorkspace {
         /// Rejected path.
         path: PathBuf,

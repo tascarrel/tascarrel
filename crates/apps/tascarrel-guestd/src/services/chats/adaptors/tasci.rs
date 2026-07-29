@@ -129,6 +129,7 @@ impl Harness for TasciAdaptor {
 
             let state = Arc::new(Mutex::new(TasciSessionState {
                 active_turn: None,
+                reasoning_item: None,
                 assistant_item: None,
                 tool_items: HashMap::new(),
                 current_model: self.configuration.selection.clone(),
@@ -187,7 +188,7 @@ impl Harness for TasciAdaptor {
 pub struct TasciRuntimeConfiguration {
     /// Workspace-local model selection visible to the chat engine.
     pub selection: ChatModelSelection,
-    /// Endpoint configuration sent privately to the pod harness.
+    /// Endpoint configuration sent to the pod harness.
     pub harness: TasciHarnessConfiguration,
     /// Secret-free current catalog.
     pub models: ArcVec<ChatModel>,
@@ -405,7 +406,8 @@ impl HarnessEventStream for TasciEvents {
 
 struct TasciSessionState {
     active_turn: Option<ActiveTasciTurn>,
-    assistant_item: Option<StreamingAssistantItem>,
+    reasoning_item: Option<StreamingTextItem>,
+    assistant_item: Option<StreamingTextItem>,
     tool_items: HashMap<String, ToolItem>,
     current_model: ChatModelSelection,
     stopped: bool,
@@ -419,9 +421,24 @@ struct ActiveTasciTurn {
     presentation_started: bool,
 }
 
-struct StreamingAssistantItem {
+struct StreamingTextItem {
     id: ChatItemId,
     content: String,
+}
+
+#[derive(Clone, Copy)]
+enum StreamingTextKind {
+    Reasoning,
+    Assistant,
+}
+
+impl StreamingTextKind {
+    const fn chat_item_kind(self) -> ChatItemKind {
+        match self {
+            Self::Reasoning => ChatItemKind::Reasoning,
+            Self::Assistant => ChatItemKind::AssistantMessage,
+        }
+    }
 }
 
 struct ToolItem {
@@ -506,12 +523,23 @@ fn project_agent_event(
         AgentEvent::ModelRequestStarted { step: 0 } => {
             start_turn_presentation(state, output);
         }
-        AgentEvent::TextDelta { delta } => append_assistant_text(state, output, delta),
+        AgentEvent::ReasoningDelta { delta } => {
+            complete_streaming_text(state, output, StreamingTextKind::Assistant);
+            append_streaming_text(state, output, delta, StreamingTextKind::Reasoning);
+        }
+        AgentEvent::TextDelta { delta } => {
+            complete_streaming_text(state, output, StreamingTextKind::Reasoning);
+            append_streaming_text(state, output, delta, StreamingTextKind::Assistant);
+        }
         AgentEvent::ToolExecutionStarted {
             id,
             name,
             arguments,
-        } => start_tool_item(state, output, id, name, arguments),
+        } => {
+            complete_streaming_text(state, output, StreamingTextKind::Reasoning);
+            complete_streaming_text(state, output, StreamingTextKind::Assistant);
+            start_tool_item(state, output, id, name, arguments);
+        }
         AgentEvent::ToolExecutionCompleted {
             id,
             name: _,
@@ -601,21 +629,25 @@ fn start_turn_presentation(
     );
 }
 
-fn append_assistant_text(
+/// Appends one model text stream to its current timeline item.
+fn append_streaming_text(
     state: &Arc<Mutex<TasciSessionState>>,
     output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
     delta: String,
+    kind: StreamingTextKind,
 ) {
     let (turn, item, started) = {
         let mut state = lock(state);
         let turn = state.active_turn.as_ref().map(|turn| turn.id.clone());
-        let started = state.assistant_item.is_none();
-        let item = state
-            .assistant_item
-            .get_or_insert_with(|| StreamingAssistantItem {
-                id: ChatItemId::generate(),
-                content: String::new(),
-            });
+        let item = match kind {
+            StreamingTextKind::Reasoning => &mut state.reasoning_item,
+            StreamingTextKind::Assistant => &mut state.assistant_item,
+        };
+        let started = item.is_none();
+        let item = item.get_or_insert_with(|| StreamingTextItem {
+            id: ChatItemId::generate(),
+            content: String::new(),
+        });
         item.content.push_str(&delta);
         (turn, item.id.clone(), started)
     };
@@ -626,7 +658,7 @@ fn append_assistant_text(
                 turn.clone(),
                 Some(item.clone()),
                 HarnessEventPayload::ItemStarted {
-                    kind: ChatItemKind::AssistantMessage,
+                    kind: kind.chat_item_kind(),
                 },
             ),
         );
@@ -640,6 +672,40 @@ fn append_assistant_text(
                 item_id: item,
                 delta: delta.into(),
             }),
+        ),
+    );
+}
+
+/// Completes one model text item for the current response.
+fn complete_streaming_text(
+    state: &Arc<Mutex<TasciSessionState>>,
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    kind: StreamingTextKind,
+) {
+    let (turn, item) = {
+        let mut state = lock(state);
+        let item = match kind {
+            StreamingTextKind::Reasoning => state.reasoning_item.take(),
+            StreamingTextKind::Assistant => state.assistant_item.take(),
+        };
+        (state.active_turn.as_ref().map(|turn| turn.id.clone()), item)
+    };
+    let Some(item) = item else {
+        return;
+    };
+    emit_event(
+        output,
+        base_event(
+            turn,
+            Some(item.id),
+            HarnessEventPayload::ItemCompleted {
+                kind: kind.chat_item_kind(),
+                state: ChatItemState::Completed,
+                content: vec![ChatContent::Text(TextContent {
+                    value: item.content.into(),
+                })]
+                .into(),
+            },
         ),
     );
 }
@@ -779,30 +845,14 @@ fn finish_turn(
     cancelled: bool,
 ) {
     start_turn_presentation(state, output);
-    let (turn, assistant) = {
+    complete_streaming_text(state, output, StreamingTextKind::Reasoning);
+    complete_streaming_text(state, output, StreamingTextKind::Assistant);
+    let turn = {
         let mut state = lock(state);
         let turn = state.active_turn.take().map(|turn| turn.id);
-        let assistant = state.assistant_item.take();
         state.tool_items.clear();
-        (turn, assistant)
+        turn
     };
-    if let Some(assistant) = assistant {
-        emit_event(
-            output,
-            base_event(
-                turn.clone(),
-                Some(assistant.id),
-                HarnessEventPayload::ItemCompleted {
-                    kind: ChatItemKind::AssistantMessage,
-                    state: ChatItemState::Completed,
-                    content: vec![ChatContent::Text(TextContent {
-                        value: assistant.content.into(),
-                    })]
-                    .into(),
-                },
-            ),
-        );
-    }
     let turn_state = if error.is_some() {
         ChatTurnState::Failed
     } else if cancelled {
@@ -1010,6 +1060,7 @@ mod tests {
                 changed_model: Some(selected_model.clone()),
                 presentation_started: false,
             }),
+            reasoning_item: None,
             assistant_item: None,
             tool_items: HashMap::new(),
             current_model: previous_model,
@@ -1059,6 +1110,98 @@ mod tests {
                     if value.as_ref() == "Change models and keep this visible."
             )
         ));
+    }
+
+    /// Verifies reasoning, assistant text, and tool execution retain model-step
+    /// order as separate timeline items.
+    #[test]
+    fn tool_execution_separates_assistant_timeline_items() {
+        let state = Arc::new(Mutex::new(TasciSessionState {
+            active_turn: Some(ActiveTasciTurn {
+                id: ChatTurnId::generate(),
+                user_item_id: ChatItemId::generate(),
+                user_content: ArcVec::new(),
+                changed_model: None,
+                presentation_started: true,
+            }),
+            reasoning_item: None,
+            assistant_item: None,
+            tool_items: HashMap::new(),
+            current_model: selection("local-model"),
+            stopped: false,
+        }));
+        let (events, mut receiver) = mpsc::unbounded_channel();
+
+        for event in [
+            AgentEvent::ReasoningDelta {
+                delta: "Reasoning before the tool.".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                delta: "Before the tool.".to_owned(),
+            },
+            AgentEvent::ToolExecutionStarted {
+                id: "call-1".to_owned(),
+                name: "read".to_owned(),
+                arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+            },
+            AgentEvent::ToolExecutionCompleted {
+                id: "call-1".to_owned(),
+                name: "read".to_owned(),
+                content: "file contents".to_owned(),
+                artifacts: Vec::new(),
+                is_error: false,
+            },
+            AgentEvent::ReasoningDelta {
+                delta: "Reasoning after the tool.".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                delta: "After the tool.".to_owned(),
+            },
+        ] {
+            project_agent_event(event, &state, &events);
+        }
+        finish_turn(&state, &events, None, false);
+
+        let events = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        let transitions = events
+            .iter()
+            .filter_map(|event| {
+                let transition = match &event.payload {
+                    HarnessEventPayload::ItemStarted { kind } => ("started", *kind),
+                    HarnessEventPayload::ItemCompleted { kind, .. } => ("completed", *kind),
+                    _ => return None,
+                };
+                Some((transition.0, transition.1, event.item_id.clone().unwrap()))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|(transition, kind, _)| (*transition, *kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("started", ChatItemKind::Reasoning),
+                ("completed", ChatItemKind::Reasoning),
+                ("started", ChatItemKind::AssistantMessage),
+                ("completed", ChatItemKind::AssistantMessage),
+                ("started", ChatItemKind::ToolCall),
+                ("completed", ChatItemKind::ToolCall),
+                ("started", ChatItemKind::Reasoning),
+                ("completed", ChatItemKind::Reasoning),
+                ("started", ChatItemKind::AssistantMessage),
+                ("completed", ChatItemKind::AssistantMessage),
+            ]
+        );
+        assert_eq!(transitions[0].2, transitions[1].2);
+        assert_eq!(transitions[2].2, transitions[3].2);
+        assert_eq!(transitions[4].2, transitions[5].2);
+        assert_eq!(transitions[6].2, transitions[7].2);
+        assert_eq!(transitions[8].2, transitions[9].2);
+        assert_ne!(transitions[0].2, transitions[6].2);
+        assert_ne!(transitions[2].2, transitions[8].2);
     }
 
     fn selection(model: &str) -> ChatModelSelection {
