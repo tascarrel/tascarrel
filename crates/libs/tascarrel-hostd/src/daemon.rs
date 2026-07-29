@@ -785,11 +785,14 @@ impl Prepared {
                 .clone()
                 .map(validate_local_binaries)
                 .transpose()?;
+            let user_home =
+                TascarrelHome::discover_user_home().map_err(|error| anyhow!(error.to_string()))?;
             WorkspaceMode::Managed(ManagedWorkspaceConfig {
                 image,
                 kernel,
                 initrd,
                 kernel_append,
+                user_home,
                 workspaces_dir: workspaces_dir.clone(),
                 state_dir,
                 local_binaries,

@@ -38,12 +38,16 @@ use tascarrel_mux::connect as connect_mux;
 use tascarrel_protocol::ErrorCode;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::GuestControlIdentity;
+use tascarrel_protocol::MAX_WORKSPACE_HOST_SHARES;
 use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
 use tascarrel_protocol::RemoteError;
+use tascarrel_protocol::WorkspaceHostShare;
+use tascarrel_protocol::WorkspaceHostSharesResponse;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_protocol::control_plane::StreamTransport;
 use tascarrel_protocol::control_plane::server::Connection as ControlPlaneConnection;
 use tascarrel_protocol::control_plane::server::Peer as ControlPlanePeer;
+use tascarrel_protocol::valid_workspace_share_name;
 use tascarrel_store::Store;
 use tascarrel_vm::Acceleration;
 use tascarrel_vm::Architecture;
@@ -90,6 +94,7 @@ const WORKSPACE_QUEUE_CAPACITY: usize = 64;
 const ERROR_DETAIL_LIMIT: usize = 2048;
 const MINIMUM_DATA_DISK_BYTES: u64 = 256 * 1024 * 1024;
 const LOCAL_BINARIES_MOUNT_TAG: &str = "tascarrel-binaries";
+const HOST_SHARE_MOUNT_TAG_PREFIX: &str = "tascarrel-share-";
 const LOCAL_BINARIES_KERNEL_PARAMETER: &str = "tascarrel.local-binaries=1";
 const GUEST_INSTANCE_KERNEL_PARAMETER: &str = "tascarrel.guest-instance-id";
 const DEFAULT_WORKSPACE_CONFIG: &str = "";
@@ -145,6 +150,7 @@ pub struct ManagedWorkspaceConfig {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
     pub kernel_append: String,
+    pub user_home: Option<PathBuf>,
     pub workspaces_dir: PathBuf,
     pub state_dir: PathBuf,
     pub local_binaries: Option<PathBuf>,
@@ -246,6 +252,10 @@ impl WorkspaceServiceConfig {
             if !managed.image.is_absolute()
                 || !managed.kernel.is_absolute()
                 || !managed.initrd.is_absolute()
+                || managed
+                    .user_home
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
                 || !managed.workspaces_dir.is_absolute()
                 || !managed.state_dir.is_absolute()
                 || managed
@@ -254,7 +264,7 @@ impl WorkspaceServiceConfig {
                     .is_some_and(|path| !path.is_absolute())
             {
                 bail!(
-                    "managed image, kernel, initrd, workspace, state, and local binary paths must be absolute"
+                    "managed image, kernel, initrd, user home, workspace, state, and local binary paths must be absolute"
                 );
             }
             if managed.kernel_append.trim().is_empty() {
@@ -2351,13 +2361,22 @@ async fn start_managed_workspace(
         vcpu_count: managed.vcpu_count,
         state_disk_size: managed.data_disk_size,
     };
-    let (resources, diagnostics) = load_workspace_vm_resources_with_fallback(
-        &managed
-            .workspaces_dir
-            .join(workspace.as_str())
-            .join("config.toml"),
-        default_resources,
-    );
+    let config_path = managed
+        .workspaces_dir
+        .join(workspace.as_str())
+        .join("config.toml");
+    let (resources, diagnostics) =
+        load_workspace_vm_resources_with_fallback(&config_path, default_resources);
+    let host_shares = load_workspace_host_shares(
+        &config_path,
+        managed.user_home.as_deref(),
+        [
+            managed.workspaces_dir.as_path(),
+            managed.state_dir.as_path(),
+            service.runtime_dir.as_path(),
+        ],
+    )
+    .map_err(|error| StartupError::Failed(bounded_detail(&format!("{error:#}"))))?;
     let data_disk = state_dir.join("state.raw");
     let remaining = remaining(deadline)?;
     let startup = spawn_vm(
@@ -2370,6 +2389,7 @@ async fn start_managed_workspace(
             vm_log,
             startup_timeout: remaining,
             resources,
+            host_shares,
             reset_data,
         },
     );
@@ -2455,9 +2475,13 @@ async fn finish_workspace_start(
     request_senders: &WorkspaceRequestSenders,
     usb_devices: &UsbDeviceRegistry,
 ) -> Result<ActiveWorkspace, StartupError> {
-    let (stream, mut vm, mut vm_log_task) = match source {
+    let (stream, mut vm, mut vm_log_task, host_shares) = match source {
         UnixStreamSource::Vm(spawned) => {
-            let SpawnedVm { mut vm, log_task } = *spawned;
+            let SpawnedVm {
+                mut vm,
+                log_task,
+                host_shares,
+            } = *spawned;
             let stream = match vm.take_control_stream() {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -2474,9 +2498,11 @@ async fn finish_workspace_start(
                     .await);
                 }
             };
-            (stream, Some(vm), Some(log_task))
+            (stream, Some(vm), Some(log_task), host_shares)
         }
-        UnixStreamSource::External(stream) => (stream, None, None),
+        UnixStreamSource::External(stream) => {
+            (stream, None, None, WorkspaceHostSharesResponse::default())
+        }
     };
     let usb = vm
         .is_some()
@@ -2534,6 +2560,7 @@ async fn finish_workspace_start(
             authority,
             workspace_root: workspace_root(workspace, service),
             workspace_snapshot_dir: workspace_state(workspace, service),
+            host_shares,
             handshake_timeout: service.mux_service_handshake_timeout,
             max_concurrent_services: service.max_concurrent_mux_services,
         },
@@ -2776,13 +2803,27 @@ struct VmStartSpec {
     vm_log: super::log::WorkspaceVmLogWriter,
     startup_timeout: Duration,
     resources: VmResources,
+    host_shares: Vec<ResolvedWorkspaceHostShare>,
     reset_data: bool,
 }
 
 struct SpawnedVm {
     vm: Vm,
     log_task: JoinHandle<()>,
+    host_shares: WorkspaceHostSharesResponse,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedWorkspaceHostShare {
+    name: String,
+    host_path: PathBuf,
+    mount_tag: String,
+    writable: bool,
+}
+
+#[derive(Debug, Error)]
+#[error("workspace host-share configuration is invalid")]
+struct WorkspaceHostShareConfigError;
 
 /// Builds the VM configuration and transfers lifecycle ownership to
 /// `tascarrel-vm`.
@@ -2798,6 +2839,7 @@ struct SpawnedVm {
         memory_mib = spec.resources.memory_mib,
         vcpu_count = spec.resources.vcpu_count,
         local_binaries = config.local_binaries.is_some(),
+        host_shares = spec.host_shares.len(),
         reset_data = spec.reset_data,
     ),
     err
@@ -2807,6 +2849,21 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
     let state_directory = spec.state_directory.clone();
     let guest_instance_id = spec.guest_instance_id.clone();
     let vm_log = spec.vm_log.clone();
+    let host_shares = WorkspaceHostSharesResponse {
+        shares: spec
+            .host_shares
+            .iter()
+            .map(|share| WorkspaceHostShare {
+                name: share.name.clone(),
+                mount_tag: share.mount_tag.clone(),
+                writable: share.writable,
+            })
+            .collect(),
+    };
+    host_shares
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("invalid workspace host-share manifest")?;
     let vm_config = tokio::task::spawn_blocking(move || {
         if spec.reset_data {
             remove_regular_state_file(&spec.data_disk, "VM state disk")?;
@@ -2837,6 +2894,14 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
                 LOCAL_BINARIES_MOUNT_TAG,
             ));
         }
+        for share in spec.host_shares {
+            let directory = if share.writable {
+                SharedDirectory::read_write(share.host_path, share.mount_tag)
+            } else {
+                SharedDirectory::read_only(share.host_path, share.mount_tag)
+            };
+            builder = builder.shared_directory(directory);
+        }
         if let Some(architecture) = config.architecture {
             builder = builder.architecture(architecture);
         }
@@ -2857,7 +2922,11 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
     let log_task =
         start_vm_log_writer(&state_directory, &guest_instance_id, serial_output, vm_log)?;
     match spawn.await {
-        Ok(vm) => Ok(SpawnedVm { vm, log_task }),
+        Ok(vm) => Ok(SpawnedVm {
+            vm,
+            log_task,
+            host_shares,
+        }),
         Err(error) => {
             finish_vm_log_writer(log_task).await;
             Err(anyhow::Error::msg(error.to_string())).context("failed to start QEMU")
@@ -3021,6 +3090,124 @@ fn load_workspace_vm_resources_with_fallback(
             ))],
         ),
     }
+}
+
+/// Resolves and validates the host directories attached to a managed VM.
+///
+/// # Errors
+///
+/// Returns an error when a declaration is unsafe, ambiguous, unavailable, or
+/// overlaps a Tascarrel-owned directory.
+fn load_workspace_host_shares(
+    path: &Path,
+    user_home: Option<&Path>,
+    protected_roots: [&Path; 3],
+) -> std::result::Result<Vec<ResolvedWorkspaceHostShare>, Report<WorkspaceHostShareConfigError>> {
+    let Ok(parsed) = load_config_file(path, DEFAULT_MAX_CONFIG_BYTES) else {
+        // The ordinary configuration path already records a safe-default
+        // diagnostic. Never attach host paths from a document that did not
+        // parse as one complete workspace configuration.
+        return Ok(Vec::new());
+    };
+    let mut configured = parsed
+        .shares
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    configured.sort_unstable_by(|(left, _), (right, _)| left.as_ref().cmp(right.as_ref()));
+    if configured.len() > MAX_WORKSPACE_HOST_SHARES {
+        return Err(invalid_workspace_host_share(format!(
+            "at most {MAX_WORKSPACE_HOST_SHARES} host shares may be configured"
+        )));
+    }
+    let protected_roots = protected_roots
+        .into_iter()
+        .map(|root| {
+            std::fs::canonicalize(root).map_err(|error| {
+                error
+                    .escalate(WorkspaceHostShareConfigError)
+                    .message(format!(
+                        "failed to resolve protected Tascarrel directory {}",
+                        root.display()
+                    ))
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut resolved = Vec::with_capacity(configured.len());
+    let mut host_paths = HashSet::with_capacity(configured.len());
+    for (index, (name, share)) in configured.into_iter().enumerate() {
+        if !valid_workspace_share_name(&name) {
+            return Err(invalid_workspace_host_share(format!(
+                "host share name {name:?} must start with an ASCII letter or number and contain only letters, numbers, '-' or '_'"
+            )));
+        }
+        let configured_path = share.path.as_ref();
+        let expanded = if configured_path == "~" {
+            user_home
+                .ok_or_else(|| {
+                    invalid_workspace_host_share("HOME is unavailable for a '~' host-share path")
+                })?
+                .to_owned()
+        } else if let Some(relative) = configured_path.strip_prefix("~/") {
+            user_home
+                .ok_or_else(|| {
+                    invalid_workspace_host_share("HOME is unavailable for a '~/' host-share path")
+                })?
+                .join(relative)
+        } else {
+            let path = Path::new(configured_path);
+            if !path.is_absolute() {
+                return Err(invalid_workspace_host_share(format!(
+                    "host share {name:?} path must be absolute or start with '~/'"
+                )));
+            }
+            path.to_owned()
+        };
+        let host_path = std::fs::canonicalize(&expanded).map_err(|error| {
+            error
+                .escalate(WorkspaceHostShareConfigError)
+                .message(format!(
+                    "failed to resolve host share {name:?} directory {}",
+                    expanded.display()
+                ))
+        })?;
+        if !host_path.is_dir() {
+            return Err(invalid_workspace_host_share(format!(
+                "host share {name:?} is not a directory: {}",
+                host_path.display()
+            )));
+        }
+        if protected_roots
+            .iter()
+            .any(|root| host_path.starts_with(root) || root.starts_with(&host_path))
+        {
+            return Err(invalid_workspace_host_share(format!(
+                "host share {name:?} overlaps a protected Tascarrel directory: {}",
+                host_path.display()
+            )));
+        }
+        if !host_paths.insert(host_path.clone()) {
+            return Err(invalid_workspace_host_share(format!(
+                "host share {name:?} resolves to a directory already shared: {}",
+                host_path.display()
+            )));
+        }
+        resolved.push(ResolvedWorkspaceHostShare {
+            name: name.to_string(),
+            host_path,
+            mount_tag: format!("{HOST_SHARE_MOUNT_TAG_PREFIX}{index}"),
+            writable: share.writable.unwrap_or(false),
+        });
+    }
+    Ok(resolved)
+}
+
+fn invalid_workspace_host_share(
+    message: impl Into<String>,
+) -> Report<WorkspaceHostShareConfigError> {
+    WorkspaceHostShareConfigError
+        .report()
+        .message(message.into())
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, StartupError> {
@@ -3235,6 +3422,7 @@ mod tests {
                 kernel: directory.join("kernel"),
                 initrd: directory.join("initrd"),
                 kernel_append: "init=/nix/store/example/init".to_owned(),
+                user_home: Some(directory.join("home")),
                 workspaces_dir: directory.join("workspaces"),
                 state_dir: directory.join("state"),
                 architecture: None,
@@ -3342,6 +3530,124 @@ mod tests {
         );
     }
 
+    /// Verifies host shares expand the user home, sort deterministically, and
+    /// default to read-only access.
+    #[test]
+    fn workspace_host_shares_resolve_and_default_to_read_only() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let source = home.join("source");
+        let output = directory.path().join("output");
+        let workspaces = directory.path().join("workspaces");
+        let state = directory.path().join("state");
+        let runtime = directory.path().join("runtime");
+        for path in [&source, &output, &workspaces, &state, &runtime] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let config = directory.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[shares.source]\npath = \"~/source\"\n\n[shares.output]\npath = {:?}\nwritable = true\n",
+                output.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        let shares =
+            load_workspace_host_shares(&config, Some(&home), [&workspaces, &state, &runtime])
+                .unwrap();
+        assert_eq!(
+            shares
+                .iter()
+                .map(|share| (
+                    share.name.as_str(),
+                    share.host_path.as_path(),
+                    share.mount_tag.as_str(),
+                    share.writable,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("output", output.as_path(), "tascarrel-share-0", true,),
+                ("source", source.as_path(), "tascarrel-share-1", false,),
+            ]
+        );
+
+        std::fs::write(
+            &config,
+            format!(
+                "[shares.output]\npath = {:?}\n",
+                output.display().to_string()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            load_workspace_host_shares(&config, None, [&workspaces, &state, &runtime])
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::write(&config, "[shares.source]\npath = \"~/source\"\n").unwrap();
+        assert!(
+            load_workspace_host_shares(&config, None, [&workspaces, &state, &runtime]).is_err()
+        );
+    }
+
+    /// Verifies a share cannot expose Tascarrel's own config, state, or
+    /// runtime trees, even through an ancestor.
+    #[test]
+    fn workspace_host_shares_reject_protected_path_overlap() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let workspaces = directory.path().join("workspaces");
+        let state = directory.path().join("state");
+        let runtime = directory.path().join("runtime");
+        for path in [&home, &workspaces, &state, &runtime] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let config = directory.path().join("config.toml");
+        for target in [&workspaces, directory.path()] {
+            std::fs::write(
+                &config,
+                format!(
+                    "[shares.unsafe]\npath = {:?}\n",
+                    target.display().to_string()
+                ),
+            )
+            .unwrap();
+            assert!(
+                load_workspace_host_shares(&config, Some(&home), [&workspaces, &state, &runtime],)
+                    .is_err()
+            );
+        }
+    }
+
+    /// Verifies two declarations cannot alias the same canonical directory.
+    #[test]
+    fn workspace_host_shares_reject_canonical_duplicates() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let source = home.join("source");
+        let alias = home.join("alias");
+        let workspaces = directory.path().join("workspaces");
+        let state = directory.path().join("state");
+        let runtime = directory.path().join("runtime");
+        for path in [&source, &workspaces, &state, &runtime] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        symlink(&source, &alias).unwrap();
+        let config = directory.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[shares.one]\npath = \"~/source\"\n\n[shares.two]\npath = \"~/alias\"\n",
+        )
+        .unwrap();
+        assert!(
+            load_workspace_host_shares(&config, Some(&home), [&workspaces, &state, &runtime],)
+                .is_err()
+        );
+    }
+
     #[test]
     fn workspace_vm_resources_reject_zero_unknown_and_symlinked_config() {
         let directory = tempdir().unwrap();
@@ -3423,6 +3729,7 @@ mod tests {
             kernel: directory.path().join("kernel"),
             initrd: directory.path().join("initrd"),
             kernel_append: "init=/nix/store/example/init".to_owned(),
+            user_home: Some(directory.path().join("home")),
             workspaces_dir: directory.path().join("workspaces"),
             state_dir: directory.path().join("state"),
             architecture: None,

@@ -296,6 +296,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Virtual-machine resource overrides.
                                             */
                                                         "vm"?: WorkspaceVmConfig, /**
+                                            * Host directories explicitly shared with the workspace.
+                                            */
+                                                        "shares"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceHostShareConfig>, /**
                                             * Turnkey development features made available throughout the workspace.
                                             */
                                                         "features"?: WorkspaceFeaturesConfig, /**
@@ -332,6 +335,17 @@ import * as __schema_workspaces from "./workspaces";
                                             * Shared host-enforced network policy.
                                             */
                                                         "network"?: WorkspaceNetworkConfig };
+/**
+ * One host directory exposed to the workspace VM and all of its pods.
+ */
+ export type WorkspaceHostShareConfig = { /**
+                                            * Absolute host path or a path below the current user's home using `~/`.
+                                            */
+                                                        "path": __sidex_types.builtins.String, /**
+                                            * Whether the workspace may modify the directory.
+                                            * Omitted values default to read-only access.
+                                            */
+                                                        "writable"?: __sidex_types.builtins.Bool };
 /**
  * Workspace-wide chat behavior independent of a coding harness.
  */

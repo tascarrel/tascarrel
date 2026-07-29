@@ -427,6 +427,38 @@ impl PodShare {
         Ok(share)
     }
 
+    /// Creates one host-pinned share mounted below `/mnt` in every pod.
+    ///
+    /// The guest-level source is an ownership-normalized, idmap-capable bindfs
+    /// view over virtiofs or virtio-9p. It uses the ordinary per-pod idmapped
+    /// bind path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe internal mount tag, name, or source.
+    pub fn host(
+        mount_tag: impl Into<String>,
+        name: &str,
+        source: impl Into<PathBuf>,
+        writable: bool,
+    ) -> Result<Self, RuntimeError> {
+        if !tascarrel_protocol::valid_workspace_share_name(name) {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "invalid host-share name {name:?}"
+            )));
+        }
+        let share = Self {
+            name: mount_tag.into(),
+            source: source.into(),
+            path: format!("/mnt/{name}"),
+            read_only: !writable,
+            runtime_origin: false,
+            recursive_bind: false,
+        };
+        share.validate()?;
+        Ok(share)
+    }
+
     /// Creates the runtime-owned, read-only workspace HTTPS CA mount.
     ///
     /// # Errors
@@ -4499,6 +4531,19 @@ mod tests {
         assert!(share.read_only);
         assert!(!share.runtime_origin);
         validate_share_destination(Path::new(&share.path), share.runtime_origin).unwrap();
+    }
+
+    /// Verifies host shares use the fixed pod destination, remain idmapped,
+    /// and default to a read-only OCI bind.
+    #[test]
+    fn host_shares_are_idmapped_and_read_only_by_default() {
+        let share =
+            PodShare::host("tascarrel-share-0", "source", "/mnt/shares/source", false).unwrap();
+        assert_eq!(share.path, "/mnt/source");
+        assert_eq!(share.source, Path::new("/mnt/shares/source"));
+        assert!(share.read_only);
+        assert!(!share.runtime_origin);
+        assert!(!share.recursive_bind);
     }
 
     /// Verifies the Code server runtime is mounted read-only.

@@ -1,0 +1,10 @@
+diff --git a/src/bindfs.c b/src/bindfs.c
+index 36a1117..e89d9eb 100644
+--- a/src/bindfs.c
++++ b/src/bindfs.c
+@@ -709 +709,4 @@ static void *bindfs_init(struct fuse_conn_info *conn)
+-    (void) conn;
++    #ifdef HAVE_FUSE_3
++    // Required for applying per-pod idmapped binds to this FUSE mount.
++    (void) fuse_set_feature_flag(conn, FUSE_CAP_ALLOW_IDMAP);
++    #endif

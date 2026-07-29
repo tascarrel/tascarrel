@@ -15,6 +15,8 @@ use tascarrel_api::MAX_WORKSPACE_CONFIG_BYTES;
 use tascarrel_api::parse_memory_mib;
 use tascarrel_api::parse_size_bytes;
 use tascarrel_api::types::config as config_api;
+use tascarrel_protocol::MAX_WORKSPACE_HOST_SHARES;
+use tascarrel_protocol::valid_workspace_share_name;
 
 use crate::CODE_EDITOR_CACHE_NAME;
 use crate::CODE_EDITOR_PROFILE_PATH;
@@ -25,11 +27,17 @@ const MAX_ENVIRONMENT_ENTRIES: usize = 128;
 const MAX_ENVIRONMENT_BYTES: usize = 64 * 1024;
 const MAX_CODE_EDITOR_EXTENSIONS: usize = 127;
 const CODE_EXTENSION_ID_MAX_BYTES: usize = 256;
+const HOST_SHARE_MOUNT_TAG_PREFIX: &str = "tascarrel-share-";
 
 /// Settings loaded once from a workspace's read-only `config.toml`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkspaceConfig {
     pub vm: WorkspaceVm,
+    /// Names declared by the host-only share configuration.
+    ///
+    /// Guest runtime details come from the host-pinned VM manifest instead of
+    /// the potentially newer workspace input snapshot.
+    pub host_shares: BTreeSet<String>,
     pub features: WorkspaceFeatures,
     pub nix: WorkspaceNix,
     pub editors: WorkspaceEditors,
@@ -161,6 +169,12 @@ impl WorkspaceConfig {
             memory: vm.memory.map(|value| value.to_string()),
             disk: vm.disk.map(|value| value.to_string()),
         });
+        let host_shares = raw
+            .shares
+            .unwrap_or_default()
+            .into_keys()
+            .map(|name| name.to_string())
+            .collect();
         let features = workspace_features_from_api(raw.features);
         let nix = workspace_nix_from_api(raw.nix);
         let editors = workspace_editors_from_api(raw.editors);
@@ -223,6 +237,7 @@ impl WorkspaceConfig {
             .unwrap_or_default();
         Ok(Self {
             vm,
+            host_shares,
             features,
             nix,
             editors,
@@ -238,6 +253,16 @@ impl WorkspaceConfig {
     fn validate(&self) -> Result<()> {
         if self.vm.cores == Some(0) {
             bail!("VM cores must be greater than zero");
+        }
+        if self.host_shares.len() > MAX_WORKSPACE_HOST_SHARES
+            || self
+                .host_shares
+                .iter()
+                .any(|name| !valid_workspace_share_name(name))
+        {
+            bail!(
+                "workspace host shares must use at most {MAX_WORKSPACE_HOST_SHARES} portable names"
+            );
         }
         if let Some(memory) = &self.vm.memory {
             parse_memory_mib(memory)
@@ -375,6 +400,14 @@ fn validate_caches(caches: &[WorkspaceCache]) -> Result<()> {
         }
         if cache.name == CODE_EDITOR_CACHE_NAME {
             bail!("workspace cache name {CODE_EDITOR_CACHE_NAME:?} is reserved");
+        }
+        if cache
+            .name
+            .strip_prefix(HOST_SHARE_MOUNT_TAG_PREFIX)
+            .and_then(|index| index.parse::<usize>().ok())
+            .is_some_and(|index| index < MAX_WORKSPACE_HOST_SHARES)
+        {
+            bail!("workspace cache name {:?} is reserved", cache.name);
         }
         validate_cache_path(&cache.path)
             .with_context(|| format!("invalid path for workspace cache {:?}", cache.name))?;
@@ -749,6 +782,22 @@ mod tests {
         assert!(defaults.init.steps.is_empty());
         assert!(defaults.caches.is_empty());
         assert!(defaults.repos.is_empty());
+        assert!(defaults.host_shares.is_empty());
+    }
+
+    /// Verifies the named host-share table is accepted while host paths remain
+    /// outside the guest runtime model.
+    #[test]
+    fn accepts_named_host_shares() {
+        let configured = WorkspaceConfig::decode(
+            "[shares.source]\npath = \"~/src\"\n\n[shares.output]\npath = \"/srv/output\"\nwritable = true\n",
+        )
+        .unwrap();
+        configured.validate().unwrap();
+        assert_eq!(
+            configured.host_shares,
+            BTreeSet::from(["output".to_owned(), "source".to_owned()])
+        );
     }
 
     #[test]
@@ -1189,6 +1238,10 @@ mod tests {
             (
                 "editor-profile-overlap",
                 "[[caches]]\nname = \"cache\"\npath = \"~/.tascarrel/editors/code\"\n",
+            ),
+            (
+                "host-share-runtime-name",
+                "[[caches]]\nname = \"tascarrel-share-0\"\npath = \"~/.cache/runtime\"\n",
             ),
         ] {
             let path = directory.path().join(format!("{name}.toml"));

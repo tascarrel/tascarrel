@@ -34,6 +34,14 @@ let
   podctlBinary = lib.getExe' cfg.podctlPackage "podctl";
   poddBinary = lib.getExe' cfg.poddPackage "tascarrel-podd";
   tasciBinary = lib.getExe' cfg.tasciPackage "tasci-exec";
+  # Released libfuse does not expose or negotiate FUSE_ALLOW_IDMAP yet. Keep
+  # these guest-only overrides until libfuse and bindfs support it upstream.
+  idmappedFuse = pkgs.fuse3.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/libfuse-enable-idmapped-mounts.patch ];
+  });
+  idmappedBindfs = (pkgs.bindfs.override { fuse3 = idmappedFuse; }).overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/bindfs-enable-idmapped-mounts.patch ];
+  });
   tascarrelStarshipConfig = pkgs.writeText "tascarrel-starship.toml" ''
     add_newline = false
     command_timeout = 1000
@@ -649,6 +657,7 @@ in
         pkgs.coreutils
         pkgs.docker
         pkgs.fuse-overlayfs
+        idmappedBindfs
         pkgs.iproute2
         pkgs.nftables
         pkgs.podman
@@ -678,6 +687,7 @@ in
         TASCARREL_GUEST_RUNTIME_DIR = "/run/tascarrel";
         TASCARREL_GUEST_STATE_DIR = stateDirectory;
         TASCARREL_GUEST_BTRFS = lib.getExe' pkgs.btrfs-progs "btrfs";
+        TASCARREL_GUEST_BINDFS = lib.getExe' idmappedBindfs "bindfs";
         TASCARREL_GUEST_BUILDCTL = lib.getExe' pkgs.buildkit "buildctl";
         TASCARREL_GUEST_BUILDKITD = lib.getExe' pkgs.buildkit "buildkitd";
         TASCARREL_GUEST_CP = lib.getExe' pkgs.coreutils "cp";

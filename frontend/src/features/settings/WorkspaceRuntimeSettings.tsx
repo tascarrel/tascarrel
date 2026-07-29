@@ -199,6 +199,7 @@ function WorkspaceConfigSummary({
           <ConfigValue label="VM" value={formatVmConfig(config.vm)} />
           <ConfigValue label="Repositories" value={String(Object.keys(config.repos ?? {}).length)} />
           <ConfigValue label="Caches" value={String(config.caches?.length ?? 0)} />
+          <ConfigValue label="Host shares" value={String(Object.keys(config.shares ?? {}).length)} />
           <ConfigValue label="Environment entries" value={String(Object.keys(config.env ?? {}).length)} />
           <ConfigValue label="Setup steps" value={String(config.setup?.steps?.length ?? 0)} />
           <ConfigValue label="Init steps" value={String(config.init?.steps?.length ?? 0)} />

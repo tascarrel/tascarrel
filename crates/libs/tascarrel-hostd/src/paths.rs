@@ -44,6 +44,26 @@ impl TascarrelHome {
         discover_from_environment(configured.as_deref(), user_home.as_deref())
     }
 
+    /// Resolves the current user's absolute home directory when configured.
+    ///
+    /// This is kept separate from [`Self::root`] because an explicit
+    /// `TASCARREL_HOME` may live outside the user's home while workspace share
+    /// paths using `~/` must retain their conventional meaning.
+    ///
+    /// # Errors
+    ///
+    /// An unset or empty `HOME` is retained as `None` so absolute host-share
+    /// paths remain usable. Returns an error when a configured value is
+    /// relative.
+    pub fn discover_user_home() -> Result<Option<PathBuf>, Report<TascarrelHomeError>> {
+        let user_home = env::var_os("HOME");
+        user_home
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| resolve_user_home(Some(value)))
+            .transpose()
+    }
+
     /// Resolves an explicit Tascarrel home path.
     ///
     /// # Errors
@@ -135,6 +155,16 @@ fn discover_from_environment(
     if let Some(configured) = configured.filter(|value| !value.is_empty()) {
         return TascarrelHome::from_path(configured);
     }
+    let user_home = resolve_user_home(user_home)?;
+    TascarrelHome::from_path(user_home.join(DEFAULT_TASCARREL_HOME))
+}
+
+/// Validates one configured user home before it is used for path expansion.
+///
+/// # Errors
+///
+/// Returns an error when the value is absent, empty, or relative.
+fn resolve_user_home(user_home: Option<&OsStr>) -> Result<PathBuf, Report<TascarrelHomeError>> {
     let user_home = user_home
         .filter(|value| !value.is_empty())
         .ok_or_else(|| TascarrelHomeError::MissingUserHome.report())?;
@@ -145,7 +175,7 @@ fn discover_from_environment(
         }
         .report());
     }
-    TascarrelHome::from_path(user_home.join(DEFAULT_TASCARREL_HOME))
+    Ok(user_home.to_owned())
 }
 
 #[cfg(test)]
@@ -182,6 +212,12 @@ mod tests {
             home.control_socket(),
             Path::new("/home/tascarrel/.tascarrel/state/runtime/control.sock")
         );
+    }
+
+    /// Verifies home-relative share resolution rejects an ambiguous home.
+    #[test]
+    fn rejects_relative_user_home_paths() {
+        assert!(resolve_user_home(Some(OsStr::new("home/tascarrel"))).is_err());
     }
 
     /// Verifies an explicit relative home can be represented as an absolute

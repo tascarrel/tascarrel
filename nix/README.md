@@ -60,8 +60,8 @@ Each managed workspace VM has only these Tascarrel-owned external connections:
 
 QEMU is launched with `-nic none` and no virtual network backend. Additional
 QEMU arguments which could introduce a NIC, network backend, disk, filesystem,
-or external configuration are rejected. Workspace files are not mounted or
-otherwise exposed to QEMU.
+or external configuration are rejected. Workspace files are not exposed to
+QEMU unless a directory is explicitly declared as a host share.
 
 The host supervisor publishes exactly one private typed control-plane socket at
 `$TASCARREL_HOME/state/runtime/control.sock`. The `tascarrelctl` administrative

@@ -3,6 +3,8 @@
 //! The binary validates workspace inputs, constructs the guest-owned feature
 //! services, and serves workspace-scoped control-plane and Git connections.
 
+mod host_shares;
+
 use std::collections::BTreeMap;
 use std::fs::DirBuilder;
 use std::fs::File;
@@ -93,6 +95,7 @@ use tascarrel_protocol::ErrorCode;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::GuestControlIdentity;
 use tascarrel_protocol::MAX_WORKSPACE_ENVIRONMENT_FRAME_LEN;
+use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
 use tascarrel_protocol::MUX_CA_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_READ_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
@@ -101,6 +104,7 @@ use tascarrel_protocol::MUX_PUBLISH_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_FILE_READ_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
+use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
 use tascarrel_protocol::Pod;
 use tascarrel_protocol::PodId;
 use tascarrel_protocol::PublishedPortConnect;
@@ -109,6 +113,7 @@ use tascarrel_protocol::RemoteError;
 use tascarrel_protocol::WorkspaceEnvironmentResponse;
 use tascarrel_protocol::WorkspaceFileReadRequest;
 use tascarrel_protocol::WorkspaceFileReadResponse;
+use tascarrel_protocol::WorkspaceHostSharesResponse;
 use tascarrel_protocol::workspace_snapshot;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -127,6 +132,8 @@ use tokio::time::timeout;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
+
+use crate::host_shares::HostShareMounts;
 
 /// Failure while accepting or dispatching one pod-private mux connection.
 #[derive(Debug, Error)]
@@ -336,6 +343,14 @@ struct Args {
         default_value = "/run/current-system/sw/bin/umount"
     )]
     umount: PathBuf,
+
+    /// Immutable bindfs used for ownership-normalized, idmap-capable shares.
+    #[arg(
+        long,
+        env = "TASCARREL_GUEST_BINDFS",
+        default_value = "/run/current-system/sw/bin/bindfs"
+    )]
+    bindfs: PathBuf,
 
     #[arg(
         long,
@@ -794,6 +809,23 @@ async fn main() -> Result<()> {
     } else {
         workspace.env.clone()
     };
+    let host_share_manifest = if let Some(session) = initial_session.as_ref() {
+        fetch_workspace_host_shares(&session.handle)
+            .await
+            .context("failed to fetch host shares attached to the workspace VM")?
+    } else if workspace.host_shares.is_empty() {
+        WorkspaceHostSharesResponse::default()
+    } else {
+        bail!("workspace host shares require a managed VM host transport");
+    };
+    let mut host_share_mounts = HostShareMounts::mount(
+        &host_share_manifest,
+        &args.mount,
+        &args.umount,
+        &args.bindfs,
+        &args.runtime_dir,
+    )
+    .map_err(|error| anyhow!("{error:#}"))?;
     info!(
         rootless_containers = workspace.rootless_containers(),
         nested_containers = workspace.nested_containers(),
@@ -802,6 +834,7 @@ async fn main() -> Result<()> {
         podman = workspace.features.podman,
         nix_daemon = workspace.nix.daemon,
         caches = workspace.caches.len(),
+        host_shares = host_share_manifest.shares.len(),
         config = %workspace_config_path.display(),
         "loaded workspace policy"
     );
@@ -884,6 +917,21 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("configure workspace cache {:?}", cache.name))
         })
         .collect::<Result<Vec<_>>>()?;
+    shares.extend(
+        host_share_manifest
+            .shares
+            .iter()
+            .map(|share| {
+                PodShare::host(
+                    &share.mount_tag,
+                    &share.name,
+                    Path::new(host_shares::HOST_SHARES_DIRECTORY).join(&share.name),
+                    share.writable,
+                )
+                .with_context(|| format!("failed to configure host share {:?}", share.name))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
     let code_editor_profile = store
         .ensure_cache(CODE_EDITOR_CACHE_NAME)
         .context("provision shared Code editor profile")?;
@@ -1160,6 +1208,9 @@ async fn main() -> Result<()> {
     }
     network_service.detach_mux();
     pods.shutdown(&network_service).await;
+    if let Err(error) = host_share_mounts.unmount() {
+        warn!(%error, "could not unmount workspace host shares cleanly");
+    }
     for (principal, mapping) in service_network.iter().rev() {
         if let Err(error) = network_service.deactivate(principal, mapping).await {
             warn!(%error, service = %principal.id, "could not stop workspace network binding during shutdown");
@@ -2026,6 +2077,36 @@ async fn fetch_workspace_environment(handle: &MuxHandle) -> Result<BTreeMap<Stri
         .await
         .context("close workspace environment channel")?;
     response.result.map_err(|failure| anyhow!(failure.message))
+}
+
+/// Fetches and validates the shares pinned to the current managed VM.
+async fn fetch_workspace_host_shares(handle: &MuxHandle) -> Result<WorkspaceHostSharesResponse> {
+    let channel = handle
+        .open(MUX_WORKSPACE_SHARES_HOST_ENDPOINT)
+        .await
+        .map_err(|error| anyhow!("{error}"))
+        .context("failed to open workspace host-share channel")?;
+    let mut framed = Framed::with_max_frame_len(channel, MAX_WORKSPACE_SHARES_FRAME_LEN)
+        .map_err(|error| anyhow!("{error}"))
+        .context("failed to configure workspace host-share channel")?;
+    let response = framed
+        .read::<WorkspaceHostSharesResponse>()
+        .await
+        .map_err(|error| anyhow!("{error}"))
+        .context("failed to read workspace host-share manifest")?
+        .ok_or_else(|| {
+            anyhow!("host closed the workspace host-share channel without a response")
+        })?;
+    response
+        .validate()
+        .map_err(|error| anyhow!("{error}"))
+        .context("failed to validate workspace host-share manifest")?;
+    let mut channel = framed.into_inner();
+    channel
+        .shutdown()
+        .await
+        .context("failed to close workspace host-share channel")?;
+    Ok(response)
 }
 
 async fn shutdown_signal() {

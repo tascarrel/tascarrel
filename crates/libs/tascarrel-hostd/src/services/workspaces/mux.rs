@@ -11,10 +11,14 @@ use tascarrel_api::types::workspaces::WorkspaceName;
 use tascarrel_mux::Channel;
 use tascarrel_mux::Incoming;
 use tascarrel_mux::IncomingRequest;
+use tascarrel_protocol::Framed;
+use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
 use tascarrel_protocol::MUX_CA_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_GIT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
+use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
+use tascarrel_protocol::WorkspaceHostSharesResponse;
 use tascarrel_protocol::network::MUX_NETWORK_DNS_ENDPOINT;
 use tascarrel_protocol::network::MUX_NETWORK_TCP_ENDPOINT;
 use tascarrel_protocol::workspace_snapshot;
@@ -78,6 +82,7 @@ pub(crate) struct WorkspaceMuxHostConfig {
     pub repositories: Option<Arc<HostRepositoryManager>>,
     pub workspace_root: PathBuf,
     pub workspace_snapshot_dir: PathBuf,
+    pub host_shares: WorkspaceHostSharesResponse,
     pub handshake_timeout: Duration,
     pub max_concurrent_services: usize,
 }
@@ -216,10 +221,33 @@ impl WorkspaceMuxHost {
             services.spawn(async move {
                 serve_workspace_snapshot(channel, root, snapshot_dir, drain_timeout).await
             });
+        } else if endpoint == MUX_WORKSPACE_SHARES_HOST_ENDPOINT {
+            let Ok(channel) = request.accept() else {
+                return;
+            };
+            let host_shares = self.config.host_shares.clone();
+            let drain_timeout = self.config.handshake_timeout;
+            services.spawn(async move {
+                serve_workspace_host_shares(channel, host_shares, drain_timeout).await
+            });
         } else {
             reject_request(request, b"unknown host endpoint");
         }
     }
+}
+
+async fn serve_workspace_host_shares(
+    channel: Channel,
+    host_shares: WorkspaceHostSharesResponse,
+    drain_timeout: Duration,
+) -> Result<(), Report<WorkspaceMuxServiceError>> {
+    let mut framed = Framed::with_max_frame_len(channel, MAX_WORKSPACE_SHARES_FRAME_LEN)
+        .map_err(service_error)?;
+    framed.write(&host_shares).await.map_err(service_error)?;
+    let mut channel = framed.into_inner();
+    channel.shutdown().await.map_err(service_error)?;
+    drain_channel(&mut channel, drain_timeout).await;
+    Ok(())
 }
 
 async fn serve_ca(

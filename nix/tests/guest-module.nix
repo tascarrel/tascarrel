@@ -38,10 +38,12 @@ pkgs.testers.runNixOSTest {
           test "$TASCARREL_GUEST_INSTANCE_ID" = ${guestInstanceId}
           test "$TASCARREL_GUEST_STATE_DIR" = /var/lib/tascarrel
           test "$TASCARREL_GUEST_POD_NIX_DAEMON_SOCKET_DIR" = /run/tascarrel/pod-nix-daemon
+          test -x "$TASCARREL_GUEST_BINDFS"
           test "$(stat -c '%a:%u:%g' /var/lib/tascarrel/nix-store/nix/var/nix/gcroots/tascarrel/pods)" = 700:0:0
           test "$(stat -c '%a:%u:%g' /var/lib/tascarrel/nix-store/nix/var/nix/tascarrel-gc-root-trash)" = 700:0:0
           test -x "$(command -v btrfs)"
           test -x "$(command -v buildkitd)"
+          test -x "$(command -v bindfs)"
           test -x "$(command -v fuse-overlayfs)"
           test -x "$(command -v runc)"
           test -x "$(command -v umoci)"
@@ -103,6 +105,35 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     machine.start()
+    machine.wait_for_unit("basic.target")
+    machine.succeed("""
+      set -euo pipefail
+      share_root=/run/tascarrel/bindfs-idmap-test
+      namespace_pid=
+      cleanup_share_test() {
+        mountpoint -q "$share_root/idmapped" && umount "$share_root/idmapped" || true
+        test -z "$namespace_pid" || kill "$namespace_pid" || true
+        mountpoint -q "$share_root/view" && umount "$share_root/view" || true
+      }
+      trap cleanup_share_test EXIT
+      install -d "$share_root/source" "$share_root/view" "$share_root/idmapped"
+      touch "$share_root/source/probe"
+      bindfs_program=$(systemctl show tascarrel-guest.service -P Environment | grep -o 'TASCARREL_GUEST_BINDFS=[^ ]*' | cut -d= -f2-)
+      test -x "$bindfs_program"
+      "$bindfs_program" --force-user=0 --force-group=0 --perms=a+rwX "$share_root/source" "$share_root/view"
+      initial_user_namespace=$(readlink /proc/self/ns/user)
+      unshare --user --map-root-user -- sleep infinity >/dev/null 2>&1 &
+      namespace_pid=$!
+      for _ in $(seq 1 50); do
+        child_user_namespace=$(readlink "/proc/$namespace_pid/ns/user" 2>/dev/null || true)
+        test -z "$child_user_namespace" || test "$child_user_namespace" = "$initial_user_namespace" || break
+        sleep 0.1
+      done
+      test -n "$child_user_namespace"
+      test "$child_user_namespace" != "$initial_user_namespace"
+      mount --bind --map-users "/proc/$namespace_pid/ns/user" -- "$share_root/view" "$share_root/idmapped"
+      test -r "$share_root/idmapped/probe"
+    """)
     machine.wait_for_unit("tascarrel-guest.service")
     machine.wait_for_unit("apparmor.service")
     machine.wait_for_unit("nftables.service")
