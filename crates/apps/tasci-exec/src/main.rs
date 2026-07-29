@@ -533,7 +533,7 @@ async fn finish_successful_harness_operation(
             stop: true,
         });
     }
-    tracing::info!(operation, "Tasci harness operation completed");
+    tracing::info!(operation, "Tasci {operation} completed");
     write_harness_event(
         output,
         TasciHarnessEvent::TurnFinished {
