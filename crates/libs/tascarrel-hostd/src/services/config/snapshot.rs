@@ -602,8 +602,8 @@ mod tests {
         assert!(!message.contains("secret-value"));
     }
 
-    /// Verifies a complete Tasci catalog is loaded and a later dangling model
-    /// reference retains that last valid catalog.
+    /// Verifies a complete Tasci catalog including MCP headers is loaded and
+    /// later invalid model and header settings retain that catalog.
     #[test]
     fn snapshot_validates_tasci_endpoint_and_model_references() {
         let temporary = tempdir().unwrap();
@@ -635,6 +635,17 @@ mod tests {
                 .as_ref(),
             "local"
         );
+        let exa = tasci.mcp_servers.as_ref().unwrap().get("exa").unwrap();
+        assert_eq!(exa.endpoint.as_ref(), "https://mcp.exa.ai/mcp");
+        assert_eq!(
+            exa.headers
+                .as_ref()
+                .unwrap()
+                .get("X-Workspace-Token")
+                .unwrap()
+                .as_ref(),
+            "tascarrel-secret:mcp-token"
+        );
 
         fs::write(
             workspace.join("settings.json"),
@@ -652,6 +663,24 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("references an endpoint")
+        );
+
+        fs::write(
+            workspace.join("settings.json"),
+            valid_tasci_settings().replace("X-Workspace-Token", "Bad Header"),
+        )
+        .unwrap();
+        let invalid = load(&workspace, 4 * 1024 * 1024)
+            .unwrap()
+            .into_event(Some(&valid));
+
+        assert_eq!(invalid.settings, valid.settings);
+        assert!(
+            invalid
+                .last_settings_error
+                .unwrap()
+                .message
+                .contains("MCP header names")
         );
     }
 
@@ -680,6 +709,15 @@ mod tests {
                             "maxOutputTokens": 32768,
                             "toolCalls": true,
                             "parallelToolCalls": true
+                        }
+                    },
+                    "mcpServers": {
+                        "exa": {
+                            "displayName": "Exa",
+                            "endpoint": "https://mcp.exa.ai/mcp",
+                            "headers": {
+                                "X-Workspace-Token": "tascarrel-secret:mcp-token"
+                            }
                         }
                     }
                 }

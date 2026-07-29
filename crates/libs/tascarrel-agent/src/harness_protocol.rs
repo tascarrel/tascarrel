@@ -1,5 +1,7 @@
 //! Private line-delimited protocol spoken by the bundled Tasci harness.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -23,6 +25,22 @@ pub struct TasciHarnessConfiguration {
     pub authorization: Option<HttpAuthorization>,
     /// Absolute working directory inside the pod.
     pub working_directory: String,
+    /// Streamable HTTP MCP servers connected for this session.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfiguration>,
+}
+
+/// One Streamable HTTP MCP server connected by the Tasci harness.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct McpServerConfiguration {
+    /// Stable settings name used to namespace discovered tools.
+    pub name: String,
+    /// Human-readable server name used in warnings and model disclosures.
+    pub display_name: String,
+    /// Absolute Streamable HTTP endpoint.
+    pub endpoint: String,
+    /// HTTP header templates sent with every MCP request.
+    pub headers: BTreeMap<String, String>,
 }
 
 /// One command written to a Tasci harness process.
@@ -61,6 +79,13 @@ pub enum TasciHarnessEvent {
     Agent {
         /// Provider-neutral agent event.
         value: AgentEvent,
+    },
+    /// A non-fatal harness condition worth presenting to the user.
+    Warning {
+        /// Stable warning code.
+        code: String,
+        /// Secret-safe warning description.
+        message: String,
     },
     /// The active turn reached a terminal state.
     TurnFinished {

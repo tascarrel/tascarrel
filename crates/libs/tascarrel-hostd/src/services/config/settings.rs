@@ -3,6 +3,9 @@
 //! [`validate`] enforces cross-reference and transport invariants that cannot
 //! be expressed by the generated settings shape.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use hyper::Uri;
 use hyper::header::HeaderName;
 use hyper::header::HeaderValue;
@@ -15,7 +18,7 @@ use thiserror::Error;
 ///
 /// # Errors
 ///
-/// Returns a value-safe diagnostic when a Tasci endpoint, model, or
+/// Returns a value-safe diagnostic when a Tasci endpoint, model, MCP server, or
 /// cross-reference is invalid.
 pub(crate) fn validate(
     settings: &api::WorkspaceSettings,
@@ -86,6 +89,17 @@ pub(crate) fn validate(
             return Err(SettingsValidationError::MissingDefaultModel.report());
         }
     }
+    if let Some(mcp_servers) = &tasci.mcp_servers {
+        for (name, server) in mcp_servers {
+            validate_mcp_server_name(name)?;
+            validate_optional_name(
+                server.display_name.as_deref(),
+                SettingsValidationError::InvalidMcpServerDisplayName,
+            )?;
+            validate_mcp_endpoint(server.endpoint.as_ref())?;
+            validate_mcp_headers(server.headers.as_ref())?;
+        }
+    }
     Ok(())
 }
 
@@ -132,6 +146,20 @@ pub(crate) enum SettingsValidationError {
     InvalidDefaultModel,
     #[error("the default Tasci model is not configured")]
     MissingDefaultModel,
+    #[error(
+        "Tasci MCP server names must contain only ASCII letters, digits, hyphens, and underscores"
+    )]
+    InvalidMcpServerName,
+    #[error("Tasci MCP server display names must not be empty when specified")]
+    InvalidMcpServerDisplayName,
+    #[error(
+        "Tasci MCP endpoints must be absolute HTTP or HTTPS URLs without credentials, queries, or fragments"
+    )]
+    InvalidMcpEndpoint,
+    #[error("Tasci MCP header names are invalid or repeated without regard to case")]
+    InvalidMcpHeaderName,
+    #[error("Tasci MCP header values are not valid HTTP header text")]
+    InvalidMcpHeaderValue,
 }
 
 /// Validates a stable map key without constraining its portable character set.
@@ -180,6 +208,55 @@ fn validate_base_url(value: &str) -> Result<(), Report<SettingsValidationError>>
             .is_some()
     {
         return Err(SettingsValidationError::InvalidBaseUrl.report());
+    }
+    Ok(())
+}
+
+/// Validates one settings key for use in model-visible MCP tool names.
+fn validate_mcp_server_name(value: &str) -> Result<(), Report<SettingsValidationError>> {
+    if value.is_empty()
+        || value.chars().any(|character| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
+    {
+        return Err(SettingsValidationError::InvalidMcpServerName.report());
+    }
+    Ok(())
+}
+
+/// Validates a Streamable HTTP endpoint.
+fn validate_mcp_endpoint(value: &str) -> Result<(), Report<SettingsValidationError>> {
+    let Ok(uri) = value.parse::<Uri>() else {
+        return Err(SettingsValidationError::InvalidMcpEndpoint.report());
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.authority().is_none()
+        || uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().contains('@'))
+        || uri
+            .path_and_query()
+            .and_then(hyper::http::uri::PathAndQuery::query)
+            .is_some()
+    {
+        return Err(SettingsValidationError::InvalidMcpEndpoint.report());
+    }
+    Ok(())
+}
+
+/// Validates arbitrary MCP request header templates.
+fn validate_mcp_headers(
+    headers: Option<&HashMap<tascarrel_api::ArcStr, tascarrel_api::ArcStr>>,
+) -> Result<(), Report<SettingsValidationError>> {
+    let mut names = HashSet::new();
+    for (name, value) in headers.into_iter().flatten() {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| SettingsValidationError::InvalidMcpHeaderName.report())?;
+        if !names.insert(name) {
+            return Err(SettingsValidationError::InvalidMcpHeaderName.report());
+        }
+        HeaderValue::from_str(value)
+            .map_err(|_| SettingsValidationError::InvalidMcpHeaderValue.report())?;
     }
     Ok(())
 }

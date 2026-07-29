@@ -11,6 +11,7 @@ use jiff::Timestamp;
 use tascarrel_agent::AgentEvent;
 use tascarrel_agent::CompactionReason;
 use tascarrel_agent::HttpAuthorization;
+use tascarrel_agent::McpServerConfiguration;
 use tascarrel_agent::ModelUsage;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
@@ -532,6 +533,10 @@ fn project_event(
             )),
         ),
         TasciHarnessEvent::Agent { value } => project_agent_event(value, state, output),
+        TasciHarnessEvent::Warning { code, message } => emit_event(
+            output,
+            base_event(None, None, HarnessEventPayload::Warning { code, message }),
+        ),
         TasciHarnessEvent::TurnFinished { error, cancelled } => {
             finish_turn(state, output, error, cancelled);
         }
@@ -1269,6 +1274,20 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
             .authorization_header
             .zip(output.authorization_value)
             .map(|(header, value)| HttpAuthorization::new(header, value));
+        let mcp_servers = output
+            .mcp_servers
+            .iter()
+            .map(|server| McpServerConfiguration {
+                name: server.name.to_string(),
+                display_name: server.display_name.to_string(),
+                endpoint: server.endpoint.to_string(),
+                headers: server
+                    .headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            })
+            .collect();
         Self {
             selection: ChatModelSelection {
                 model: output.selected_model,
@@ -1281,6 +1300,7 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
                 max_output_tokens: output.max_output_tokens,
                 authorization,
                 working_directory: "/workspace".to_owned(),
+                mcp_servers,
             },
             models: output.models,
         }

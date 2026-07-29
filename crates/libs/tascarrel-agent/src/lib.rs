@@ -4,6 +4,9 @@
 //! structured tool calls through a [`ToolRegistry`] between model steps.
 //! [`ModelBackend`] and [`Tool`] are asynchronous, object-safe extension
 //! points that make providers and tool sources independently composable.
+//! [`McpClient`] discovers text-based operations from configured Streamable
+//! HTTP MCP servers and adapts them to the same registry used by built-in
+//! tools.
 //!
 //! The built-in file tools share a [`FileWorkspace`]. Paged reads record both
 //! file revisions and model-visible byte ranges. Subsequent edits and writes
@@ -20,6 +23,7 @@ mod compaction;
 mod error;
 mod file_workspace;
 mod harness_protocol;
+mod mcp;
 mod model;
 mod process_runtime;
 mod prompt;
@@ -44,9 +48,19 @@ pub use error::ModelResult;
 pub use error::ToolError;
 pub use error::ToolResult;
 pub use file_workspace::FileWorkspace;
+pub use harness_protocol::McpServerConfiguration;
 pub use harness_protocol::TasciHarnessCommand;
 pub use harness_protocol::TasciHarnessConfiguration;
 pub use harness_protocol::TasciHarnessEvent;
+pub use mcp::DEFAULT_MCP_CONNECT_TIMEOUT;
+pub use mcp::DEFAULT_MCP_OUTPUT_BYTE_LIMIT;
+pub use mcp::DEFAULT_MCP_SSE_EVENT_BYTE_LIMIT;
+pub use mcp::DEFAULT_MCP_TOOL_TIMEOUT;
+pub use mcp::McpClient;
+pub use mcp::McpClientConfig;
+pub use mcp::McpError;
+pub use mcp::McpResult;
+pub use mcp::McpTool;
 pub use model::AssistantMessage;
 pub use model::FinishReason;
 pub use model::ModelBackend;

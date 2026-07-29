@@ -33,8 +33,8 @@ record UpdateWorkspaceSettingsAction {
 /// The resulting state is observed through [`ConfigChangedSubscription`].
 record UpdateWorkspaceSettingsOutput {}
 
-/// Resolves the current Tasci catalog and one selected model for a workspace
-/// harness process.
+/// Resolves the current Tasci catalog, MCP servers, and one selected model for
+/// a workspace harness process.
 ///
 /// This internal action is available only to the authenticated guest daemon
 /// belonging to the requested workspace.
@@ -45,7 +45,7 @@ record ResolveTasciModelAction {
     model?: string,
 }
 
-/// Runtime endpoint configuration and selectable Tasci catalog.
+/// Runtime endpoint, MCP server, and selectable model configuration.
 record ResolveTasciModelOutput {
     /// Workspace-local model alias selected for this session.
     selected_model: string,
@@ -67,6 +67,8 @@ record ResolveTasciModelOutput {
     default_model: string,
     /// Current secret-free Tasci models expressed as ordinary chat models.
     models: [ChatModel],
+    /// MCP servers configured for this Tasci session.
+    mcp_servers: [TasciMcpServerConfiguration],
 }
 
 // Subscriptions
@@ -154,7 +156,7 @@ record WorkspaceChatSettings {
     tasci?: WorkspaceTasciSettings,
 }
 
-/// Endpoint and model catalog used by Tasci.
+/// Endpoint, model, and MCP server catalog used by Tasci.
 record WorkspaceTasciSettings {
     /// Model alias selected for new Tasci chats.
     default_model?: string,
@@ -162,6 +164,8 @@ record WorkspaceTasciSettings {
     endpoints?: [string: WorkspaceTasciEndpoint],
     /// Selectable models keyed by stable workspace-local aliases.
     models?: [string: WorkspaceTasciModel],
+    /// Streamable HTTP MCP servers keyed by stable workspace-local aliases.
+    mcp_servers?: [string: WorkspaceTasciMcpServer],
 }
 
 /// One inference endpoint available to Tasci.
@@ -225,6 +229,29 @@ record WorkspaceTasciModel {
     parallel_tool_calls?: bool,
     /// Versioned token pricing for this endpoint and model combination, when known.
     pricing?: ChatModelPricing,
+}
+
+/// One Streamable HTTP MCP server available to Tasci.
+record WorkspaceTasciMcpServer {
+    /// Human-readable server name, or the map key when absent.
+    display_name?: string,
+    /// Absolute Streamable HTTP endpoint.
+    endpoint: string,
+    /// HTTP header templates sent with every MCP request.
+    /// Values may contain host-side secret-injection placeholders.
+    headers?: [string: string],
+}
+
+/// Resolved non-secret MCP server configuration sent to a Tasci harness.
+record TasciMcpServerConfiguration {
+    /// Stable workspace-local server name used to namespace discovered tools.
+    name: string,
+    /// Human-readable server name.
+    display_name: string,
+    /// Absolute Streamable HTTP endpoint.
+    endpoint: string,
+    /// HTTP header templates sent with every MCP request.
+    headers: [string: string],
 }
 
 /// Model preferences for the coding harnesses known to Tascarrel.

@@ -199,6 +199,7 @@ async fn resolve_tasci_model(
         )
         .collect::<Result<Vec<_>, _>>()?
         .into();
+    let mcp_servers = resolve_tasci_mcp_servers(tasci);
     Ok(api::ResolveTasciModelOutput {
         selected_model: selected_model.to_owned().into(),
         base_url: endpoint.base_url.clone(),
@@ -209,7 +210,27 @@ async fn resolve_tasci_model(
         authorization_value,
         default_model: default_model.into(),
         models: catalog,
+        mcp_servers,
     })
+}
+
+/// Converts portable MCP settings into a stable runtime catalog.
+fn resolve_tasci_mcp_servers(
+    tasci: &api::WorkspaceTasciSettings,
+) -> ArcVec<api::TasciMcpServerConfiguration> {
+    let mut servers = tasci
+        .mcp_servers
+        .iter()
+        .flat_map(|servers| servers.iter())
+        .map(|(name, server)| api::TasciMcpServerConfiguration {
+            name: name.clone(),
+            display_name: server.display_name.clone().unwrap_or_else(|| name.clone()),
+            endpoint: server.endpoint.clone(),
+            headers: server.headers.clone().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    servers.sort_by(|left, right| left.name.cmp(&right.name));
+    servers.into()
 }
 
 /// Resolves only non-secret authorization metadata for the Tasci process.

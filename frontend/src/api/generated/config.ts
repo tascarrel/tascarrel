@@ -40,8 +40,8 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type UpdateWorkspaceSettingsOutput = Record<string, never>;
 /**
- * Resolves the current Tasci catalog and one selected model for a workspace
- * harness process.
+ * Resolves the current Tasci catalog, MCP servers, and one selected model for
+ * a workspace harness process.
  * 
  * This internal action is available only to the authenticated guest daemon
  * belonging to the requested workspace.
@@ -54,7 +54,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "model"?: __sidex_types.builtins.String };
 /**
- * Runtime endpoint configuration and selectable Tasci catalog.
+ * Runtime endpoint, MCP server, and selectable model configuration.
  */
  export type ResolveTasciModelOutput = { /**
                                             * Workspace-local model alias selected for this session.
@@ -85,7 +85,10 @@ import * as __schema_workspaces from "./workspaces";
                                                         "defaultModel": __sidex_types.builtins.String, /**
                                             * Current secret-free Tasci models expressed as ordinary chat models.
                                             */
-                                                        "models": __sidex_types.builtins.Sequence<__schema_chats.ChatModel> };
+                                                        "models": __sidex_types.builtins.Sequence<__schema_chats.ChatModel>, /**
+                                            * MCP servers configured for this Tasci session.
+                                            */
+                                                        "mcpServers": __sidex_types.builtins.Sequence<TasciMcpServerConfiguration> };
 /**
  * Subscribes to configuration changes for one workspace owned by the host daemon.
  */
@@ -182,7 +185,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "tasci"?: WorkspaceTasciSettings };
 /**
- * Endpoint and model catalog used by Tasci.
+ * Endpoint, model, and MCP server catalog used by Tasci.
  */
  export type WorkspaceTasciSettings = { /**
                                             * Model alias selected for new Tasci chats.
@@ -193,7 +196,10 @@ import * as __schema_workspaces from "./workspaces";
                                                         "endpoints"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciEndpoint>, /**
                                             * Selectable models keyed by stable workspace-local aliases.
                                             */
-                                                        "models"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciModel> };
+                                                        "models"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciModel>, /**
+                                            * Streamable HTTP MCP servers keyed by stable workspace-local aliases.
+                                            */
+                                                        "mcpServers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciMcpServer> };
 /**
  * One inference endpoint available to Tasci.
  */
@@ -271,6 +277,36 @@ import * as __schema_workspaces from "./workspaces";
                                             * Versioned token pricing for this endpoint and model combination, when known.
                                             */
                                                         "pricing"?: __schema_chats.ChatModelPricing };
+/**
+ * One Streamable HTTP MCP server available to Tasci.
+ */
+ export type WorkspaceTasciMcpServer = { /**
+                                            * Human-readable server name, or the map key when absent.
+                                            */
+                                                        "displayName"?: __sidex_types.builtins.String, /**
+                                            * Absolute Streamable HTTP endpoint.
+                                            */
+                                                        "endpoint": __sidex_types.builtins.String, /**
+                                            * HTTP header templates sent with every MCP request.
+                                            * Values may contain host-side secret-injection placeholders.
+                                            */
+                                                        "headers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, __sidex_types.builtins.String> };
+/**
+ * Resolved non-secret MCP server configuration sent to a Tasci harness.
+ */
+ export type TasciMcpServerConfiguration = { /**
+                                            * Stable workspace-local server name used to namespace discovered tools.
+                                            */
+                                                        "name": __sidex_types.builtins.String, /**
+                                            * Human-readable server name.
+                                            */
+                                                        "displayName": __sidex_types.builtins.String, /**
+                                            * Absolute Streamable HTTP endpoint.
+                                            */
+                                                        "endpoint": __sidex_types.builtins.String, /**
+                                            * HTTP header templates sent with every MCP request.
+                                            */
+                                                        "headers": __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, __sidex_types.builtins.String> };
 /**
  * Model preferences for the coding harnesses known to Tascarrel.
  */

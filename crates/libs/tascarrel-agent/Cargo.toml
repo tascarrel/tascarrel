@@ -14,6 +14,12 @@ futures-util.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 reportify.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+rmcp = { workspace = true, features = [
+    "client",
+    "reqwest-tls-no-provider",
+    "transport-streamable-http-client-reqwest",
+] }
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
@@ -28,6 +34,7 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-async-rw"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 

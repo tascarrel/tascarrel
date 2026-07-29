@@ -9,6 +9,8 @@ import { SelectControl } from "../../components/ui/SelectControl.tsx";
 import { TextInput } from "../../components/ui/TextInput.tsx";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
+import { SettingsField } from "./SettingsField.tsx";
+import { TasciMcpSettings } from "./TasciMcpSettings.tsx";
 
 const NO_DEFAULT_MODEL = "__tasci_no_default_model__";
 
@@ -379,6 +381,12 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
             onChange={(value) => void updateDefaultModel(value)}
           />
         </section>
+
+        <TasciMcpSettings
+          disabled={mutationDisabled}
+          servers={tasci.mcpServers}
+          onSave={(mcpServers) => persistTasci({ ...tasci, mcpServers })}
+        />
       </div>
 
       <ConfirmDialog
@@ -492,12 +500,12 @@ function EndpointEditor({
     <form className="mt-3 rounded-xl border border-ui-border bg-surface/60 p-4" onSubmit={onSubmit}>
       <h4 className="text-xs font-semibold text-foreground">{draft.originalAlias ? "Edit API Endpoint" : "Add API Endpoint"}</h4>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <LabeledInput label="Alias">
+        <SettingsField label="Alias">
           <TextInput autoFocus className="w-full" required value={draft.alias} onChange={(event) => onChange({ ...draft, alias: event.target.value })} />
-        </LabeledInput>
-        <LabeledInput label="Display name">
+        </SettingsField>
+        <SettingsField label="Display name">
           <TextInput className="w-full" placeholder="Optional" value={draft.displayName} onChange={(event) => onChange({ ...draft, displayName: event.target.value })} />
-        </LabeledInput>
+        </SettingsField>
         <div className="sm:col-span-2">
           <SelectControl
             disabled
@@ -508,9 +516,9 @@ function EndpointEditor({
           />
         </div>
         <div className="sm:col-span-2">
-          <LabeledInput label="API base URL">
+          <SettingsField label="API base URL">
             <TextInput className="w-full font-mono" placeholder="https://api.example.com/v1" required type="url" value={draft.baseUrl} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value })} />
-          </LabeledInput>
+          </SettingsField>
         </div>
       </div>
 
@@ -526,13 +534,13 @@ function EndpointEditor({
 
       {draft.authenticated ? (
         <div className="mt-3 grid gap-3 rounded-lg border border-ui-border/70 p-3 sm:grid-cols-2">
-          <LabeledInput label="Header">
+          <SettingsField label="Header">
             <TextInput className="w-full font-mono" required value={draft.header} onChange={(event) => onChange({ ...draft, header: event.target.value })} />
-          </LabeledInput>
+          </SettingsField>
           <div>
-            <LabeledInput label="Value template">
+            <SettingsField label="Value template">
               <TextInput className="w-full font-mono" placeholder="Bearer tascarrel-secret:api-token" required value={draft.value} onChange={(event) => onChange({ ...draft, value: event.target.value })} />
-            </LabeledInput>
+            </SettingsField>
             <p className="mt-1 text-[10px] text-subtle">
               Store only a placeholder here. Configure its replacement under network secret injection; never enter the credential itself.
             </p>
@@ -564,12 +572,12 @@ function ModelEditor({
     <form className="mt-3 rounded-xl border border-ui-border bg-surface/60 p-4" onSubmit={onSubmit}>
       <h4 className="text-xs font-semibold text-foreground">{draft.originalAlias ? "Edit Model" : "Add Model"}</h4>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <LabeledInput label="Alias">
+        <SettingsField label="Alias">
           <TextInput autoFocus className="w-full" required value={draft.alias} onChange={(event) => onChange({ ...draft, alias: event.target.value })} />
-        </LabeledInput>
-        <LabeledInput label="Display name">
+        </SettingsField>
+        <SettingsField label="Display name">
           <TextInput className="w-full" placeholder="Optional" value={draft.displayName} onChange={(event) => onChange({ ...draft, displayName: event.target.value })} />
-        </LabeledInput>
+        </SettingsField>
         <SelectControl
           label="API endpoint"
           options={endpoints.map(({ alias, endpoint }) => ({
@@ -580,15 +588,15 @@ function ModelEditor({
           value={draft.endpoint}
           onChange={(endpoint) => onChange({ ...draft, endpoint })}
         />
-        <LabeledInput label="Provider model identifier">
+        <SettingsField label="Provider model identifier">
           <TextInput className="w-full font-mono" required value={draft.model} onChange={(event) => onChange({ ...draft, model: event.target.value })} />
-        </LabeledInput>
-        <LabeledInput label="Context window">
+        </SettingsField>
+        <SettingsField label="Context window">
           <TextInput className="w-full" min="1" placeholder="Optional" type="number" value={draft.contextWindow} onChange={(event) => onChange({ ...draft, contextWindow: event.target.value })} />
-        </LabeledInput>
-        <LabeledInput label="Maximum output tokens">
+        </SettingsField>
+        <SettingsField label="Maximum output tokens">
           <TextInput className="w-full" min="1" placeholder="Optional" type="number" value={draft.maxOutputTokens} onChange={(event) => onChange({ ...draft, maxOutputTokens: event.target.value })} />
-        </LabeledInput>
+        </SettingsField>
       </div>
       <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
         <label className="flex items-center gap-2 text-xs text-muted">
@@ -659,15 +667,6 @@ function SectionHeader({
       </div>
       {action}
     </div>
-  );
-}
-
-function LabeledInput({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1">
-      <span className="text-[10px] text-subtle">{label}</span>
-      {children}
-    </label>
   );
 }
 

@@ -72,6 +72,7 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
                 max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
             },
         },
     )
@@ -102,6 +103,7 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
                 max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
             }),
         },
     )
@@ -177,6 +179,7 @@ async fn harness_scenario_reports_an_empty_model_response() {
                 max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
             },
         },
     )
@@ -242,6 +245,7 @@ async fn harness_scenario_compacts_context_and_continues_from_the_checkpoint() {
                 max_output_tokens: Some(2_000),
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
             },
         },
     )

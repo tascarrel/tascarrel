@@ -20,6 +20,9 @@ use tascarrel_agent::AgentSession;
 use tascarrel_agent::BashTool;
 use tascarrel_agent::EditTool;
 use tascarrel_agent::FileWorkspace;
+use tascarrel_agent::McpClient;
+use tascarrel_agent::McpClientConfig;
+use tascarrel_agent::McpServerConfiguration;
 use tascarrel_agent::OpenAiChatBackend;
 use tascarrel_agent::ProcessRuntime;
 use tascarrel_agent::ProcessTool;
@@ -77,6 +80,7 @@ async fn run_once(prompt: String) -> TasciExecResult<()> {
         max_output_tokens: None,
         authorization: None,
         working_directory: workspace.to_string_lossy().into_owned(),
+        mcp_servers: Vec::new(),
     };
     let runtime = open_agent_runtime(&configuration).await?;
     let agent = build_agent(&configuration, &runtime)?;
@@ -133,6 +137,16 @@ async fn run_harness() -> TasciExecResult<()> {
     let mut agent = Arc::new(build_agent(&configuration, &runtime)?);
     tracing::info!(model = %configuration.model, "Tasci harness started");
     write_harness_event(&mut output, TasciHarnessEvent::Started).await?;
+    for warning in &runtime.warnings {
+        write_harness_event(
+            &mut output,
+            TasciHarnessEvent::Warning {
+                code: "mcp_server_unavailable".to_owned(),
+                message: warning.clone(),
+            },
+        )
+        .await?;
+    }
     let mut session = AgentSession::new();
 
     loop {
@@ -146,6 +160,12 @@ async fn run_harness() -> TasciExecResult<()> {
                         return Err(TasciExecError::ProtocolInput {
                             message: "Tasci cannot change working directories within a session"
                                 .to_owned(),
+                        }
+                        .report());
+                    }
+                    if configuration.mcp_servers != runtime.mcp_servers {
+                        return Err(TasciExecError::ProtocolInput {
+                            message: "Tasci cannot change MCP servers within a session".to_owned(),
                         }
                         .report());
                     }
@@ -430,10 +450,14 @@ async fn write_harness_event(
 
 struct AgentRuntime {
     working_directory: String,
+    mcp_servers: Vec<McpServerConfiguration>,
     files: Arc<FileWorkspace>,
     tools: ToolRegistry,
+    _mcp_clients: Vec<McpClient>,
+    warnings: Vec<String>,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn open_agent_runtime(
     configuration: &TasciHarnessConfiguration,
 ) -> TasciExecResult<AgentRuntime> {
@@ -448,11 +472,68 @@ async fn open_agent_runtime(
             .await
             .map_err(|error| error.escalate(TasciExecError::ProcessRuntime))?,
     );
-    let tools = tools(processes)?;
+    let mut tools = tools(processes)?;
+    let mut mcp_clients = Vec::new();
+    let mut warnings = Vec::new();
+    for server in &configuration.mcp_servers {
+        let client_config = match McpClientConfig::new(
+            server.name.clone(),
+            server.display_name.clone(),
+            &server.endpoint,
+            server.headers.clone(),
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = error.error().to_string();
+                tracing::warn!(
+                    server = %server.name,
+                    %error,
+                    "failed to configure MCP server"
+                );
+                warnings.push(format!(
+                    "{} MCP tools are unavailable: {message}",
+                    server.display_name
+                ));
+                continue;
+            }
+        };
+        match McpClient::connect(client_config).await {
+            Ok(client) => {
+                let discovered_tools = client.tools();
+                let tool_count = discovered_tools.len();
+                for tool in discovered_tools {
+                    tools
+                        .register(tool)
+                        .map_err(|error| error.escalate(TasciExecError::Tools))?;
+                }
+                tracing::info!(
+                    server = %server.name,
+                    tools = tool_count,
+                    "MCP server connected"
+                );
+                mcp_clients.push(client);
+            }
+            Err(error) => {
+                let message = error.error().to_string();
+                tracing::warn!(
+                    server = %server.name,
+                    %error,
+                    "failed to connect MCP server"
+                );
+                warnings.push(format!(
+                    "{} MCP tools are unavailable: {message}",
+                    server.display_name
+                ));
+            }
+        }
+    }
     Ok(AgentRuntime {
         working_directory: configuration.working_directory.clone(),
+        mcp_servers: configuration.mcp_servers.clone(),
         files,
         tools,
+        _mcp_clients: mcp_clients,
+        warnings,
     })
 }
 

@@ -158,6 +158,14 @@ pub enum ToolError {
         /// Safe process diagnostic.
         message: String,
     },
+    /// A remote MCP tool could not complete its operation.
+    #[error("MCP tool {tool} failed: {message}")]
+    Mcp {
+        /// Model-visible MCP tool name.
+        tool: String,
+        /// Secret-safe remote or transport diagnostic.
+        message: String,
+    },
     /// A filesystem operation failed.
     #[error("failed to {action}")]
     Io {
