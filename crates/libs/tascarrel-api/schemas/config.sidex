@@ -152,14 +152,22 @@ record WorkspaceChatSettings {
     default_harness?: ChatHarnessKind,
     /// Per-harness model preferences.
     harnesses?: WorkspaceChatHarnessSettings,
-    /// Tasci endpoint and model catalog.
+    /// Tasci model preferences and endpoint, model, and MCP server catalogs.
     tasci?: WorkspaceTasciSettings,
 }
 
-/// Endpoint, model, and MCP server catalog used by Tasci.
+/// Endpoint, model, MCP server, and model-presentation settings used by Tasci.
 record WorkspaceTasciSettings {
     /// Model alias selected for new Tasci chats.
     default_model?: string,
+    /// Model aliases placed first, in the specified order.
+    /// Configured models omitted from this list retain their catalog-defined relative order.
+    model_order?: [string],
+    /// Model aliases hidden from ordinary selection controls.
+    /// A hidden model remains selectable when it is already used by an existing chat or draft.
+    hidden_models?: [string],
+    /// Model aliases shown before non-favourites in ordinary selection controls.
+    favorite_models?: [string],
     /// Inference endpoints keyed by stable workspace-local aliases.
     endpoints?: [string: WorkspaceTasciEndpoint],
     /// Selectable models keyed by stable workspace-local aliases.

@@ -602,8 +602,8 @@ mod tests {
         assert!(!message.contains("secret-value"));
     }
 
-    /// Verifies a complete Tasci catalog including MCP headers is loaded and
-    /// later invalid model and header settings retain that catalog.
+    /// Verifies a complete Tasci catalog and its model preferences are loaded
+    /// and later invalid model and header settings retain that catalog.
     #[test]
     fn snapshot_validates_tasci_endpoint_and_model_references() {
         let temporary = tempdir().unwrap();
@@ -624,6 +624,12 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(tasci.default_model.as_deref(), Some("qwen"));
+        assert_eq!(
+            tasci.model_order.as_ref().unwrap().as_ref(),
+            ["qwen", "small"]
+        );
+        assert_eq!(tasci.hidden_models.as_ref().unwrap().as_ref(), ["small"]);
+        assert_eq!(tasci.favorite_models.as_ref().unwrap().as_ref(), ["qwen"]);
         assert_eq!(
             tasci
                 .models
@@ -689,6 +695,9 @@ mod tests {
             "chat": {
                 "tasci": {
                     "defaultModel": "qwen",
+                    "modelOrder": ["qwen", "small"],
+                    "hiddenModels": ["small"],
+                    "favoriteModels": ["qwen"],
                     "endpoints": {
                         "local": {
                             "displayName": "Local llama.cpp",

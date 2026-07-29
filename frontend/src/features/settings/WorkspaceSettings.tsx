@@ -23,6 +23,7 @@ import {
   chatModelPreferences,
   preferredDefaultModelSelection,
   visibleChatModels,
+  withChatModelPreferences,
 } from "../chat/model/modelPreferences.ts";
 import { useChatHarnesses } from "../chat/state.ts";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
@@ -225,7 +226,7 @@ function HarnessSettings({ workspace }: { workspace: workspaces.WorkspaceName })
   const updatePreferences = (
     harness: chats.ChatHarnessKind,
     preferences: config.WorkspaceChatModelPreferences,
-  ) => persistSettings(withHarnessPreferences(settings, harness, preferences));
+  ) => persistSettings(withChatModelPreferences(settings, harness, preferences));
 
   const accountActions = {
     onInstall: async (harness: chats.ChatHarnessKind) => {
@@ -525,21 +526,4 @@ function ConnectedHarnessSettings({
       </div>
     </section>
   );
-}
-
-function withHarnessPreferences(
-  settings: config.WorkspaceSettings,
-  harness: chats.ChatHarnessKind,
-  preferences: config.WorkspaceChatModelPreferences,
-): config.WorkspaceSettings {
-  const harnesses = settings.chat?.harnesses ?? {};
-  return {
-    ...settings,
-    chat: {
-      ...(settings.chat ?? {}),
-      harnesses: harness === "Codex"
-        ? { ...harnesses, codex: preferences }
-        : { ...harnesses, claudeCode: preferences },
-    },
-  };
 }

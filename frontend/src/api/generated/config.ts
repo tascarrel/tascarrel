@@ -181,16 +181,27 @@ import * as __schema_workspaces from "./workspaces";
                                             * Per-harness model preferences.
                                             */
                                                         "harnesses"?: WorkspaceChatHarnessSettings, /**
-                                            * Tasci endpoint and model catalog.
+                                            * Tasci model preferences and endpoint, model, and MCP server catalogs.
                                             */
                                                         "tasci"?: WorkspaceTasciSettings };
 /**
- * Endpoint, model, and MCP server catalog used by Tasci.
+ * Endpoint, model, MCP server, and model-presentation settings used by Tasci.
  */
  export type WorkspaceTasciSettings = { /**
                                             * Model alias selected for new Tasci chats.
                                             */
                                                         "defaultModel"?: __sidex_types.builtins.String, /**
+                                            * Model aliases placed first, in the specified order.
+                                            * Configured models omitted from this list retain their catalog-defined relative order.
+                                            */
+                                                        "modelOrder"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Model aliases hidden from ordinary selection controls.
+                                            * A hidden model remains selectable when it is already used by an existing chat or draft.
+                                            */
+                                                        "hiddenModels"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Model aliases shown before non-favourites in ordinary selection controls.
+                                            */
+                                                        "favoriteModels"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
                                             * Inference endpoints keyed by stable workspace-local aliases.
                                             */
                                                         "endpoints"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciEndpoint>, /**

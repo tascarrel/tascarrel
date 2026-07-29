@@ -6,18 +6,57 @@ export function chatModelPreferences(
   harness: chats.ChatHarnessKind,
 ): config.WorkspaceChatModelPreferences | undefined {
   if (harness === "Tasci") {
-    const defaultModel = settings?.chat?.tasci?.defaultModel;
-    return defaultModel
+    const tasci = settings?.chat?.tasci;
+    return tasci
       ? {
-        defaultModel: {
-          model: defaultModel,
-          options: [],
-        },
+        defaultModel: tasci.defaultModel
+          ? {
+            model: tasci.defaultModel,
+            options: [],
+          }
+          : undefined,
+        modelOrder: tasci.modelOrder,
+        hiddenModels: tasci.hiddenModels,
+        favoriteModels: tasci.favoriteModels,
       }
       : undefined;
   }
   const harnesses = settings?.chat?.harnesses;
   return harness === "Codex" ? harnesses?.codex : harnesses?.claudeCode;
+}
+
+export function withChatModelPreferences(
+  settings: config.WorkspaceSettings,
+  harness: chats.ChatHarnessKind,
+  preferences: config.WorkspaceChatModelPreferences,
+): config.WorkspaceSettings {
+  const chat = settings.chat ?? {};
+  if (harness === "Tasci") {
+    return {
+      ...settings,
+      chat: {
+        ...chat,
+        tasci: {
+          ...(chat.tasci ?? {}),
+          defaultModel: preferences.defaultModel?.model,
+          modelOrder: preferences.modelOrder,
+          hiddenModels: preferences.hiddenModels,
+          favoriteModels: preferences.favoriteModels,
+        },
+      },
+    };
+  }
+
+  const harnesses = chat.harnesses ?? {};
+  return {
+    ...settings,
+    chat: {
+      ...chat,
+      harnesses: harness === "Codex"
+        ? { ...harnesses, codex: preferences }
+        : { ...harnesses, claudeCode: preferences },
+    },
+  };
 }
 
 export function visibleChatModels(
