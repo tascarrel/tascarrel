@@ -66,6 +66,7 @@ use crate::services::auth::HTTP_ROUTE_COOKIE_NAME;
 use crate::services::secrets::SecretsService;
 use crate::services::workspaces::WorkspaceNetworkRequest;
 use crate::services::workspaces::WorkspaceNetworkRequests;
+use crate::services::workspaces::WorkspaceTcpNetworkRequest;
 
 const DEFAULT_HOSTNAME_SUFFIX: &str = "tascarrel.localhost";
 const HTTP_ROUTE_TERMINAL_HOSTNAME: &str = "localhost";
@@ -473,13 +474,19 @@ impl NetworkService {
                                 service.serve_dns_channel(&workspace, channel).await
                             }
                             WorkspaceNetworkRequest::Tcp(request) => {
+                                let WorkspaceTcpNetworkRequest {
+                                    workspace,
+                                    policy,
+                                    authority,
+                                    channel,
+                                } = *request;
                                 service
                                     .serve_tcp_channel(
-                                        &request.workspace,
-                                        &request.policy,
-                                        request.authority,
+                                        &workspace,
+                                        &policy,
+                                        authority,
                                         &secrets,
-                                        request.channel,
+                                        channel,
                                     )
                                     .await
                             }

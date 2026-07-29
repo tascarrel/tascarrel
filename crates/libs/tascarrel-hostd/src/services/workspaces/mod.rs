@@ -17,6 +17,7 @@ pub(crate) use mux::WorkspaceEnvironmentRequest;
 pub(crate) use mux::WorkspaceEnvironmentRequests;
 pub(crate) use mux::WorkspaceNetworkRequest;
 pub(crate) use mux::WorkspaceNetworkRequests;
+pub(crate) use mux::WorkspaceTcpNetworkRequest;
 pub use service::ExternalWorkspaceConfig;
 pub use service::ManagedWorkspaceConfig;
 pub use service::WorkspaceListSubscription;

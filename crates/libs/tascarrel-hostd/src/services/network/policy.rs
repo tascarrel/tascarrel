@@ -1,14 +1,34 @@
 //! Workspace network admission and HTTP secret-injection policy.
+//!
+//! [`NetworkPolicy`] validates one immutable policy snapshot.
+//! [`NetworkPolicySource`] observes a running workspace's `config.toml` and
+//! publishes last-known-good snapshots for new TCP flows.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use hyper::Method;
+use notify::Event;
+use notify::EventKind;
+use notify::RecommendedWatcher;
+use notify::RecursiveMode;
+use notify::Watcher as _;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_api::types::config as config_api;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
+use tokio::task::AbortHandle;
+use tokio::time::Instant;
+use tokio::time::sleep_until;
+use tracing::warn;
 
 use crate::services::config::DEFAULT_MAX_CONFIG_BYTES;
 use crate::services::config::load_config_file;
@@ -18,14 +38,8 @@ pub(crate) const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_SECRET_RULES: usize = 64;
 const MAX_HOST_PORTS: usize = 64;
 const MAX_POLICY_PORTS: usize = 256;
-
-#[derive(Debug, Error)]
-pub(crate) enum NetworkPolicyError {
-    #[error("workspace network policy is invalid: {0}")]
-    Invalid(String),
-    #[error("failed to inspect host network interfaces: {0}")]
-    HostInterfaces(String),
-}
+const POLICY_WATCH_CHANNEL_CAPACITY: usize = 64;
+const POLICY_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct NetworkPolicy {
@@ -250,12 +264,6 @@ impl NetworkPolicy {
             || !self.deny_hosts.is_empty()
     }
 
-    /// Returns whether HTTPS secret injection needs a workspace CA.
-    #[must_use]
-    pub fn requires_https_authority(&self) -> bool {
-        !self.secret_injection.is_empty()
-    }
-
     /// Returns whether HTTPS requests for a host require interception.
     #[must_use]
     pub(crate) fn injects_secret_for_host(&self, host: &str) -> bool {
@@ -302,6 +310,188 @@ impl NetworkPolicy {
             &host_addresses,
         ))
     }
+}
+
+/// Live, last-known-good network policy loaded from workspace configuration.
+pub(crate) struct NetworkPolicySource {
+    state: watch::Sender<Arc<NetworkPolicy>>,
+    initial_error: Option<String>,
+    _watcher: RecommendedWatcher,
+    task: AbortHandle,
+}
+
+impl NetworkPolicySource {
+    /// Loads the initial policy and starts observing its `config.toml`.
+    ///
+    /// An invalid initial policy is represented by [`NetworkPolicy::deny_all`]
+    /// and exposed through [`Self::initial_error`]. Watcher initialization
+    /// failures prevent the workspace runtime from starting.
+    #[tracing::instrument(level = "debug", skip_all, fields(path = %path.display()))]
+    pub(crate) fn open(path: PathBuf) -> Result<Self, Report<NetworkPolicySourceError>> {
+        let parent = path.parent().ok_or_else(|| {
+            NetworkPolicySourceError::InvalidPath
+                .report()
+                .message("workspace network policy path has no parent directory")
+        })?;
+        let (initial, initial_error) = match NetworkPolicy::load(&path) {
+            Ok(policy) => (policy, None),
+            Err(error) => (NetworkPolicy::deny_all(), Some(error.to_string())),
+        };
+        let (state, _) = watch::channel(Arc::new(initial));
+        let (events, event_receiver) = mpsc::channel(POLICY_WATCH_CHANNEL_CAPACITY);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let callback_path = path.clone();
+        let callback_overflowed = Arc::clone(&overflowed);
+        let mut watcher = notify::recommended_watcher(move |message| {
+            let message = match message {
+                Ok(event) if policy_event_matches(&event, &callback_path) => Ok(event),
+                Ok(_) => return,
+                Err(error) => Err(error),
+            };
+            if events.try_send(message).is_err() {
+                callback_overflowed.store(true, Ordering::Release);
+            }
+        })
+        .map_err(|error| {
+            NetworkPolicySourceError::Watch
+                .report()
+                .message(error.to_string())
+        })?;
+        watcher
+            .watch(parent, RecursiveMode::NonRecursive)
+            .map_err(|error| {
+                NetworkPolicySourceError::Watch
+                    .report()
+                    .message(error.to_string())
+            })?;
+        let task = tokio::spawn(run_policy_watcher(
+            path,
+            event_receiver,
+            overflowed,
+            state.clone(),
+        ));
+        let task_abort = task.abort_handle();
+        tokio::spawn(async move {
+            match task.await {
+                Ok(()) => warn!("network policy watcher task stopped unexpectedly"),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => warn!(%error, "network policy watcher task failed"),
+            }
+        });
+        Ok(Self {
+            state,
+            initial_error,
+            _watcher: watcher,
+            task: task_abort,
+        })
+    }
+
+    /// Returns a diagnostic for an invalid initial policy.
+    pub(crate) fn initial_error(&self) -> Option<&str> {
+        self.initial_error.as_deref()
+    }
+
+    /// Returns the current immutable policy snapshot.
+    pub(crate) fn current(&self) -> Arc<NetworkPolicy> {
+        self.state.borrow().clone()
+    }
+}
+
+impl std::fmt::Debug for NetworkPolicySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NetworkPolicySource")
+            .field("initial_error", &self.initial_error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for NetworkPolicySource {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Caller-relevant policy evaluation failures.
+#[derive(Debug, Error)]
+pub(crate) enum NetworkPolicyError {
+    #[error("workspace network policy is invalid: {0}")]
+    Invalid(String),
+    #[error("failed to inspect host network interfaces: {0}")]
+    HostInterfaces(String),
+}
+
+/// Caller-relevant live policy initialization failures.
+#[derive(Debug, Error)]
+pub(crate) enum NetworkPolicySourceError {
+    #[error("workspace network policy path is invalid")]
+    InvalidPath,
+    #[error("failed to watch workspace network policy")]
+    Watch,
+}
+
+/// Debounces relevant filesystem events and publishes the resulting policy.
+async fn run_policy_watcher(
+    path: PathBuf,
+    mut events: mpsc::Receiver<Result<Event, notify::Error>>,
+    overflowed: Arc<AtomicBool>,
+    state: watch::Sender<Arc<NetworkPolicy>>,
+) {
+    while let Some(first) = events.recv().await {
+        let mut watcher_failed = observe_policy_watch_message(first);
+        watcher_failed |= overflowed.swap(false, Ordering::AcqRel);
+        let mut deadline = Instant::now() + POLICY_RELOAD_DEBOUNCE;
+        loop {
+            tokio::select! {
+                () = sleep_until(deadline) => break,
+                message = events.recv() => {
+                    let Some(message) = message else {
+                        return;
+                    };
+                    watcher_failed |= observe_policy_watch_message(message);
+                    watcher_failed |= overflowed.swap(false, Ordering::AcqRel);
+                    deadline = Instant::now() + POLICY_RELOAD_DEBOUNCE;
+                }
+            }
+        }
+        let policy = if watcher_failed {
+            warn!(
+                path = %path.display(),
+                "network policy watcher failed; retaining last valid policy"
+            );
+            state.borrow().clone()
+        } else {
+            match NetworkPolicy::load(&path) {
+                Ok(policy) => Arc::new(policy),
+                Err(error) => {
+                    let current = state.borrow().clone();
+                    warn!(
+                        path = %path.display(),
+                        %error,
+                        "workspace network policy is invalid; retaining last valid policy"
+                    );
+                    current
+                }
+            }
+        };
+        state.send_replace(policy);
+    }
+}
+
+/// Records a native watcher failure without retaining its implementation error.
+fn observe_policy_watch_message(message: Result<Event, notify::Error>) -> bool {
+    match message {
+        Ok(_) => false,
+        Err(error) => {
+            warn!(%error, "network policy filesystem watcher reported an error");
+            true
+        }
+    }
+}
+
+/// Returns whether a native event may have changed the observed policy file.
+fn policy_event_matches(event: &Event, path: &Path) -> bool {
+    !matches!(event.kind, EventKind::Access(_)) && event.paths.iter().any(|event| event == path)
 }
 
 pub(crate) fn forbidden_address(
@@ -497,6 +687,8 @@ pub(crate) fn forbidden_secret_header(name: &str) -> bool {
 mod tests {
     use std::fs;
 
+    use tokio::time::timeout;
+
     use super::*;
 
     /// Verifies exact, wildcard, and deny host rules use normalized subdomain
@@ -604,5 +796,98 @@ mod tests {
 
         fs::write(&config, format!("{prefix}methods = ['NOT VALID']\n")).unwrap();
         assert!(NetworkPolicy::load(&config).is_err());
+    }
+
+    /// Verifies every host-enforced network setting is replaced for new flows
+    /// while a previously acquired flow snapshot remains unchanged.
+    #[tokio::test]
+    async fn live_policy_reloads_all_network_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        fs::write(&config, "[network]\nallow-ports = [80]\n").unwrap();
+        let source = NetworkPolicySource::open(config.clone()).unwrap();
+        let mut changed = source.state.subscribe();
+        let initial = source.current();
+        assert_eq!(initial.allow_ports, [80]);
+
+        fs::write(
+            &config,
+            "[secrets.providers.project]\nkind = 'sops'\n\
+             [network]\nhost-ports = ['5432:15432']\ndefault = 'deny'\n\
+             allow-local = true\nallow-addresses = ['203.0.113.1']\n\
+             deny-addresses = ['198.51.100.1']\nallow-hosts = ['api.example']\n\
+             deny-hosts = ['blocked.example']\nallow-ports = [8443]\n\
+             http-ports = [8080]\nhttps-ports = [8443]\n\
+             [[network.secret-injection]]\nhost = 'api.example'\nmethods = ['POST']\n\
+             header = 'authorization'\nplaceholder = 'replace-me'\n\
+             secret = 'project.API_TOKEN'\n",
+        )
+        .unwrap();
+
+        timeout(Duration::from_secs(5), changed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let policy = source.current();
+        assert_eq!(
+            policy.host_ports,
+            [HostPortMapping {
+                host_port: 5432,
+                pod_port: 15432,
+            }]
+        );
+        assert!(policy.default_deny);
+        assert!(policy.allow_local);
+        assert_eq!(
+            policy.allow_addresses,
+            ["203.0.113.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            policy.deny_addresses,
+            ["198.51.100.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(policy.allow_hosts, ["api.example"]);
+        assert_eq!(policy.deny_hosts, ["blocked.example"]);
+        assert_eq!(policy.allow_ports, [8443]);
+        assert_eq!(policy.http_ports, [8080]);
+        assert_eq!(policy.https_ports, [8443]);
+        assert_eq!(policy.secret_injection.len(), 1);
+        assert_eq!(policy.secret_injection[0].methods, [Method::POST]);
+        assert_eq!(
+            policy.secret_injection[0].header.as_deref(),
+            Some("authorization")
+        );
+        assert_eq!(policy.secret_injection[0].placeholder, "replace-me");
+        assert_eq!(initial.allow_ports, [80]);
+        assert!(initial.secret_injection.is_empty());
+    }
+
+    /// Verifies an invalid edit retains the last valid policy and a later valid
+    /// edit resumes policy updates.
+    #[tokio::test]
+    async fn live_policy_retains_last_valid_snapshot_after_invalid_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        fs::write(&config, "[network]\nallow-ports = [80]\n").unwrap();
+        let source = NetworkPolicySource::open(config.clone()).unwrap();
+        let mut changed = source.state.subscribe();
+
+        fs::write(&config, "[network\nallow-ports = [443]\n").unwrap();
+
+        timeout(Duration::from_secs(5), changed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let policy = source.current();
+        assert!(!policy.default_deny);
+        assert_eq!(policy.allow_ports, [80]);
+        assert!(policy.secret_injection.is_empty());
+
+        fs::write(&config, "[network]\nallow-ports = [443]\n").unwrap();
+        timeout(Duration::from_secs(5), changed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.current().allow_ports, [443]);
     }
 }

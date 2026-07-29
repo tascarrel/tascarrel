@@ -11,6 +11,7 @@ mod service;
 mod transport;
 
 pub(crate) use policy::NetworkPolicy;
+pub(crate) use policy::NetworkPolicySource;
 pub use service::DnsRequestsSubscription;
 pub use service::HttpRequestsSubscription;
 pub use service::HttpRouteListSubscription;

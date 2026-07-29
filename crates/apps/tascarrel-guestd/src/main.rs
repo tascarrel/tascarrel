@@ -970,16 +970,12 @@ async fn main() -> Result<()> {
         );
     }
     shares.push(PodShare::code_server(code_server)?);
-    let ca_path = if workspace.network.secret_injection.is_empty() {
-        None
-    } else {
-        // Pod recovery happens before the virtio-serial transport is served.
-        // Keep the public certificate in durable workspace state so restored
-        // pods never depend on a transport that guestd has not opened yet.
-        let directory = storage.network().public().to_owned();
-        shares.push(PodShare::workspace_authority(&directory)?);
-        Some(storage.network().authority_certificate())
-    };
+    // Pod recovery happens before the virtio-serial transport is served. Keep
+    // the public certificate in durable workspace state so restored pods never
+    // depend on a transport that guestd has not opened yet.
+    let directory = storage.network().public().to_owned();
+    shares.push(PodShare::workspace_authority(&directory)?);
+    let ca_path = Some(storage.network().authority_certificate());
     let network = NetworkManager::new(&args.ip, &args.nsenter).context("configure pod network")?;
     let workspace_overlay = Some(
         workspace_config_path

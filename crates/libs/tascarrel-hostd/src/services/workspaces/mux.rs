@@ -34,6 +34,7 @@ use tracing::warn;
 use crate::HostRepositoryManager;
 use crate::WorkspaceAuthority;
 use crate::services::network::NetworkPolicy;
+use crate::services::network::NetworkPolicySource;
 
 /// Sends accepted network channels to the host network service.
 pub(crate) type WorkspaceNetworkRequestSender = mpsc::Sender<WorkspaceNetworkRequest>;
@@ -67,17 +68,17 @@ pub(crate) enum WorkspaceNetworkRequest {
 #[derive(Debug)]
 pub(crate) struct WorkspaceTcpNetworkRequest {
     pub workspace: WorkspaceName,
-    pub policy: NetworkPolicy,
+    pub policy: Arc<NetworkPolicy>,
     pub authority: Option<Arc<WorkspaceAuthority>>,
     pub channel: Channel,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct WorkspaceMuxHostConfig {
     pub workspace: WorkspaceName,
     pub network_requests: WorkspaceNetworkRequestSender,
     pub environment_requests: WorkspaceEnvironmentRequestSender,
-    pub policy: NetworkPolicy,
+    pub policy: NetworkPolicySource,
     pub authority: Option<Arc<WorkspaceAuthority>>,
     pub repositories: Option<Arc<HostRepositoryManager>>,
     pub workspace_root: PathBuf,
@@ -169,7 +170,7 @@ impl WorkspaceMuxHost {
             permit.send(WorkspaceNetworkRequest::Tcp(Box::new(
                 WorkspaceTcpNetworkRequest {
                     workspace: self.config.workspace.clone(),
-                    policy: self.config.policy.clone(),
+                    policy: self.config.policy.current(),
                     authority: self.config.authority.clone(),
                     channel,
                 },

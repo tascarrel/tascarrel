@@ -180,9 +180,9 @@
 //! and can contain authentication material.
 //!
 //! The `network/public` namespace contains only public material derived from
-//! host-owned network policy. The optional `ca.pem` file exists when HTTPS
-//! secret injection needs a workspace authority; the corresponding private
-//! key never enters the guest.
+//! host-owned network policy. Its `ca.pem` file lets running pods accept HTTPS
+//! secret-injection rules added through a policy reload; the corresponding
+//! private key never enters the guest.
 //!
 //! The `scratch/image-builds` namespace is persistent because `BuildKit` state,
 //! OCI archives, and unpacking scratch can exceed the tmpfs runtime budget. Its

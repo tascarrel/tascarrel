@@ -88,7 +88,7 @@ use crate::control_plane::HostControlService;
 use crate::services::config::DEFAULT_MAX_CONFIG_BYTES;
 use crate::services::config::decode_config;
 use crate::services::config::load_config_file;
-use crate::services::network::NetworkPolicy;
+use crate::services::network::NetworkPolicySource;
 
 const WORKSPACE_QUEUE_CAPACITY: usize = 64;
 const ERROR_DETAIL_LIMIT: usize = 2048;
@@ -2534,12 +2534,24 @@ async fn finish_workspace_start(
     let (policy, authority) = match network_policy(workspace, service) {
         Ok(policy) => policy,
         Err(error) => {
-            diagnostics.push(bounded_detail(&format!(
-                "workspace network configuration is invalid: {error:#}"
-            )));
-            (NetworkPolicy::deny_all(), None)
+            let error = StartupError::Failed(format!(
+                "failed to initialize workspace network policy: {error:#}"
+            ));
+            return Err(finish_failed_workspace_start(
+                workspace,
+                error,
+                vm.take(),
+                vm_log_task.take(),
+                shutdown,
+            )
+            .await);
         }
     };
+    if let Some(error) = policy.initial_error() {
+        diagnostics.push(bounded_detail(&format!(
+            "workspace network configuration is invalid: {error}"
+        )));
+    }
     let repositories = match repository_manager(workspace, service) {
         Ok(repositories) => repositories,
         Err(error) => {
@@ -2760,19 +2772,14 @@ fn workspace_usb_enabled(path: &Path) -> Result<bool> {
 fn network_policy(
     workspace: &WorkspaceName,
     service: &WorkspaceServiceConfig,
-) -> Result<(NetworkPolicy, Option<Arc<WorkspaceAuthority>>)> {
-    let policy = NetworkPolicy::load(&workspace_root(workspace, service).join("config.toml"))
+) -> Result<(NetworkPolicySource, Option<Arc<WorkspaceAuthority>>)> {
+    let policy = NetworkPolicySource::open(workspace_root(workspace, service).join("config.toml"))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let authority = policy
-        .requires_https_authority()
-        .then(|| {
-            WorkspaceAuthority::load_or_create(
-                &workspace_state(workspace, service).join("https-ca"),
-                workspace.as_str(),
-            )
-        })
-        .transpose()?;
-    Ok((policy, authority))
+    let authority = WorkspaceAuthority::load_or_create(
+        &workspace_state(workspace, service).join("https-ca"),
+        workspace.as_str(),
+    )?;
+    Ok((policy, Some(authority)))
 }
 
 fn repository_manager(

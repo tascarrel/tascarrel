@@ -319,6 +319,15 @@ question or requested TCP destination to `hostd`. `hostd` applies the
 workspace's hostname, address, port, and local-network policy before resolving
 the name or opening an external socket.
 
+The host daemon watches each running workspace's `config.toml` and reloads
+every `network` setting after a short debounce period. Each new TCP flow uses
+the latest coherent policy snapshot, while active flows continue under the
+snapshot with which they started. An invalid edit retains the last valid
+snapshot; a workspace whose initial configuration is invalid uses deny-all
+until it becomes valid. Every pod trusts its workspace's public HTTPS authority
+from creation, which allows secret-injection rules to be added while the
+workspace VM is running; the authority's private key remains on the host.
+
 On configured HTTPS ports, `hostd` admits connections using the normalized TLS
 SNI and resolves that server name itself before relaying TLS unchanged. It
 terminates TLS only when an HTTPS secret-injection rule matches the SNI. In that
