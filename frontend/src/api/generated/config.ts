@@ -102,7 +102,7 @@ import * as __schema_workspaces from "./workspaces";
  * workspace.
  */
  export type ConfigChangedEvent = { /**
-                                            * Random identity assigned whenever hostd reads this workspace's configuration inputs.
+                                            * Random identity assigned whenever this workspace's observed configuration state changes.
                                             */
                                                         "configInstanceId": ConfigInstanceId, /**
                                             * Most recently parsed contents of `config.toml`, when a valid value has been observed.
@@ -128,7 +128,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "modifiedAt": __schema_common.Timestamp };
 /**
- * Identifies one host read of a workspace's configuration inputs.
+ * Identifies one observed state of a workspace's configuration inputs.
  * 
  * Clients include this value when updating settings so hostd can reject edits based on stale
  * configuration state.

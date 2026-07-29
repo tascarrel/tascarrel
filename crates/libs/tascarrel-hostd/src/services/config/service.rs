@@ -72,8 +72,8 @@ impl ConfigService {
         Ok(Self::start(config, events))
     }
 
-    /// Reads and publishes the current configuration and settings state for one
-    /// workspace.
+    /// Reads the current configuration and settings state for one workspace,
+    /// publishing it when the observed state changed.
     ///
     /// Failed `config.toml` and `settings.json` loads are represented by their
     /// corresponding error fields. Each input independently retains its last
@@ -275,8 +275,8 @@ struct ConfigServiceInner {
 }
 
 impl ConfigServiceInner {
-    /// Loads and publishes one workspace's latest configuration and settings
-    /// state.
+    /// Loads one workspace's latest configuration and settings state,
+    /// publishing it when the observed state changed.
     async fn refresh(
         &self,
         workspace_name: WorkspaceName,
@@ -327,7 +327,7 @@ impl ConfigServiceInner {
         Ok(api::UpdateWorkspaceSettingsOutput {})
     }
 
-    /// Loads and publishes state while the caller holds `refresh_lock`.
+    /// Loads state and publishes changes while the caller holds `refresh_lock`.
     async fn refresh_locked(
         &self,
         workspace_name: WorkspaceName,
@@ -350,6 +350,11 @@ impl ConfigServiceInner {
                         .message("failed to inspect workspace configuration inputs")
                 })?;
         let event = Arc::new(snapshot.into_event(previous.as_deref()));
+        if let Some(previous) = previous
+            && same_configuration_state(&previous, &event)
+        {
+            return Ok(previous);
+        }
         let mut states = self.states.lock().await;
         if let Some(state) = states.get(&workspace_name) {
             state.send_replace(Arc::clone(&event));
@@ -370,6 +375,20 @@ impl Drop for ConfigServiceInner {
     fn drop(&mut self) {
         self.shutdown.send_replace(true);
     }
+}
+
+/// Compares the observable configuration state without its optimistic-lock ID.
+fn same_configuration_state(
+    left: &api::ConfigChangedEvent,
+    right: &api::ConfigChangedEvent,
+) -> bool {
+    left.config == right.config
+        && left.last_config_error == right.last_config_error
+        && left.settings == right.settings
+        && left.last_settings_error == right.last_settings_error
+        && left.agents_modified_at == right.agents_modified_at
+        && left.image_modified_at == right.image_modified_at
+        && left.modified_at == right.modified_at
 }
 
 /// Coalesces native notifications and refreshes affected tracked workspaces.
@@ -663,10 +682,10 @@ mod tests {
         assert_eq!(changed.config.unwrap().vm.unwrap().cores, Some(3));
     }
 
-    /// Verifies the settings action durably replaces the host file and
-    /// publishes the typed state before returning.
+    /// Verifies a no-op reread preserves the update token and the settings
+    /// action publishes the durably written document before returning.
     #[tokio::test]
-    async fn update_settings_publishes_the_written_document() {
+    async fn update_settings_survives_a_no_op_reread() {
         let temporary = tempdir().unwrap();
         let workspace = workspace(temporary.path(), "");
         let service = ConfigService::open(ConfigServiceConfig::new(temporary.path())).unwrap();
@@ -680,6 +699,14 @@ mod tests {
         let initial = subscription.recv().await.unwrap();
         assert!(initial.settings.is_none());
         let settings = api::WorkspaceSettings { chat: None };
+
+        let reread = service.read(&workspace_name).await.unwrap();
+        assert_eq!(reread.config_instance_id, initial.config_instance_id);
+        assert!(
+            timeout(Duration::from_millis(20), subscription.recv())
+                .await
+                .is_err()
+        );
 
         service
             .update_settings(api::UpdateWorkspaceSettingsAction {

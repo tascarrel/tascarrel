@@ -82,7 +82,7 @@ record ConfigChangedSubscription {
 /// Current configuration, settings, identity, and input modification times for the selected
 /// workspace.
 record ConfigChangedEvent {
-    /// Random identity assigned whenever hostd reads this workspace's configuration inputs.
+    /// Random identity assigned whenever this workspace's observed configuration state changes.
     config_instance_id: ConfigInstanceId,
     /// Most recently parsed contents of `config.toml`, when a valid value has been observed.
     config?: WorkspaceConfig,
@@ -103,7 +103,7 @@ record ConfigChangedEvent {
 
 // Domain Types
 
-/// Identifies one host read of a workspace's configuration inputs.
+/// Identifies one observed state of a workspace's configuration inputs.
 ///
 /// Clients include this value when updating settings so hostd can reject edits based on stale
 /// configuration state.
