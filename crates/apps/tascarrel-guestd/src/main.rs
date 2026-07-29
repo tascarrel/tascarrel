@@ -1000,7 +1000,6 @@ async fn main() -> Result<()> {
             storage.repositories(),
             args.runtime_dir.join("repos"),
             args.git.clone(),
-            args.btrfs.clone(),
             args.cp.clone(),
             workspace_overlay,
         )?;

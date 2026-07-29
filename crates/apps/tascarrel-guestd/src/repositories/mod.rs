@@ -122,7 +122,6 @@ pub struct GuestRepositoryManager {
     root: PathBuf,
     runtime: PathBuf,
     git: PathBuf,
-    btrfs: PathBuf,
     cp: PathBuf,
     overlay: Option<PathBuf>,
     reconciliation: Mutex<()>,
@@ -594,12 +593,11 @@ impl GuestRepositoryManager {
         storage: &RepositoryStorage,
         runtime: PathBuf,
         git: PathBuf,
-        btrfs: PathBuf,
         cp: PathBuf,
         overlay: Option<PathBuf>,
     ) -> Result<Arc<Self>> {
         let root = storage.root().to_owned();
-        for path in [&root, &runtime, &git, &btrfs, &cp] {
+        for path in [&root, &runtime, &git, &cp] {
             if !path.is_absolute() {
                 bail!(
                     "repository manager path is not absolute: {}",
@@ -621,7 +619,6 @@ impl GuestRepositoryManager {
             root,
             runtime,
             git,
-            btrfs,
             cp,
             overlay,
             reconciliation: Mutex::new(()),
@@ -1137,40 +1134,35 @@ impl GuestRepositoryManager {
             .root
             .join("staging")
             .join(uuid::Uuid::new_v4().to_string());
-        let mut command = Command::new(&self.btrfs);
-        command.args(["subvolume", "snapshot"]);
-        if let Some(source) = source {
-            command.arg(source).arg(&staging);
-        } else {
-            command = Command::new(&self.btrfs);
-            command.args(["subvolume", "create"]).arg(&staging);
-        }
-        let output = command.output().await?;
-        success(
-            &output,
-            "create repository reconciliation staging workspace",
-        )?;
+        let source = source.map(Path::to_path_buf);
+        let store = Arc::clone(&self.store);
+        let staging_operation = staging.clone();
+        tokio::task::spawn_blocking(move || {
+            store.create_repository_staging_workspace(source.as_deref(), &staging_operation)
+        })
+        .await
+        .context("repository staging storage task failed")??;
         fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
         set_owner(&staging, image.user().uid(), image.user().gid())?;
         Ok(staging)
     }
 
     async fn remove_staging(&self, staging: &Path) {
-        if let Err(error) = self
-            .btrfs(&["subvolume", "delete", "--recursive"], staging)
-            .await
-        {
-            warn!(path = %staging.display(), %error, "could not remove repository reconciliation staging workspace");
+        let store = Arc::clone(&self.store);
+        let staging_operation = staging.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            store.remove_repository_staging_workspace(&staging_operation)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(path = %staging.display(), %error, "could not remove repository reconciliation staging workspace");
+            }
+            Err(error) => {
+                warn!(path = %staging.display(), %error, "repository staging cleanup task failed");
+            }
         }
-    }
-
-    async fn btrfs(&self, arguments: &[&str], path: &Path) -> Result<()> {
-        let output = Command::new(&self.btrfs)
-            .args(arguments)
-            .arg(path)
-            .output()
-            .await?;
-        success(&output, "manage repository checkout subvolume")
     }
 }
 

@@ -743,6 +743,41 @@ impl<R: CommandRunner> BtrfsStore<R> {
         self.healthy.load(Ordering::Acquire)
     }
 
+    /// Creates a writable staging subvolume for repository reconciliation.
+    ///
+    /// Repository generations live outside the pod store namespace but share
+    /// its Btrfs filesystem and health boundary. Running their Btrfs commands
+    /// here ensures they use the same availability deadline as pod storage.
+    pub(crate) fn create_repository_staging_workspace(
+        &self,
+        source: Option<&Path>,
+        destination: &Path,
+    ) -> Result<(), StoreError> {
+        if let Some(source) = source {
+            self.snapshot_subvolume_with_operation(
+                source,
+                destination,
+                "snapshot repository reconciliation staging workspace",
+            )
+        } else {
+            self.create_subvolume(
+                destination,
+                "create repository reconciliation staging workspace",
+            )
+        }
+    }
+
+    /// Removes a repository reconciliation staging subvolume.
+    pub(crate) fn remove_repository_staging_workspace(
+        &self,
+        staging: &Path,
+    ) -> Result<(), StoreError> {
+        self.delete_subvolume_if_exists(
+            staging,
+            "delete repository reconciliation staging workspace",
+        )
+    }
+
     /// Makes the pod-workspace container searchable but not listable so a
     /// service dropped to one pod's mapped UID can reach that pod's validated
     /// workspace path.
@@ -2312,11 +2347,20 @@ impl<R: CommandRunner> BtrfsStore<R> {
     }
 
     fn snapshot_subvolume(&self, source: &Path, destination: &Path) -> Result<(), StoreError> {
+        self.snapshot_subvolume_with_operation(source, destination, "snapshot pod root subvolume")
+    }
+
+    fn snapshot_subvolume_with_operation(
+        &self,
+        source: &Path,
+        destination: &Path,
+        operation: &'static str,
+    ) -> Result<(), StoreError> {
         if path_state(destination)?.is_some() {
             return Err(StoreError::UnsafePath(destination.to_path_buf()));
         }
         self.run_btrfs(
-            "snapshot pod root subvolume",
+            operation,
             &[
                 OsString::from("subvolume"),
                 OsString::from("snapshot"),
@@ -2947,6 +2991,7 @@ mod tests {
         quotas_enabled: Mutex<bool>,
         commit_gate: Mutex<CommitGate>,
         commit_changed: Condvar,
+        timeout_next_command: Mutex<bool>,
         timeout_next_commit: Mutex<bool>,
     }
 
@@ -3011,6 +3056,10 @@ mod tests {
 
         fn timeout_next_commit(&self) {
             *self.state.timeout_next_commit.lock().unwrap() = true;
+        }
+
+        fn timeout_next_command(&self) {
+            *self.state.timeout_next_command.lock().unwrap() = true;
         }
     }
 
@@ -3116,6 +3165,21 @@ mod tests {
                     "unsupported fake command: {rendered}"
                 ))),
             }
+        }
+
+        fn run_bounded(
+            &self,
+            program: &Path,
+            arguments: &[OsString],
+            _timeout: Duration,
+        ) -> io::Result<CommandOutput> {
+            if std::mem::take(&mut *self.state.timeout_next_command.lock().unwrap()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "injected command timeout",
+                ));
+            }
+            self.run(program, arguments)
         }
 
         fn commit_btrfs_transaction(&self, _root: &Path, _timeout: Duration) -> io::Result<u64> {
@@ -3891,6 +3955,36 @@ mod tests {
         assert!(matches!(error, StoreError::RollbackFailed { .. }));
         assert!(matches!(
             store.ensure_cache("after-timeout"),
+            Err(StoreError::StorageUnhealthy)
+        ));
+    }
+
+    /// Repository staging cleanup shares the bounded storage health boundary.
+    #[test]
+    fn repository_staging_timeout_marks_storage_unhealthy() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = open_store(temp.path(), &runner);
+        let staging = temp.path().join("repository-staging");
+        store
+            .create_repository_staging_workspace(None, &staging)
+            .unwrap();
+        runner.timeout_next_command();
+
+        let error = store
+            .remove_repository_staging_workspace(&staging)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::OperationTimedOut {
+                operation: "delete repository reconciliation staging workspace",
+                ..
+            }
+        ));
+        assert!(!store.is_healthy());
+        assert!(matches!(
+            store.remove_repository_staging_workspace(&staging),
             Err(StoreError::StorageUnhealthy)
         ));
     }
