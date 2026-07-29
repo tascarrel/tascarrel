@@ -649,7 +649,8 @@ import * as __schema_workspaces from "./workspaces";
                                                         "capabilities": ChatHarnessCapabilities, /**
                                             * Models and model-specific options currently offered by this harness.
                                             * 
-                                            * This is empty until the installed harness has successfully completed model discovery.
+                                            * This is empty until Tascarrel resolves the catalog through native discovery or workspace
+                                            * configuration.
                                             */
                                                         "models": __sidex_types.builtins.Sequence<ChatModel> };
 /**

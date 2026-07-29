@@ -200,6 +200,14 @@ impl HarnessManager {
         });
     }
 
+    /// Removes the published Tasci catalog when workspace settings no longer
+    /// contain a valid model selection.
+    pub(crate) fn clear_tasci_catalog(&self) {
+        self.update_harness(&api::ChatHarnessKind::Tasci, |harness| {
+            harness.models = ArcVec::new();
+        });
+    }
+
     /// Starts the pricing refresh and eager installation loops.
     pub(crate) fn start_eager_installation(self: &Arc<Self>) {
         self.start_pricing_refresh();

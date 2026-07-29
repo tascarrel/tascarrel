@@ -34,6 +34,7 @@ use super::SubscriptionCtx;
 use super::operations::EventSource;
 use super::operations::ExecuteAction;
 use super::operations::OpenSubscription;
+use super::tasci_catalog;
 
 /// Serves typed guest RPCs and subscriptions on the authenticated hostd link.
 pub struct GuestControlService {
@@ -126,9 +127,25 @@ impl GuestControlService {
             )
             .escalate(GuestControlServiceError::ControlPlane)?;
         self.host.attach(peer).await;
+        let tasci_catalog_sync = tokio::spawn({
+            let state = self.state.clone();
+            let host = self.host.clone();
+            let workspace = workspace.clone();
+            async move {
+                if let Err(error) = tasci_catalog::synchronize(&state, &host, &workspace).await {
+                    tracing::warn!(error = %error, "failed to synchronize the Tasci model catalog");
+                }
+            }
+        });
         let result = connection
             .await
             .escalate(GuestControlServiceError::ControlPlane);
+        tasci_catalog_sync.abort();
+        if let Err(error) = tasci_catalog_sync.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(error = %error, "Tasci catalog synchronization task failed");
+        }
         self.host.detach().await;
         result
     }

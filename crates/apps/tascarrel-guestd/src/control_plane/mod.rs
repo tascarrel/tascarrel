@@ -9,6 +9,7 @@ mod host;
 mod impls;
 mod operations;
 mod service;
+mod tasci_catalog;
 
 use std::sync::Arc;
 
