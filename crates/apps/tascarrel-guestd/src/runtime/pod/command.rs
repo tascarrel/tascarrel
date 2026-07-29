@@ -68,6 +68,37 @@ pub trait CommandRunner: Send + Sync + 'static {
     /// Returns an I/O error when the command cannot be started or waited for.
     fn run(&self, program: &Path, arguments: &[OsString]) -> io::Result<CommandOutput>;
 
+    /// Runs `program` with an availability deadline.
+    ///
+    /// The default keeps injected runners deterministic. The production
+    /// runner kills the command's process group and returns without waiting
+    /// indefinitely for a kernel-blocked child.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the command cannot be started or waited for,
+    /// or when it exceeds `timeout`.
+    fn run_bounded(
+        &self,
+        program: &Path,
+        arguments: &[OsString],
+        _timeout: Duration,
+    ) -> io::Result<CommandOutput> {
+        self.run(program, arguments)
+    }
+
+    /// Commits the current Btrfs transaction and returns its transaction ID.
+    ///
+    /// The default is a no-op durability boundary for injected runners.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the commit cannot start or complete before
+    /// `timeout`.
+    fn commit_btrfs_transaction(&self, _root: &Path, _timeout: Duration) -> io::Result<u64> {
+        Ok(0)
+    }
+
     /// Runs a command whose descendants may intentionally retain standard
     /// output and error after the direct child exits.
     ///
@@ -129,6 +160,19 @@ impl CommandRunner for ProcessCommandRunner {
         })
     }
 
+    fn run_bounded(
+        &self,
+        program: &Path,
+        arguments: &[OsString],
+        timeout: Duration,
+    ) -> io::Result<CommandOutput> {
+        Self::run_bounded_inner(program, arguments, timeout)
+    }
+
+    fn commit_btrfs_transaction(&self, root: &Path, timeout: Duration) -> io::Result<u64> {
+        crate::runtime::btrfs::commit_transaction(root, timeout)
+    }
+
     fn run_detached(
         &self,
         program: &Path,
@@ -164,6 +208,61 @@ impl CommandRunner for ProcessCommandRunner {
 }
 
 impl ProcessCommandRunner {
+    fn run_bounded_inner(
+        program: &Path,
+        arguments: &[OsString],
+        timeout: Duration,
+    ) -> io::Result<CommandOutput> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bounded command timeout overflow",
+            )
+        })?;
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn()?;
+        let stdout = collect_output(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("bounded command did not expose stdout"))?,
+        );
+        let stderr = collect_output(
+            child
+                .stderr
+                .take()
+                .ok_or_else(|| io::Error::other("bounded command did not expose stderr"))?,
+        );
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(CommandOutput {
+                    success: status.success(),
+                    stdout: join_output(stdout)?,
+                    stderr: join_output(stderr)?,
+                });
+            }
+            if Instant::now() >= deadline {
+                kill_child_group(&mut child)?;
+                thread::spawn(move || {
+                    if let Err(error) = child.wait() {
+                        tracing::warn!(%error, "failed to reap timed-out Btrfs command");
+                    }
+                });
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("command exceeded {} seconds", timeout.as_secs()),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn run_detached_inner(
         program: &Path,
         arguments: &[OsString],
@@ -194,14 +293,7 @@ impl ProcessCommandRunner {
                 });
             }
             if Instant::now() >= deadline {
-                let group = Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "child PID exceeds pid_t")
-                })?);
-                if killpg(group, Signal::SIGKILL).is_err() {
-                    // Cover a race with process-group creation or direct-child
-                    // exit. `wait` below is still mandatory so no zombie leaks.
-                    let _ = child.kill();
-                }
+                kill_child_group(&mut child)?;
                 child.wait()?;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -211,6 +303,41 @@ impl ProcessCommandRunner {
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+/// Collects one command output pipe without filling the child's pipe buffer.
+fn collect_output(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        pipe.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+/// Joins an output collector and preserves both thread and I/O failures.
+fn join_output(output: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    output
+        .join()
+        .map_err(|_| io::Error::other("bounded command output collector panicked"))?
+}
+
+/// Kills a command and every descendant in the command's process group.
+fn kill_child_group(child: &mut std::process::Child) -> io::Result<()> {
+    let group = Pid::from_raw(
+        i32::try_from(child.id())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "child PID exceeds pid_t"))?,
+    );
+    if let Err(group_error) = killpg(group, Signal::SIGKILL) {
+        // Cover a race with process-group creation or direct-child exit.
+        if let Err(child_error) = child.kill() {
+            tracing::debug!(
+                %group_error,
+                %child_error,
+                "timed-out command had already exited while being killed"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn collect_bounded_output(mut reader: File, path: PathBuf, limit: usize) {
@@ -328,6 +455,30 @@ mod tests {
         );
         let error = output.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let (leader, descendant) = read_pids(&pid_file);
+        wait_until_gone(leader);
+        wait_until_gone(descendant);
+    }
+
+    /// Verifies bounded commands return on their deadline and kill descendants.
+    #[test]
+    fn bounded_runner_returns_after_killing_a_timed_out_process_group() {
+        let temporary = TempDir::new().unwrap();
+        let pid_file = temporary.path().join("pid");
+        let started = Instant::now();
+        let output = ProcessCommandRunner.run_bounded(
+            &shell(),
+            &[
+                OsString::from("-c"),
+                OsString::from("sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait"),
+                OsString::from("tascarrel-bounded-test"),
+                pid_file.as_os_str().to_owned(),
+            ],
+            Duration::from_millis(250),
+        );
+
+        assert_eq!(output.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
         let (leader, descendant) = read_pids(&pid_file);
         wait_until_gone(leader);
         wait_until_gone(descendant);

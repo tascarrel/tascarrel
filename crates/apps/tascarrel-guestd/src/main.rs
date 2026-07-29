@@ -149,6 +149,9 @@ enum PodControlListenerError {
 }
 
 const DEFAULT_WORKSPACE_INPUT_TRANSFER_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_BTRFS_OPERATION_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_NETWORK_COMMAND_TIMEOUT_SECONDS: u64 = 30;
+const STORAGE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(name = "tascarrel-guest", about = "Tascarrel guest pod daemon")]
@@ -296,6 +299,22 @@ struct Args {
         default_value = "/run/current-system/sw/bin/btrfs"
     )]
     btrfs: PathBuf,
+
+    /// Maximum duration of one Btrfs command or transaction commit.
+    #[arg(
+        long,
+        env = "TASCARREL_GUEST_BTRFS_OPERATION_TIMEOUT_SECONDS",
+        default_value_t = DEFAULT_BTRFS_OPERATION_TIMEOUT_SECONDS
+    )]
+    btrfs_operation_timeout_seconds: u64,
+
+    /// Maximum duration of one firewall command.
+    #[arg(
+        long,
+        env = "TASCARREL_GUEST_NETWORK_COMMAND_TIMEOUT_SECONDS",
+        default_value_t = DEFAULT_NETWORK_COMMAND_TIMEOUT_SECONDS
+    )]
+    network_command_timeout_seconds: u64,
 
     #[arg(
         long,
@@ -669,21 +688,32 @@ async fn main() -> Result<()> {
         bail!("tascarrel-guest must run as root so it can manage the pod runtime");
     }
     if args.workspace_input_transfer_timeout_seconds == 0 {
-        bail!("workspace input transfer timeout must be greater than zero");
+        bail!("invalid workspace input transfer timeout: value must be greater than zero");
+    }
+    if args.btrfs_operation_timeout_seconds == 0 {
+        bail!("invalid Btrfs operation timeout: value must be greater than zero");
+    }
+    if args.network_command_timeout_seconds == 0 {
+        bail!("invalid network command timeout: value must be greater than zero");
     }
     let network_service = GuestNetworkService::new(GuestNetworkServiceConfig {
         ip: args.ip.clone(),
         nft: args.nft.clone(),
+        command_timeout: Duration::from_secs(args.network_command_timeout_seconds),
         ..GuestNetworkServiceConfig::default()
     })
     .map_err(|error| anyhow!(error.to_string()))
     .context("create guest network service")?;
     network_service.initialize().await?;
 
-    let storage = GuestStorage::open(GuestStorageConfig::new(&args.state_directory, &args.btrfs))
-        .await
-        .map_err(|error| anyhow!("{error}"))
-        .context("open guest storage")?;
+    let storage = GuestStorage::open(
+        GuestStorageConfig::new(&args.state_directory, &args.btrfs).with_btrfs_operation_timeout(
+            Duration::from_secs(args.btrfs_operation_timeout_seconds),
+        ),
+    )
+    .await
+    .map_err(|error| anyhow!("{error}"))
+    .context("open guest storage")?;
     let guest = GuestService::start(
         args.guest_instance_id,
         GuestServiceConfig::new(storage.root()),
@@ -1096,9 +1126,19 @@ async fn main() -> Result<()> {
         }
     };
     tokio::pin!(transport);
+    let monitored_store = Arc::clone(&store);
+    let storage_health = async move {
+        while monitored_store.is_healthy() {
+            sleep(STORAGE_HEALTH_POLL_INTERVAL).await;
+        }
+    };
+    tokio::pin!(storage_health);
     tokio::select! {
         result = &mut transport => result?,
         () = shutdown_signal() => info!("received shutdown signal"),
+        () = &mut storage_health => {
+            bail!("Btrfs storage became unhealthy; restarting the guest control plane");
+        }
     }
 
     usb_task.abort();

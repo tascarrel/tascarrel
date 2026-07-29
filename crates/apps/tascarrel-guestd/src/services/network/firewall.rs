@@ -6,6 +6,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use nix::libc;
 use reportify::ErrorExt as _;
@@ -15,6 +16,7 @@ use tascarrel_protocol::RemoteError;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 const DUMMY_INTERFACE: &str = "tascarrel0";
 const DUMMY_ADDRESS: &str = "192.0.2.1/32";
@@ -138,20 +140,27 @@ pub enum NetworkFirewallError {
     },
     #[error("{program} failed: {detail}")]
     Command { program: PathBuf, detail: String },
+    #[error(
+        "network command {program} exceeded {} seconds",
+        timeout.as_secs()
+    )]
+    TimedOut { program: PathBuf, timeout: Duration },
 }
 
 #[derive(Clone, Debug)]
 pub struct NetworkFirewall {
     ip: PathBuf,
     nft: PathBuf,
+    command_timeout: Duration,
 }
 
 impl NetworkFirewall {
     #[must_use]
-    pub fn new(ip: impl Into<PathBuf>, nft: impl Into<PathBuf>) -> Self {
+    pub fn new(ip: impl Into<PathBuf>, nft: impl Into<PathBuf>, command_timeout: Duration) -> Self {
         Self {
             ip: ip.into(),
             nft: nft.into(),
+            command_timeout,
         }
     }
 
@@ -176,7 +185,13 @@ impl NetworkFirewall {
         validate_command(&self.nft)?;
         let rules = Self::render(active)?;
         self.ensure_dummy_route().await?;
-        run_with_stdin(&self.nft, &["-f", "-"], rules.as_bytes()).await
+        run_with_stdin(
+            &self.nft,
+            &["-f", "-"],
+            rules.as_bytes(),
+            self.command_timeout,
+        )
+        .await
     }
 
     /// Renders one complete nftables transaction for the active bindings.
@@ -367,11 +382,26 @@ impl NetworkFirewall {
     }
 
     async fn ensure_dummy_route(&self) -> Result<(), Report<NetworkFirewallError>> {
-        let shown = run(&self.ip, &["link", "show", "dev", DUMMY_INTERFACE]).await?;
+        let shown = run(
+            &self.ip,
+            &["link", "show", "dev", DUMMY_INTERFACE],
+            self.command_timeout,
+        )
+        .await?;
         if !shown {
-            require_success(&self.ip, &["link", "add", DUMMY_INTERFACE, "type", "dummy"]).await?;
+            require_success(
+                &self.ip,
+                &["link", "add", DUMMY_INTERFACE, "type", "dummy"],
+                self.command_timeout,
+            )
+            .await?;
         }
-        require_success(&self.ip, &["link", "set", "dev", DUMMY_INTERFACE, "up"]).await?;
+        require_success(
+            &self.ip,
+            &["link", "set", "dev", DUMMY_INTERFACE, "up"],
+            self.command_timeout,
+        )
+        .await?;
         require_success(
             &self.ip,
             &[
@@ -382,11 +412,13 @@ impl NetworkFirewall {
                 "dev",
                 DUMMY_INTERFACE,
             ],
+            self.command_timeout,
         )
         .await?;
         require_success(
             &self.ip,
             &["-4", "route", "replace", "default", "dev", DUMMY_INTERFACE],
+            self.command_timeout,
         )
         .await
     }
@@ -476,14 +508,21 @@ fn validate_command(path: &Path) -> Result<(), Report<NetworkFirewallError>> {
     }
 }
 
-async fn run(program: &Path, args: &[&str]) -> Result<bool, Report<NetworkFirewallError>> {
-    let output = Command::new(program)
+async fn run(
+    program: &Path,
+    args: &[&str],
+    command_timeout: Duration,
+) -> Result<bool, Report<NetworkFirewallError>> {
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = timeout(command_timeout, command.output())
         .await
+        .map_err(|_| command_timeout_error(program, command_timeout))?
         .map_err(|source| {
             NetworkFirewallError::Start {
                 program: program.to_path_buf(),
@@ -497,14 +536,18 @@ async fn run(program: &Path, args: &[&str]) -> Result<bool, Report<NetworkFirewa
 async fn require_success(
     program: &Path,
     args: &[&str],
+    command_timeout: Duration,
 ) -> Result<(), Report<NetworkFirewallError>> {
-    let output = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = timeout(command_timeout, command.output())
         .await
+        .map_err(|_| command_timeout_error(program, command_timeout))?
         .map_err(|source| {
             NetworkFirewallError::Start {
                 program: program.to_path_buf(),
@@ -523,47 +566,62 @@ async fn run_with_stdin(
     program: &Path,
     args: &[&str],
     input: &[u8],
+    command_timeout: Duration,
 ) -> Result<(), Report<NetworkFirewallError>> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| {
+    let operation = async {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|source| {
             NetworkFirewallError::Start {
                 program: program.to_path_buf(),
                 source,
             }
             .report()
         })?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        NetworkFirewallError::Command {
-            program: program.to_path_buf(),
-            detail: "command did not expose stdin".to_owned(),
-        }
-        .report()
-    })?;
-    stdin.write_all(input).await.map_err(|source| {
-        NetworkFirewallError::WriteRules {
-            program: program.to_path_buf(),
-            source,
-        }
-        .report()
-    })?;
-    drop(stdin);
-    let output = child.wait_with_output().await.map_err(|source| {
-        NetworkFirewallError::Start {
-            program: program.to_path_buf(),
-            source,
-        }
-        .report()
-    })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            NetworkFirewallError::Command {
+                program: program.to_path_buf(),
+                detail: "command did not expose stdin".to_owned(),
+            }
+            .report()
+        })?;
+        stdin.write_all(input).await.map_err(|source| {
+            NetworkFirewallError::WriteRules {
+                program: program.to_path_buf(),
+                source,
+            }
+            .report()
+        })?;
+        drop(stdin);
+        child.wait_with_output().await.map_err(|source| {
+            NetworkFirewallError::Start {
+                program: program.to_path_buf(),
+                source,
+            }
+            .report()
+        })
+    };
+    let output = timeout(command_timeout, operation)
+        .await
+        .map_err(|_| command_timeout_error(program, command_timeout))??;
     if output.status.success() {
         Ok(())
     } else {
         Err(command_error(program, &output.stderr).report())
     }
+}
+
+fn command_timeout_error(program: &Path, timeout: Duration) -> Report<NetworkFirewallError> {
+    NetworkFirewallError::TimedOut {
+        program: program.to_path_buf(),
+        timeout,
+    }
+    .report()
 }
 
 fn command_error(program: &Path, stderr: &[u8]) -> NetworkFirewallError {
@@ -577,6 +635,8 @@ fn command_error(program: &Path, stderr: &[u8]) -> NetworkFirewallError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     /// Verifies pod rules redirect only DNS UDP and reject other traffic from
@@ -590,6 +650,21 @@ mod tests {
         assert!(rules.contains("udp dport 53 redirect to :1001"));
         assert!(!rules.contains("meta l4proto udp redirect to :1001"));
         assert!(rules.contains("iifname \"wbi00000001\" reject"));
+    }
+
+    /// Verifies a hung firewall command is killed at its configured deadline.
+    #[tokio::test]
+    async fn firewall_command_timeout_is_enforced() {
+        let shell =
+            PathBuf::from(std::env::var_os("SHELL").expect("tests require an absolute $SHELL"));
+        let started = Instant::now();
+
+        let error = run(&shell, &["-c", "sleep 30"], Duration::from_millis(50))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeded"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     /// Verifies stable guest services are attributed by their effective UID.

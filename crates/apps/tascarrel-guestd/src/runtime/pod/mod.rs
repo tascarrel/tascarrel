@@ -3,10 +3,12 @@
 //! The store keeps immutable image generations and gives each pod four
 //! independent writable subvolumes: a snapshot of its image root, an empty
 //! workspace, an empty Docker data root, and quota-limited temporary storage.
-//! All multi-step mutations are recorded in durable transaction manifests and
-//! recovered when the store is reopened. Pods are executed through runc with a
-//! mandatory outer user namespace, idmapped Btrfs mounts, private namespaces,
-//! and workspace-policy capabilities and devices.
+//! All multi-step mutations are recorded in durable transaction manifests,
+//! committed with bounded Btrfs transaction waits, and recovered when the
+//! store is reopened. Per-resource locks keep an unrelated pod usable while
+//! another mutation waits. Pods are executed through runc with a mandatory
+//! outer user namespace, idmapped Btrfs mounts, private namespaces, and
+//! workspace-policy capabilities and devices.
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #![forbid(unsafe_code)]

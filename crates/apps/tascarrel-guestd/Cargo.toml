@@ -20,7 +20,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 hickory-proto.workspace = true
 jiff.workspace = true
-nix = { workspace = true, features = ["fanotify", "fs", "mount", "net", "process", "signal", "socket", "term", "user"] }
+nix = { workspace = true, features = ["fanotify", "fs", "ioctl", "mount", "net", "process", "signal", "socket", "term", "user"] }
 reportify.workspace = true
 reqwest.workspace = true
 rustix = { workspace = true, features = ["fs", "net", "process", "termios"] }

@@ -1274,11 +1274,6 @@ mod tests {
                 {
                     Ok(CommandOutput::success())
                 }
-                [filesystem, sync, _]
-                    if filesystem == Path::new("filesystem") && sync == Path::new("sync") =>
-                {
-                    Ok(CommandOutput::success())
-                }
                 [qgroup, show, raw, _]
                     if qgroup == Path::new("qgroup")
                         && show == Path::new("show")
@@ -1297,6 +1292,18 @@ mod tests {
                 {
                     assert_eq!(recursive, Path::new("--recursive"));
                     fs::remove_dir_all(path)?;
+                    Ok(CommandOutput::success())
+                }
+                [subvolume, delete, recursive, commit_after, paths @ ..]
+                    if subvolume == Path::new("subvolume")
+                        && delete == Path::new("delete")
+                        && recursive == Path::new("--recursive")
+                        && commit_after == Path::new("--commit-after")
+                        && !paths.is_empty() =>
+                {
+                    for path in paths {
+                        fs::remove_dir_all(path)?;
+                    }
                     Ok(CommandOutput::success())
                 }
                 [property, set, _, read_only, value]

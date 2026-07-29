@@ -4,9 +4,11 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::runtime::command::spawn;
 
@@ -16,6 +18,7 @@ const BUILD_NETWORK_SLOT: u32 = POD_NETWORK_COUNT - 1;
 /// Fixed named network namespace used only while resolving the workspace image.
 pub const BUILD_NETWORK_NAMESPACE: &str = "tascarrel-build";
 const COMMAND_ERROR_LIMIT: usize = 512;
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Trusted addresses and interface names allocated to one pod namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +75,7 @@ impl PodNetwork {
 pub struct NetworkManager {
     ip: PathBuf,
     nsenter: PathBuf,
+    command_timeout: Duration,
 }
 
 impl NetworkManager {
@@ -88,7 +92,11 @@ impl NetworkManager {
                 return Err(NetworkError::RelativeCommand(path.clone()));
             }
         }
-        Ok(Self { ip, nsenter })
+        Ok(Self {
+            ip,
+            nsenter,
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
+        })
     }
 
     /// Connects the guest namespace to a paused runc container's network
@@ -354,16 +362,20 @@ impl NetworkManager {
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let child = spawn(&mut command)
             .await
             .map_err(|source| NetworkError::Start {
                 program: program.to_path_buf(),
                 source,
             })?;
-        child
-            .wait_with_output()
+        timeout(self.command_timeout, child.wait_with_output())
             .await
+            .map_err(|_| NetworkError::TimedOut {
+                program: program.to_path_buf(),
+                timeout: self.command_timeout,
+            })?
             .map_err(|source| NetworkError::Start {
                 program: program.to_path_buf(),
                 source,
@@ -391,6 +403,11 @@ pub enum NetworkError {
     },
     #[error("{program} failed: {detail}")]
     Command { program: PathBuf, detail: String },
+    #[error(
+        "network command {program} exceeded {} seconds",
+        timeout.as_secs()
+    )]
+    TimedOut { program: PathBuf, timeout: Duration },
 }
 
 fn validate_namespace_name(namespace: &str) -> Result<(), NetworkError> {

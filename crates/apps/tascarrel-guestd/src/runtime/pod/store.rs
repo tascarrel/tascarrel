@@ -1,5 +1,7 @@
 //! Persistent Btrfs-backed images, workspace seeds, and pod filesystems.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::fs::DirBuilder;
@@ -18,8 +20,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::RwLock;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -27,6 +34,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
+use tracing::debug;
+use tracing::error;
 use tracing::warn;
 
 use super::CommandRunner;
@@ -74,6 +83,8 @@ const MAX_IMAGE_WORKING_DIRECTORY_BYTES: usize = 4096;
 // can never produce a manifest which the durable reader rejects.
 const MAX_IMAGE_CONFIG_BYTES: usize = 60 * 1024;
 const POD_TEMPORARY_QUOTA_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+const DEFAULT_BTRFS_OPERATION_TIMEOUT: Duration = Duration::from_mins(2);
+const SLOW_BTRFS_OPERATION: Duration = Duration::from_secs(5);
 
 static NEXT_UNIQUE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -104,6 +115,9 @@ pub enum StoreError {
     /// The Btrfs executable must not be resolved through a mutable `PATH`.
     #[error("btrfs command path must be absolute: {0}")]
     RelativeBtrfsProgram(PathBuf),
+    /// The Btrfs operation timeout must be nonzero.
+    #[error("invalid Btrfs operation timeout: value must be greater than zero")]
+    InvalidOperationTimeout,
     /// A new store may only adopt an empty filesystem root.
     #[error("uninitialized store root is not empty: {0}")]
     NonEmptyUninitializedStore(PathBuf),
@@ -204,8 +218,19 @@ pub enum StoreError {
     #[error("image staging handle is stale or belongs to another store")]
     InvalidStaging,
     /// The store operation mutex was poisoned by a panic.
-    #[error("pod storage operation lock is poisoned")]
+    #[error("failed to acquire pod storage resource lock because it is poisoned")]
     LockPoisoned,
+    /// A previous storage operation exceeded its availability deadline.
+    #[error("pod storage is unavailable after an operation timed out")]
+    StorageUnhealthy,
+    /// A storage operation exceeded its availability deadline.
+    #[error("Btrfs operation `{operation}` timed out after {} seconds", timeout.as_secs())]
+    OperationTimedOut {
+        /// Logical Btrfs operation.
+        operation: &'static str,
+        /// Enforced availability deadline.
+        timeout: Duration,
+    },
     /// OCI image metadata cannot be represented safely in a pod process.
     #[error("invalid image configuration: {0}")]
     InvalidImageConfig(String),
@@ -592,7 +617,11 @@ pub struct BtrfsStore<R = ProcessCommandRunner> {
     root: PathBuf,
     btrfs_program: PathBuf,
     runner: Arc<R>,
-    operation: Mutex<()>,
+    resources: ResourceLockRegistry,
+    image_resources: ImageLockRegistry,
+    golden_workspace: RwLock<()>,
+    healthy: AtomicBool,
+    operation_timeout: Duration,
 }
 
 impl<R> std::fmt::Debug for BtrfsStore<R> {
@@ -616,7 +645,21 @@ impl BtrfsStore<ProcessCommandRunner> {
         root: impl AsRef<Path>,
         btrfs_program: impl Into<PathBuf>,
     ) -> Result<Self, StoreError> {
-        Self::with_runner(root, btrfs_program, ProcessCommandRunner)
+        Self::open_with_timeout(root, btrfs_program, DEFAULT_BTRFS_OPERATION_TIMEOUT)
+    }
+
+    /// Opens or initializes a store with a bounded Btrfs operation timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is zero, paths are unsafe, the root is
+    /// not a Btrfs filesystem, a manifest is incompatible, or recovery fails.
+    pub fn open_with_timeout(
+        root: impl AsRef<Path>,
+        btrfs_program: impl Into<PathBuf>,
+        operation_timeout: Duration,
+    ) -> Result<Self, StoreError> {
+        Self::with_runner_and_timeout(root, btrfs_program, ProcessCommandRunner, operation_timeout)
     }
 }
 
@@ -636,6 +679,18 @@ impl<R: CommandRunner> BtrfsStore<R> {
         btrfs_program: impl Into<PathBuf>,
         runner: R,
     ) -> Result<Self, StoreError> {
+        Self::with_runner_and_timeout(root, btrfs_program, runner, DEFAULT_BTRFS_OPERATION_TIMEOUT)
+    }
+
+    fn with_runner_and_timeout(
+        root: impl AsRef<Path>,
+        btrfs_program: impl Into<PathBuf>,
+        runner: R,
+        operation_timeout: Duration,
+    ) -> Result<Self, StoreError> {
+        if operation_timeout.is_zero() {
+            return Err(StoreError::InvalidOperationTimeout);
+        }
         let requested_root = root.as_ref();
         let metadata = fs::symlink_metadata(requested_root)
             .map_err(|source| io_error("inspect", requested_root, source))?;
@@ -652,7 +707,11 @@ impl<R: CommandRunner> BtrfsStore<R> {
             root,
             btrfs_program,
             runner: Arc::new(runner),
-            operation: Mutex::new(()),
+            resources: ResourceLockRegistry::default(),
+            image_resources: ImageLockRegistry::default(),
+            golden_workspace: RwLock::new(()),
+            healthy: AtomicBool::new(true),
+            operation_timeout,
         };
         store.run_btrfs(
             "verify store filesystem",
@@ -673,6 +732,15 @@ impl<R: CommandRunner> BtrfsStore<R> {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Reports whether every bounded Btrfs operation has completed.
+    ///
+    /// Once an operation times out the store remains unhealthy until the
+    /// daemon and, if necessary, its guest kernel are recycled.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 
     /// Makes the pod-workspace container searchable but not listable so a
@@ -726,7 +794,6 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// is deliberately supplied only to [`Self::publish_image`], after an OCI
     /// builder has produced and verified its output.
     pub fn begin_image(&self) -> Result<ImageStaging, StoreError> {
-        let _operation = self.lock()?;
         let transaction_id = unique_id();
         let transaction = TransactionManifest {
             format_version: STORE_FORMAT_VERSION,
@@ -738,7 +805,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
         if let Err(error) = self.create_subvolume(&path, "create image staging subvolume") {
             let rollback = self
                 .cleanup_image_publication(&transaction_id)
-                .and_then(|()| self.sync_and_finish_transaction(&transaction_id));
+                .and_then(|()| self.commit_and_finish_transaction(&transaction_id));
             return match rollback {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(rollback_failed("begin image", &error, &rollback)),
@@ -766,7 +833,12 @@ impl<R: CommandRunner> BtrfsStore<R> {
         image: ImageId,
         config: ImageConfig,
     ) -> Result<ImageGeneration, StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(&image)?;
+        let _image_guard = image_resource
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let resources = self.resolve_resources([staging_resource(&staging.transaction_id)])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.validate_staging(&staging)?;
         if path_state(&self.image_directory(&image))?.is_some()
             || self.read_transactions()?.iter().any(|(_, transaction)| {
@@ -777,7 +849,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
             let error = StoreError::ImageExists(image);
             let rollback = self
                 .cleanup_image_publication(&staging.transaction_id)
-                .and_then(|()| self.sync_and_finish_transaction(&staging.transaction_id));
+                .and_then(|()| self.commit_and_finish_transaction(&staging.transaction_id));
             return match rollback {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(rollback_failed("publish image", &error, &rollback)),
@@ -806,7 +878,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
                 }
                 let rollback = self.cleanup_image_publication(&staging.transaction_id);
                 match rollback
-                    .and_then(|()| self.sync_and_finish_transaction(&staging.transaction_id))
+                    .and_then(|()| self.commit_and_finish_transaction(&staging.transaction_id))
                 {
                     Ok(()) => Err(error),
                     Err(rollback) => Err(rollback_failed("publish image", &error, &rollback)),
@@ -823,10 +895,11 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// retained as a durable transaction for recovery.
     #[allow(clippy::needless_pass_by_value)] // Consuming the token prevents reuse after cleanup.
     pub fn discard_image(&self, staging: ImageStaging) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([staging_resource(&staging.transaction_id)])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.validate_staging(&staging)?;
         self.cleanup_image_publication(&staging.transaction_id)?;
-        self.sync_and_finish_transaction(&staging.transaction_id)
+        self.commit_and_finish_transaction(&staging.transaction_id)
     }
 
     /// Looks up an immutable image generation.
@@ -836,7 +909,10 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns [`StoreError::ImageNotFound`] when absent, or an integrity error
     /// when its durable manifest and paths disagree.
     pub fn image(&self, image: &ImageId) -> Result<ImageGeneration, StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
         self.image_unlocked(image)
     }
 
@@ -846,8 +922,18 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if any published generation is malformed.
     pub fn list_images(&self) -> Result<Vec<ImageGeneration>, StoreError> {
-        let _operation = self.lock()?;
-        self.list_images_unlocked()
+        let mut images = Vec::new();
+        for image in self.image_ids()? {
+            match self.image(&image) {
+                Ok(generation) => images.push(generation),
+                // A concurrent deletion may remove the generation after the
+                // directory snapshot but before this operation acquires its
+                // per-image read lock.
+                Err(StoreError::ImageNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(images)
     }
 
     /// Returns the image selected for ordinary pod creation.
@@ -860,7 +946,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error if the selection manifest or referenced image is
     /// invalid.
     pub fn selected_image(&self) -> Result<Option<ImageId>, StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([selected_image_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.selected_image_unlocked()
     }
 
@@ -871,7 +958,12 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error if the image does not exist or the selection cannot be
     /// persisted.
     pub fn select_image(&self, image: &ImageId) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let resources = self.resolve_resources([selected_image_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.image_unlocked(image)?;
         write_json_atomic(
             &self.root.join(SELECTED_IMAGE_MANIFEST),
@@ -887,7 +979,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if the durable selection cannot be removed.
     pub fn clear_selected_image(&self) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([selected_image_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         remove_file_durable(&self.root.join(SELECTED_IMAGE_MANIFEST))
     }
 
@@ -929,7 +1022,19 @@ impl<R: CommandRunner> BtrfsStore<R> {
         image: &ImageId,
         basis: PodWorkspaceBasis,
     ) -> Result<PodStorage, StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        // Ordinary pod creation falls back to the golden workspace when the
+        // image has no setup seed. A read lock keeps both paths stable while
+        // allowing unrelated pod creations to proceed concurrently.
+        let _golden_guard = self
+            .golden_workspace
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let resources = self.resolve_resources([pod_resource(&pod)])?;
+        let _resource_guards = lock_resources(&resources)?;
         let generation = self.image_unlocked(image)?;
         if self.pod_storage_exists(&pod)? || self.transaction_references_pod(&pod)? {
             return Err(StoreError::PodExists(pod));
@@ -964,7 +1069,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
                     return Err(error);
                 }
                 let rollback = self.cleanup_pod_subvolumes(&pod);
-                match rollback.and_then(|()| self.sync_and_finish_transaction(&transaction_id)) {
+                match rollback.and_then(|()| self.finish_transaction(&transaction_id)) {
                     Ok(()) => Err(error),
                     Err(rollback) => Err(rollback_failed("create pod", &error, &rollback)),
                 }
@@ -979,7 +1084,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns [`StoreError::PodNotFound`] when absent, or an integrity error
     /// when its durable manifest and paths disagree.
     pub fn pod(&self, pod: &PodId) -> Result<PodStorage, StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([pod_resource(pod)])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.pod_unlocked(pod)
     }
 
@@ -989,8 +1095,18 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if any pod manifest or subvolume is malformed.
     pub fn list_pods(&self) -> Result<Vec<PodStorage>, StoreError> {
-        let _operation = self.lock()?;
-        self.list_pods_unlocked()
+        let mut pods = Vec::new();
+        for pod in self.pod_ids()? {
+            match self.pod(&pod) {
+                Ok(storage) => pods.push(storage),
+                // A concurrent deletion may remove the manifest after the
+                // directory snapshot but before this operation acquires its
+                // per-pod lock.
+                Err(StoreError::PodNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(pods)
     }
 
     /// Replaces a pod's temporary subvolume before a fresh runtime start.
@@ -1004,12 +1120,13 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error when the pod is absent or Btrfs cannot replace, limit,
     /// or synchronize the temporary subvolume.
     pub fn reset_pod_temporary(&self, pod: &PodId) -> Result<PodStorage, StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([pod_resource(pod)])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.pod_unlocked(pod)?;
         let temporary = self.pod_temporary_path(pod);
         self.delete_subvolume_if_exists(&temporary, "delete pod temporary subvolume")?;
         self.create_pod_temporary(&temporary)?;
-        self.sync_filesystem()?;
+        self.commit_transaction()?;
         self.pod_unlocked(pod)
     }
 
@@ -1026,15 +1143,16 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error for an unsafe name, replaced path, or failed Btrfs
     /// operation.
     pub fn ensure_cache(&self, name: &str) -> Result<PathBuf, StoreError> {
-        let _operation = self.lock()?;
         PodId::new(name).map_err(|error| StoreError::InvalidCacheName(error.to_string()))?;
+        let resources = self.resolve_resources([cache_resource(name)])?;
+        let _resource_guards = lock_resources(&resources)?;
         let path = self.root.join(CACHES_DIRECTORY).join(name);
         match path_state(&path)? {
             None => {
                 self.create_subvolume(&path, "create workspace cache subvolume")?;
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o777))
                     .map_err(|source| io_error("set workspace cache permissions", &path, source))?;
-                self.sync_filesystem()?;
+                self.commit_transaction()?;
             }
             Some(metadata) if metadata.is_dir() => {}
             Some(_) => return Err(StoreError::UnsafePath(path)),
@@ -1050,7 +1168,10 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if the source is unsafe or snapshot publication fails.
     pub fn publish_golden_workspace(&self, source: &Path) -> Result<PathBuf, StoreError> {
-        let _operation = self.lock()?;
+        let _golden_guard = self
+            .golden_workspace
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
         let source = fs::canonicalize(source)
             .map_err(|error| io_error("canonicalize golden workspace source", source, error))?;
         if !path_state(&source)?.is_some_and(|metadata| metadata.is_dir()) {
@@ -1086,7 +1207,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
                     )),
                 };
             }
-            self.sync_filesystem()?;
+            self.commit_transaction()?;
             self.delete_subvolume_if_exists(&staging, "retire previous golden workspace")?;
         } else if let Err(source) = fs::rename(&staging, &seed) {
             let error = io_error("publish initial golden workspace", &seed, source);
@@ -1101,7 +1222,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
                 )),
             };
         }
-        self.sync_filesystem()?;
+        self.commit_transaction()?;
         Ok(seed)
     }
 
@@ -1112,7 +1233,10 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error when the managed path was replaced with an unsafe
     /// filesystem object.
     pub fn golden_workspace(&self) -> Result<Option<PathBuf>, StoreError> {
-        let _operation = self.lock()?;
+        let _golden_guard = self
+            .golden_workspace
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
         let path = self.root.join(GOLDEN_WORKSPACE);
         match path_state(&path)? {
             None => Ok(None),
@@ -1128,8 +1252,24 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if the pod is absent or snapshots cannot be published.
     pub fn publish_setup_seed(&self, pod: &PodId, context: &ImageId) -> Result<String, StoreError> {
-        let _operation = self.lock()?;
+        let pod_resources = self.resolve_resources([pod_resource(pod)])?;
+        let image = {
+            let _pod_resource_guards = lock_resources(&pod_resources)?;
+            self.pod_unlocked(pod)?.image().clone()
+        };
+        let resources = self.resolve_resources([pod_resource(pod), setup_seed_index_resource()])?;
+        let image_resource = self.resolve_image_resource(&image)?;
+        let _image_guard = image_resource
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let _resource_guards = lock_resources(&resources)?;
         let storage = self.pod_unlocked(pod)?;
+        if storage.image() != &image {
+            return Err(StoreError::CorruptManifest {
+                path: self.pod_manifest_path(pod),
+                message: "pod image changed while publishing its setup seed".to_owned(),
+            });
+        }
         let previous = self
             .setup_seed_for_image_with_manifest(storage.image())?
             .map(|(manifest, _, _)| manifest.generation);
@@ -1144,7 +1284,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
             self.snapshot_subvolume(storage.workspace(), &workspace)?;
             self.set_subvolume_read_only(&root)?;
             self.set_subvolume_read_only(&workspace)?;
-            self.sync_filesystem()?;
+            self.commit_transaction()?;
             write_json_atomic(
                 &self.image_seed_manifest_path(storage.image()),
                 &SetupSeedManifest {
@@ -1186,7 +1326,12 @@ impl<R: CommandRunner> BtrfsStore<R> {
         image: &ImageId,
         source: &Path,
     ) -> Result<String, StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let resources = self.resolve_resources([setup_seed_index_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         let (manifest, prepared_root, _) = self
             .setup_seed_for_image_with_manifest(image)?
             .ok_or_else(|| StoreError::CorruptManifest {
@@ -1209,7 +1354,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
             self.snapshot_subvolume(&source, &workspace)?;
             self.set_subvolume_read_only(&root)?;
             self.set_subvolume_read_only(&workspace)?;
-            self.sync_filesystem()?;
+            self.commit_transaction()?;
             write_json_atomic(
                 &self.image_seed_manifest_path(image),
                 &SetupSeedManifest {
@@ -1247,7 +1392,10 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error when the image seed manifest or retained snapshots are
     /// unsafe or corrupt.
     pub fn image_workspace_seed(&self, image: &ImageId) -> Result<Option<PathBuf>, StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?;
         self.setup_seed_for_image(image)
             .map(|seed| seed.map(|(_, workspace)| workspace))
     }
@@ -1259,7 +1407,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error if the setup manifest is unsafe or corrupt.
     pub fn setup_seed_image(&self, context: &ImageId) -> Result<Option<ImageId>, StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([setup_seed_index_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         for image in self.list_images_unlocked()? {
             let manifest_path = self.image_seed_manifest_path(image.id());
             if path_state(&manifest_path)?.is_none() {
@@ -1282,7 +1431,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// Returns an error when the pod is absent or cleanup cannot complete.
     pub fn destroy_pod(&self, pod: &PodId) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
+        let resources = self.resolve_resources([pod_resource(pod)])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.pod_unlocked(pod)?;
         let transaction_id = unique_id();
         self.write_transaction(&TransactionManifest {
@@ -1301,7 +1451,13 @@ impl<R: CommandRunner> BtrfsStore<R> {
     /// Returns an error when the image is absent, is pinned by a pod or
     /// incomplete pod transaction, or cannot be deleted.
     pub fn remove_image(&self, image: &ImageId) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
+        let image_resource = self.resolve_image_resource(image)?;
+        let _image_guard = image_resource
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let resources =
+            self.resolve_resources([selected_image_resource(), setup_seed_index_resource()])?;
+        let _resource_guards = lock_resources(&resources)?;
         self.image_unlocked(image)?;
         if self.selected_image_unlocked()?.as_ref() == Some(image) {
             return Err(StoreError::ImageSelected(image.clone()));
@@ -1328,44 +1484,41 @@ impl<R: CommandRunner> BtrfsStore<R> {
     ///
     /// `with_runner` invokes this automatically. Calling it explicitly is
     /// useful after resolving a transient storage error without restarting the
-    /// daemon. It must not run while an image staging directory is actively
-    /// being populated.
+    /// daemon. It must not run concurrently with any other store operation.
     ///
     /// # Errors
     ///
     /// Returns an error for corrupt transaction state or failed cleanup.
+    #[tracing::instrument(
+        name = "tascarrel_guest.storage.recover",
+        level = "info",
+        skip(self),
+        fields(root = %self.root.display()),
+        err(Debug)
+    )]
     pub fn recover(&self) -> Result<(), StoreError> {
-        let _operation = self.lock()?;
         cleanup_atomic_temps(&self.root.join(POD_MANIFESTS_DIRECTORY))?;
         cleanup_atomic_temps(&self.root.join(TRANSACTIONS_DIRECTORY))?;
         for (transaction_id, transaction) in self.read_transactions()? {
-            match transaction.operation {
+            let needs_commit = match transaction.operation {
                 TransactionOperation::StageImage => {
                     self.cleanup_image_publication(&transaction_id)?;
+                    true
                 }
                 TransactionOperation::PublishImage { image } => match self.image_unlocked(&image) {
-                    Ok(_) => self.cleanup_image_publication(&transaction_id)?,
-                    Err(StoreError::ImageNotFound(_)) => {
+                    Ok(_) | Err(StoreError::ImageNotFound(_)) => {
                         self.cleanup_image_publication(&transaction_id)?;
+                        true
                     }
                     Err(error) => return Err(error),
                 },
-                TransactionOperation::CreatePod { pod, image } => match self.pod_unlocked(&pod) {
-                    Ok(storage) if storage.image() == &image => {}
-                    Ok(_) => {
-                        return Err(StoreError::CorruptManifest {
-                            path: self.pod_manifest_path(&pod),
-                            message: "committed pod pins a different image than its transaction"
-                                .to_owned(),
-                        });
-                    }
-                    Err(StoreError::PodNotFound(_)) => {
-                        self.cleanup_pod_subvolumes(&pod)?;
-                    }
-                    Err(error) => return Err(error),
-                },
+                TransactionOperation::CreatePod { pod, image } => {
+                    self.recover_create_pod(&pod, &image)?;
+                    false
+                }
                 TransactionOperation::DeletePod { pod } => {
                     self.continue_delete_pod(&pod)?;
+                    false
                 }
                 TransactionOperation::DeleteImage { image } => {
                     if let Some(pod) =
@@ -1374,10 +1527,15 @@ impl<R: CommandRunner> BtrfsStore<R> {
                         return Err(StoreError::ImageInUse { image, pod });
                     }
                     self.continue_delete_image(&transaction_id, &image)?;
+                    true
                 }
+            };
+            if needs_commit {
+                self.commit_transaction()?;
             }
-            self.sync_and_finish_transaction(&transaction_id)?;
+            self.finish_transaction(&transaction_id)?;
         }
+        self.cleanup_orphaned_pod_subvolumes()?;
         Ok(())
     }
 
@@ -1452,8 +1610,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
         remove_file_durable(&self.transaction_path(transaction_id))
     }
 
-    fn sync_and_finish_transaction(&self, transaction_id: &str) -> Result<(), StoreError> {
-        self.sync_filesystem()?;
+    fn commit_and_finish_transaction(&self, transaction_id: &str) -> Result<(), StoreError> {
+        self.commit_transaction()?;
         self.finish_transaction(transaction_id)
     }
 
@@ -1563,14 +1721,14 @@ impl<R: CommandRunner> BtrfsStore<R> {
                 OsString::from("true"),
             ],
         )?;
-        self.sync_filesystem()?;
+        self.commit_transaction()?;
 
         let final_path = self.image_directory(image);
         fs::rename(&publishing, &final_path)
             .map_err(|source| io_error("publish image generation", &final_path, source))?;
         sync_directory(&self.root.join(IMAGES_DIRECTORY))?;
         sync_directory(&self.root.join(IMAGE_PUBLISHING_DIRECTORY))?;
-        self.sync_filesystem()?;
+        self.commit_transaction()?;
         Ok(ImageGeneration {
             id: image.clone(),
             root: final_path.join(IMAGE_ROOT_DIRECTORY),
@@ -1642,6 +1800,15 @@ impl<R: CommandRunner> BtrfsStore<R> {
     }
 
     fn list_images_unlocked(&self) -> Result<Vec<ImageGeneration>, StoreError> {
+        let mut images = Vec::new();
+        for image in self.image_ids()? {
+            images.push(self.image_unlocked(&image)?);
+        }
+        Ok(images)
+    }
+
+    /// Captures and validates the published image identifiers.
+    fn image_ids(&self) -> Result<Vec<ImageId>, StoreError> {
         let directory = self.root.join(IMAGES_DIRECTORY);
         let mut images = Vec::new();
         for entry in
@@ -1654,13 +1821,14 @@ impl<R: CommandRunner> BtrfsStore<R> {
                 .to_str()
                 .ok_or_else(|| StoreError::UnsafePath(path.clone()))?
                 .to_owned();
-            let image = ImageId::new(name).map_err(|error| StoreError::CorruptManifest {
-                path,
-                message: error.to_string(),
-            })?;
-            images.push(self.image_unlocked(&image)?);
+            images.push(
+                ImageId::new(name).map_err(|error| StoreError::CorruptManifest {
+                    path,
+                    message: error.to_string(),
+                })?,
+            );
         }
-        images.sort_by(|left, right| left.id.cmp(&right.id));
+        images.sort();
         Ok(images)
     }
 
@@ -1708,7 +1876,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
         self.create_subvolume(&docker, "create pod Docker subvolume")?;
         let temporary = self.pod_temporary_path(pod);
         self.create_pod_temporary(&temporary)?;
-        self.sync_filesystem()?;
+        self.commit_transaction()?;
         write_json_atomic(
             &self.pod_manifest_path(pod),
             &PodManifest {
@@ -1790,7 +1958,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
             Some(_) => return Err(StoreError::UnsafePath(temporary_path)),
             None => {
                 self.create_pod_temporary(&temporary_path)?;
-                self.sync_filesystem()?;
+                self.commit_transaction()?;
                 temporary_path
             }
         };
@@ -1806,7 +1974,8 @@ impl<R: CommandRunner> BtrfsStore<R> {
         })
     }
 
-    fn list_pods_unlocked(&self) -> Result<Vec<PodStorage>, StoreError> {
+    /// Captures and validates the durable pod manifest identifiers.
+    fn pod_ids(&self) -> Result<Vec<PodId>, StoreError> {
         let directory = self.root.join(POD_MANIFESTS_DIRECTORY);
         let mut pods = Vec::new();
         for entry in
@@ -1829,9 +1998,9 @@ impl<R: CommandRunner> BtrfsStore<R> {
                 path,
                 message: error.to_string(),
             })?;
-            pods.push(self.pod_unlocked(&pod)?);
+            pods.push(pod);
         }
-        pods.sort_by(|left, right| left.id.cmp(&right.id));
+        pods.sort();
         Ok(pods)
     }
 
@@ -1869,31 +2038,123 @@ impl<R: CommandRunner> BtrfsStore<R> {
             .any(|(_, transaction)| transaction.operation.references_pod(pod)))
     }
 
-    fn cleanup_pod_subvolumes(&self, pod: &PodId) -> Result<(), StoreError> {
-        let mut first_error = None;
-        for (path, operation) in [
-            (
-                self.pod_temporary_path(pod),
-                "delete pod temporary subvolume",
-            ),
-            (self.pod_docker_path(pod), "delete pod Docker subvolume"),
-            (
-                self.pod_workspace_path(pod),
-                "delete pod workspace subvolume",
-            ),
-            (self.pod_root_path(pod), "delete pod root subvolume"),
+    /// Keeps a complete published pod or rolls its partial creation back.
+    fn recover_create_pod(&self, pod: &PodId, image: &ImageId) -> Result<(), StoreError> {
+        let manifest_path = self.pod_manifest_path(pod);
+        if path_state(&manifest_path)?.is_none() {
+            return self.cleanup_pod_subvolumes(pod);
+        }
+        let manifest: PodManifest = read_json(&manifest_path)?;
+        check_format(&manifest_path, manifest.format_version)?;
+        if &manifest.id != pod || &manifest.image != image {
+            return Err(StoreError::CorruptManifest {
+                path: manifest_path,
+                message: "published pod does not match its creation transaction".to_owned(),
+            });
+        }
+        let mut complete = true;
+        for path in [
+            self.pod_root_path(pod),
+            self.pod_workspace_path(pod),
+            self.pod_docker_path(pod),
+            self.pod_temporary_path(pod),
         ] {
-            if let Err(error) = self.delete_subvolume_if_exists(&path, operation) {
-                first_error.get_or_insert(error);
+            match path_state(&path)? {
+                Some(metadata) if metadata.is_dir() => {}
+                Some(_) => return Err(StoreError::UnsafePath(path)),
+                None => complete = false,
             }
         }
-        first_error.map_or(Ok(()), Err)
+        if complete {
+            self.pod_unlocked(pod)?;
+            return Ok(());
+        }
+        remove_file_durable(&manifest_path)?;
+        self.cleanup_pod_subvolumes(pod)
+    }
+
+    /// Removes pod subvolumes that have neither a manifest nor a transaction.
+    fn cleanup_orphaned_pod_subvolumes(&self) -> Result<(), StoreError> {
+        let mut pod_ids = BTreeSet::<PodId>::new();
+        for directory in [
+            POD_ROOTS_DIRECTORY,
+            POD_WORKSPACES_DIRECTORY,
+            POD_DOCKER_DIRECTORY,
+            POD_TEMPORARIES_DIRECTORY,
+        ] {
+            let directory = self.root.join(directory);
+            for entry in
+                fs::read_dir(&directory).map_err(|source| io_error("read", &directory, source))?
+            {
+                let entry = entry.map_err(|source| io_error("read", &directory, source))?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|source| io_error("inspect", &path, source))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(StoreError::UnsafePath(path));
+                }
+                let name = entry
+                    .file_name()
+                    .to_str()
+                    .ok_or_else(|| StoreError::UnsafePath(path.clone()))?
+                    .to_owned();
+                let pod = PodId::new(name).map_err(|error| StoreError::CorruptManifest {
+                    path,
+                    message: error.to_string(),
+                })?;
+                pod_ids.insert(pod);
+            }
+        }
+        for pod in pod_ids {
+            if path_state(&self.pod_manifest_path(&pod))?.is_none() {
+                self.cleanup_pod_subvolumes(&pod)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup_pod_subvolumes(&self, pod: &PodId) -> Result<(), StoreError> {
+        let mut paths = Vec::new();
+        for path in [
+            self.pod_temporary_path(pod),
+            self.pod_docker_path(pod),
+            self.pod_workspace_path(pod),
+            self.pod_root_path(pod),
+        ] {
+            let Some(metadata) = path_state(&path)? else {
+                continue;
+            };
+            if !metadata.is_dir() {
+                return Err(StoreError::UnsafePath(path));
+            }
+            paths.push(path);
+        }
+        if paths.is_empty() {
+            self.commit_transaction()?;
+            return Ok(());
+        }
+        let mut arguments = vec![
+            OsString::from("subvolume"),
+            OsString::from("delete"),
+            OsString::from("--recursive"),
+            OsString::from("--commit-after"),
+        ];
+        arguments.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+        self.run_btrfs("delete pod subvolumes", &arguments)?;
+        for path in paths {
+            if path_state(&path)?.is_some() {
+                return Err(StoreError::CorruptManifest {
+                    path,
+                    message: "btrfs reported success without deleting the pod subvolume".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn continue_delete_pod(&self, pod: &PodId) -> Result<(), StoreError> {
         remove_file_durable(&self.pod_manifest_path(pod))?;
-        self.cleanup_pod_subvolumes(pod)?;
-        self.sync_filesystem()
+        self.cleanup_pod_subvolumes(pod)
     }
 
     fn image_reference(&self, image: &ImageId) -> Result<Option<PodId>, StoreError> {
@@ -1905,12 +2166,19 @@ impl<R: CommandRunner> BtrfsStore<R> {
         image: &ImageId,
         excluded_transaction: &str,
     ) -> Result<Option<PodId>, StoreError> {
-        if let Some(storage) = self
-            .list_pods_unlocked()?
-            .into_iter()
-            .find(|storage| storage.image() == image)
-        {
-            return Ok(Some(storage.id));
+        for pod in self.pod_ids()? {
+            let manifest_path = self.pod_manifest_path(&pod);
+            let manifest: PodManifest = read_json(&manifest_path)?;
+            check_format(&manifest_path, manifest.format_version)?;
+            if manifest.id != pod {
+                return Err(StoreError::CorruptManifest {
+                    path: manifest_path,
+                    message: "pod ID does not match its file name".to_owned(),
+                });
+            }
+            if &manifest.image == image {
+                return Ok(Some(pod));
+            }
         }
         for (transaction_id, transaction) in self.read_transactions()? {
             if transaction_id == excluded_transaction {
@@ -1947,7 +2215,7 @@ impl<R: CommandRunner> BtrfsStore<R> {
             sync_directory(&self.root.join(TRASH_DIRECTORY))?;
         }
         self.delete_image_tree(&trash)?;
-        self.sync_filesystem()
+        self.commit_transaction().map(|_| ())
     }
 
     fn delete_image_tree(&self, directory: &Path) -> Result<(), StoreError> {
@@ -2108,17 +2376,6 @@ impl<R: CommandRunner> BtrfsStore<R> {
         }
         Ok(())
     }
-
-    fn sync_filesystem(&self) -> Result<(), StoreError> {
-        self.run_btrfs(
-            "sync storage filesystem",
-            &[
-                OsString::from("filesystem"),
-                OsString::from("sync"),
-                self.root.as_os_str().to_owned(),
-            ],
-        )
-    }
 }
 
 impl TransactionOperation {
@@ -2205,8 +2462,17 @@ fn cleanup_atomic_temps(directory: &Path) -> Result<(), StoreError> {
 }
 
 impl<R: CommandRunner> BtrfsStore<R> {
-    fn lock(&self) -> Result<MutexGuard<'_, ()>, StoreError> {
-        self.operation.lock().map_err(|_| StoreError::LockPoisoned)
+    /// Resolves sorted resource locks before an operation starts waiting.
+    fn resolve_resources(
+        &self,
+        keys: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<Arc<Mutex<()>>>, StoreError> {
+        self.resources.resolve(keys)
+    }
+
+    /// Resolves the shared/exclusive lock for one immutable image identifier.
+    fn resolve_image_resource(&self, image: &ImageId) -> Result<Arc<RwLock<()>>, StoreError> {
+        self.image_resources.resolve(image)
     }
 
     fn initialize_layout(&self) -> Result<(), StoreError> {
@@ -2282,14 +2548,14 @@ impl<R: CommandRunner> BtrfsStore<R> {
     }
 
     fn run_btrfs(&self, operation: &'static str, arguments: &[OsString]) -> Result<(), StoreError> {
+        self.ensure_healthy()?;
+        let started = Instant::now();
+        debug!(operation, ?arguments, "starting Btrfs operation");
         let output = self
             .runner
-            .run(&self.btrfs_program, arguments)
-            .map_err(|source| StoreError::CommandStart {
-                operation,
-                program: self.btrfs_program.clone(),
-                source,
-            })?;
+            .run_bounded(&self.btrfs_program, arguments, self.operation_timeout)
+            .map_err(|source| self.command_error(operation, source))?;
+        Self::log_operation_duration(operation, started.elapsed(), None);
         if output.success {
             return Ok(());
         }
@@ -2307,6 +2573,153 @@ impl<R: CommandRunner> BtrfsStore<R> {
             },
         })
     }
+
+    fn commit_transaction(&self) -> Result<u64, StoreError> {
+        const OPERATION: &str = "commit storage transaction";
+        self.ensure_healthy()?;
+        let started = Instant::now();
+        debug!(operation = OPERATION, "starting Btrfs transaction commit");
+        let transaction_id = self
+            .runner
+            .commit_btrfs_transaction(&self.root, self.operation_timeout)
+            .map_err(|source| self.command_error(OPERATION, source))?;
+        Self::log_operation_duration(OPERATION, started.elapsed(), Some(transaction_id));
+        Ok(transaction_id)
+    }
+
+    /// Rejects new Btrfs work after an earlier operation timed out.
+    fn ensure_healthy(&self) -> Result<(), StoreError> {
+        if self.healthy.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(StoreError::StorageUnhealthy)
+        }
+    }
+
+    /// Records a timeout as a persistent in-process storage health failure.
+    fn command_error(&self, operation: &'static str, source: io::Error) -> StoreError {
+        if source.kind() == io::ErrorKind::TimedOut {
+            self.healthy.store(false, Ordering::Release);
+            error!(
+                operation,
+                timeout_seconds = self.operation_timeout.as_secs(),
+                %source,
+                "Btrfs operation timed out; storage is unhealthy until the guest is recycled"
+            );
+            StoreError::OperationTimedOut {
+                operation,
+                timeout: self.operation_timeout,
+            }
+        } else {
+            StoreError::CommandStart {
+                operation,
+                program: self.btrfs_program.clone(),
+                source,
+            }
+        }
+    }
+
+    /// Records normal and slow Btrfs completion with transaction context.
+    fn log_operation_duration(
+        operation: &'static str,
+        elapsed: Duration,
+        transaction_id: Option<u64>,
+    ) {
+        if elapsed >= SLOW_BTRFS_OPERATION {
+            warn!(
+                operation,
+                elapsed_ms = elapsed.as_millis(),
+                transaction_id,
+                "Btrfs operation completed slowly"
+            );
+        } else {
+            debug!(
+                operation,
+                elapsed_ms = elapsed.as_millis(),
+                transaction_id,
+                "Btrfs operation completed"
+            );
+        }
+    }
+}
+
+/// Resolves weakly retained exclusive locks for named mutable resources.
+#[derive(Default)]
+struct ResourceLockRegistry {
+    entries: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
+}
+
+/// Resolves weakly retained shared/exclusive locks for image generations.
+#[derive(Default)]
+struct ImageLockRegistry {
+    entries: Mutex<BTreeMap<ImageId, Weak<RwLock<()>>>>,
+}
+
+impl ResourceLockRegistry {
+    fn resolve(
+        &self,
+        keys: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<Arc<Mutex<()>>>, StoreError> {
+        let mut keys = keys.into_iter().collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        let mut entries = self.entries.lock().map_err(|_| StoreError::LockPoisoned)?;
+        entries.retain(|_, resource| resource.strong_count() > 0);
+        Ok(keys
+            .into_iter()
+            .map(|key| {
+                if let Some(resource) = entries.get(&key).and_then(Weak::upgrade) {
+                    resource
+                } else {
+                    let resource = Arc::new(Mutex::new(()));
+                    entries.insert(key, Arc::downgrade(&resource));
+                    resource
+                }
+            })
+            .collect())
+    }
+}
+
+impl ImageLockRegistry {
+    fn resolve(&self, image: &ImageId) -> Result<Arc<RwLock<()>>, StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::LockPoisoned)?;
+        entries.retain(|_, resource| resource.strong_count() > 0);
+        if let Some(resource) = entries.get(image).and_then(Weak::upgrade) {
+            Ok(resource)
+        } else {
+            let resource = Arc::new(RwLock::new(()));
+            entries.insert(image.clone(), Arc::downgrade(&resource));
+            Ok(resource)
+        }
+    }
+}
+
+/// Acquires pre-sorted exclusive resources in their canonical order.
+fn lock_resources(resources: &[Arc<Mutex<()>>]) -> Result<Vec<MutexGuard<'_, ()>>, StoreError> {
+    resources
+        .iter()
+        .map(|resource| resource.lock().map_err(|_| StoreError::LockPoisoned))
+        .collect()
+}
+
+fn pod_resource(pod: &PodId) -> String {
+    format!("pod:{}", pod.as_str())
+}
+
+fn cache_resource(name: &str) -> String {
+    format!("cache:{name}")
+}
+
+fn staging_resource(transaction_id: &str) -> String {
+    format!("staging:{transaction_id}")
+}
+
+fn selected_image_resource() -> String {
+    "selected-image".to_owned()
+}
+
+fn setup_seed_index_resource() -> String {
+    "setup-seed-index".to_owned()
 }
 
 fn io_error(operation: &'static str, path: &Path, source: io::Error) -> StoreError {
@@ -2510,7 +2923,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::symlink;
+    use std::sync::Condvar;
     use std::sync::Mutex;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
 
     use tempfile::TempDir;
 
@@ -2528,6 +2945,16 @@ mod tests {
         failures: Mutex<VecDeque<String>>,
         read_only: Mutex<BTreeSet<PathBuf>>,
         quotas_enabled: Mutex<bool>,
+        commit_gate: Mutex<CommitGate>,
+        commit_changed: Condvar,
+        timeout_next_commit: Mutex<bool>,
+    }
+
+    #[derive(Default)]
+    struct CommitGate {
+        block_next: bool,
+        entered: bool,
+        released: bool,
     }
 
     impl FakeRunner {
@@ -2545,6 +2972,45 @@ mod tests {
 
         fn is_read_only(&self, path: &Path) -> bool {
             self.state.read_only.lock().unwrap().contains(path)
+        }
+
+        fn block_next_commit(&self) {
+            let mut gate = self.state.commit_gate.lock().unwrap();
+            gate.block_next = true;
+            gate.entered = false;
+            gate.released = false;
+        }
+
+        fn wait_for_blocked_commit(&self) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut gate = self.state.commit_gate.lock().unwrap();
+            while !gate.entered {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !timeout.is_zero(),
+                    "Btrfs commit did not reach its test gate"
+                );
+                let (next, result) = self
+                    .state
+                    .commit_changed
+                    .wait_timeout(gate, timeout)
+                    .unwrap();
+                gate = next;
+                assert!(
+                    !result.timed_out() || gate.entered,
+                    "Btrfs commit did not reach its test gate"
+                );
+            }
+        }
+
+        fn release_commit(&self) {
+            let mut gate = self.state.commit_gate.lock().unwrap();
+            gate.released = true;
+            self.state.commit_changed.notify_all();
+        }
+
+        fn timeout_next_commit(&self) {
+            *self.state.timeout_next_commit.lock().unwrap() = true;
         }
     }
 
@@ -2574,11 +3040,6 @@ mod tests {
                     if filesystem == Path::new("filesystem")
                         && usage == Path::new("usage")
                         && raw == Path::new("--raw") =>
-                {
-                    Ok(CommandOutput::success())
-                }
-                [filesystem, sync, _]
-                    if filesystem == Path::new("filesystem") && sync == Path::new("sync") =>
                 {
                     Ok(CommandOutput::success())
                 }
@@ -2629,6 +3090,19 @@ mod tests {
                     self.state.read_only.lock().unwrap().remove(path);
                     Ok(CommandOutput::success())
                 }
+                [subvolume, delete, recursive, commit_after, paths @ ..]
+                    if subvolume == Path::new("subvolume")
+                        && delete == Path::new("delete")
+                        && recursive == Path::new("--recursive")
+                        && commit_after == Path::new("--commit-after")
+                        && !paths.is_empty() =>
+                {
+                    for path in paths {
+                        fs::remove_dir_all(path)?;
+                        self.state.read_only.lock().unwrap().remove(path);
+                    }
+                    Ok(CommandOutput::success())
+                }
                 [property, set, path, read_only, value]
                     if property == Path::new("property")
                         && set == Path::new("set")
@@ -2642,6 +3116,32 @@ mod tests {
                     "unsupported fake command: {rendered}"
                 ))),
             }
+        }
+
+        fn commit_btrfs_transaction(&self, _root: &Path, _timeout: Duration) -> io::Result<u64> {
+            self.state
+                .commands
+                .lock()
+                .unwrap()
+                .push("commit transaction".to_owned());
+            if std::mem::take(&mut *self.state.timeout_next_commit.lock().unwrap()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "injected commit timeout",
+                ));
+            }
+            let mut gate = self.state.commit_gate.lock().unwrap();
+            if gate.block_next {
+                gate.block_next = false;
+                gate.entered = true;
+                self.state.commit_changed.notify_all();
+                while !gate.released {
+                    gate = self.state.commit_changed.wait(gate).unwrap();
+                }
+                gate.entered = false;
+                gate.released = false;
+            }
+            Ok(1)
         }
     }
 
@@ -3258,6 +3758,141 @@ mod tests {
         assert!(!store.pod_docker_path(&pod).exists());
         assert!(!store.pod_temporary_path(&pod).exists());
         assert!(!store.pod_manifest_path(&pod).exists());
+    }
+
+    /// Verifies pod deletion commits every sibling subvolume in one command.
+    #[test]
+    fn pod_deletion_uses_one_committed_batch() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = open_store(temp.path(), &runner);
+        let image = image_id('c');
+        publish_test_image(&store, image.clone());
+        let pod = pod_id("pod-delete-batch");
+        let storage = store.create_pod(pod.clone(), &image).unwrap();
+
+        store.destroy_pod(&pod).unwrap();
+
+        let deletion = runner
+            .commands()
+            .into_iter()
+            .find(|command| command.starts_with("subvolume delete --recursive --commit-after"))
+            .unwrap();
+        for path in [
+            storage.temporary(),
+            storage.docker(),
+            storage.workspace(),
+            storage.root(),
+        ] {
+            assert!(deletion.contains(path.to_string_lossy().as_ref()));
+        }
+    }
+
+    /// Verifies a published but incomplete creation is rolled back on reopen.
+    #[test]
+    fn startup_rolls_back_an_incomplete_published_creation() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = open_store(temp.path(), &runner);
+        let image = image_id('c');
+        publish_test_image(&store, image.clone());
+        let pod = pod_id("pod-partial-published");
+        let storage = store.create_pod(pod.clone(), &image).unwrap();
+        let transaction_id = unique_id();
+        store
+            .write_transaction(&TransactionManifest {
+                format_version: STORE_FORMAT_VERSION,
+                transaction_id,
+                operation: TransactionOperation::CreatePod {
+                    pod: pod.clone(),
+                    image,
+                },
+            })
+            .unwrap();
+        fs::remove_dir_all(storage.docker()).unwrap();
+        drop(store);
+
+        let recovered = open_store(temp.path(), &runner);
+
+        assert!(!recovered.pod_manifest_path(&pod).exists());
+        assert!(!storage.root().exists());
+        assert!(!storage.workspace().exists());
+        assert!(!storage.temporary().exists());
+        assert!(directory_is_empty(
+            &temp.path().join(TRANSACTIONS_DIRECTORY)
+        ));
+    }
+
+    /// Verifies startup removes pod subvolumes whose transaction was lost.
+    #[test]
+    fn startup_removes_orphaned_pod_subvolumes() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = open_store(temp.path(), &runner);
+        let pod = pod_id("pod-orphan");
+        let orphan = store.pod_workspace_path(&pod);
+        store
+            .create_subvolume(&orphan, "create orphaned test pod workspace")
+            .unwrap();
+        drop(store);
+
+        open_store(temp.path(), &runner);
+
+        assert!(!orphan.exists());
+    }
+
+    /// Verifies a stalled creation does not hold an unrelated pod's lock.
+    #[test]
+    fn stalled_creation_does_not_block_unrelated_pod_deletion() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = Arc::new(open_store(temp.path(), &runner));
+        let image = image_id('c');
+        publish_test_image(&store, image.clone());
+        let existing = pod_id("pod-existing");
+        store.create_pod(existing.clone(), &image).unwrap();
+        runner.block_next_commit();
+
+        let creating_store = Arc::clone(&store);
+        let creating_image = image.clone();
+        let creating = thread::spawn(move || {
+            creating_store.create_pod(pod_id("pod-stalled"), &creating_image)
+        });
+        runner.wait_for_blocked_commit();
+
+        let deleting_store = Arc::clone(&store);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let deleting = thread::spawn(move || {
+            sender
+                .send(deleting_store.destroy_pod(&existing))
+                .expect("deletion result receiver must remain connected");
+        });
+        let deletion = receiver.recv_timeout(Duration::from_millis(500));
+        runner.release_commit();
+        let creation = creating.join().unwrap();
+        deleting.join().unwrap();
+
+        assert!(deletion.unwrap().is_ok());
+        assert!(creation.is_ok());
+    }
+
+    /// Verifies a commit timeout fails later mutations without queueing them.
+    #[test]
+    fn commit_timeout_marks_storage_unhealthy() {
+        let temp = TempDir::new().unwrap();
+        let runner = FakeRunner::default();
+        let store = open_store(temp.path(), &runner);
+        let image = image_id('c');
+        publish_test_image(&store, image.clone());
+        runner.timeout_next_commit();
+
+        let error = store.create_pod(pod_id("pod-timeout"), &image).unwrap_err();
+
+        assert!(matches!(error, StoreError::RollbackFailed { .. }));
+        assert!(matches!(
+            store.ensure_cache("after-timeout"),
+            Err(StoreError::StorageUnhealthy)
+        ));
     }
 
     /// Verifies startup resumes a failed creation rollback.

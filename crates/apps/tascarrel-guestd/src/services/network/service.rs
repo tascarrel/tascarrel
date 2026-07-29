@@ -57,6 +57,7 @@ use super::firewall::proxy_port_candidates;
 
 const DEFAULT_MUX_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_DNS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_TCP_FLOWS_PER_PRINCIPAL: NonZeroUsize =
     NonZeroUsize::new(1024).expect("the default TCP flow limit is non-zero");
 const DEFAULT_MAX_DNS_REQUESTS_PER_PRINCIPAL: NonZeroUsize =
@@ -72,6 +73,8 @@ pub struct GuestNetworkServiceConfig {
     pub mux_wait_timeout: Duration,
     /// Maximum time to open and complete a semantic DNS exchange.
     pub dns_request_timeout: Duration,
+    /// Maximum time allowed for one `ip` or `nft` command.
+    pub command_timeout: Duration,
     /// Maximum number of concurrent TCP flows for one attributed principal.
     pub max_tcp_flows_per_principal: NonZeroUsize,
     /// Maximum number of concurrent DNS requests for one attributed principal.
@@ -85,6 +88,7 @@ impl Default for GuestNetworkServiceConfig {
             nft: "/run/current-system/sw/bin/nft".into(),
             mux_wait_timeout: DEFAULT_MUX_WAIT_TIMEOUT,
             dns_request_timeout: DEFAULT_DNS_REQUEST_TIMEOUT,
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
             max_tcp_flows_per_principal: DEFAULT_MAX_TCP_FLOWS_PER_PRINCIPAL,
             max_dns_requests_per_principal: DEFAULT_MAX_DNS_REQUESTS_PER_PRINCIPAL,
         }
@@ -111,6 +115,7 @@ enum GuestNetworkTransportError {
 pub struct GuestNetworkService {
     firewall: NetworkFirewall,
     mux: watch::Sender<Option<MuxHandle>>,
+    mutations: Mutex<()>,
     principals: Mutex<BTreeMap<tascarrel_protocol::PodId, PrincipalRuntime>>,
     mux_wait_timeout: Duration,
     dns_request_timeout: Duration,
@@ -168,13 +173,17 @@ impl GuestNetworkService {
     pub fn new(
         config: GuestNetworkServiceConfig,
     ) -> Result<Arc<Self>, Report<GuestNetworkServiceError>> {
-        if config.mux_wait_timeout.is_zero() || config.dns_request_timeout.is_zero() {
+        if config.mux_wait_timeout.is_zero()
+            || config.dns_request_timeout.is_zero()
+            || config.command_timeout.is_zero()
+        {
             return Err(GuestNetworkServiceError::InvalidConfiguration.report());
         }
         let (mux, _) = watch::channel(None);
         Ok(Arc::new(Self {
-            firewall: NetworkFirewall::new(config.ip, config.nft),
+            firewall: NetworkFirewall::new(config.ip, config.nft, config.command_timeout),
             mux,
+            mutations: Mutex::new(()),
             principals: Mutex::new(BTreeMap::new()),
             mux_wait_timeout: config.mux_wait_timeout,
             dns_request_timeout: config.dns_request_timeout,
@@ -261,12 +270,15 @@ impl GuestNetworkService {
         pod: &Pod,
         origin: CaptureOrigin<'_>,
     ) -> Result<NetworkBinding, RemoteError> {
-        let mut principals = self.principals.lock().await;
-        if principals.contains_key(&pod.id) {
-            return Err(RemoteError::new(
-                ErrorCode::AlreadyExists,
-                "network listeners already exist for this principal",
-            ));
+        let _mutation = self.mutations.lock().await;
+        {
+            let principals = self.principals.lock().await;
+            if principals.contains_key(&pod.id) {
+                return Err(RemoteError::new(
+                    ErrorCode::AlreadyExists,
+                    "network listeners already exist for this principal",
+                ));
+            }
         }
         let (proxy_port, tcp, dns_udp) = bind_proxy_listeners(origin.proxy_bind_address())?;
         let (binding, source) = match origin {
@@ -303,21 +315,24 @@ impl GuestNetworkService {
                 .run_dns_udp_listener(dns_principal, dns_udp)
                 .await;
         });
-        principals.insert(
-            pod.id.clone(),
-            PrincipalRuntime {
-                principal,
-                binding: binding.clone(),
-                tcp,
-                dns_udp,
-            },
-        );
-        let active = principals
-            .values()
-            .map(|runtime| runtime.binding.clone())
-            .collect::<Vec<_>>();
+        let active = {
+            let mut principals = self.principals.lock().await;
+            principals.insert(
+                pod.id.clone(),
+                PrincipalRuntime {
+                    principal,
+                    binding: binding.clone(),
+                    tcp,
+                    dns_udp,
+                },
+            );
+            principals
+                .values()
+                .map(|runtime| runtime.binding.clone())
+                .collect::<Vec<_>>()
+        };
         if let Err(error) = self.firewall.sync(&active).await {
-            principals.remove(&pod.id);
+            self.principals.lock().await.remove(&pod.id);
             return Err(firewall_error(error));
         }
         Ok(binding)
@@ -410,14 +425,17 @@ impl GuestNetworkService {
         principal: &Pod,
         _binding: &NetworkBinding,
     ) -> Result<(), RemoteError> {
-        let mut principals = self.principals.lock().await;
-        let active = principals
-            .values()
-            .filter(|runtime| runtime.principal.pod.id != principal.id)
-            .map(|runtime| runtime.binding.clone())
-            .collect::<Vec<_>>();
+        let _mutation = self.mutations.lock().await;
+        let active = {
+            let principals = self.principals.lock().await;
+            principals
+                .values()
+                .filter(|runtime| runtime.principal.pod.id != principal.id)
+                .map(|runtime| runtime.binding.clone())
+                .collect::<Vec<_>>()
+        };
         self.firewall.sync(&active).await.map_err(firewall_error)?;
-        principals.remove(&principal.id);
+        self.principals.lock().await.remove(&principal.id);
         Ok(())
     }
 

@@ -1923,11 +1923,34 @@ async fn recover(
                 .map_err(state_error)?;
             continue;
         }
-        if stored_ids.contains(runtime_id.as_str()) {
-            let pod_storage = stored
-                .iter()
-                .find(|storage| storage.id() == &runtime_id)
-                .expect("stored pod identifiers were collected from these entries");
+        let mut pod_storage = stored
+            .iter()
+            .find(|storage| storage.id() == &runtime_id)
+            .cloned();
+        if pod_storage.is_none() && record.persistent_state == PersistentPodState::Creating {
+            let storage = Arc::clone(storage);
+            let creating_id = runtime_id.clone();
+            let image = record.image.clone();
+            match blocking("resume pod storage creation", move || {
+                storage.create_pod(creating_id, &image)
+            })
+            .await
+            {
+                Ok(created) => pod_storage = Some(created),
+                Err(error) => {
+                    warn!(
+                        pod_id = %record.pod.id.0,
+                        %error,
+                        "could not resume interrupted pod storage creation"
+                    );
+                    record.pod.status = api::PodState::Failed(api::PodFailure {
+                        message: error.to_string().into(),
+                        failed_at: Timestamp::now(),
+                    });
+                }
+            }
+        }
+        if let Some(pod_storage) = pod_storage.as_ref() {
             if pod_storage.image() != &record.image {
                 return Err(internal(format!(
                     "pod {} state pins a different image than its storage",
@@ -1952,7 +1975,9 @@ async fn recover(
                 })
                 .await?;
             }
-            if !matches!(record.pod.status, api::PodState::Failed(_)) {
+            if record.persistent_state == PersistentPodState::Creating
+                || !matches!(record.pod.status, api::PodState::Failed(_))
+            {
                 record.persistent_state = PersistentPodState::Ready;
                 record.pod.status = api::PodState::Stopped;
             }
@@ -1963,10 +1988,12 @@ async fn recover(
                 roots.withdraw(&withdrawn_id)
             })
             .await?;
-            record.pod.status = api::PodState::Failed(api::PodFailure {
-                message: "pod storage is missing".into(),
-                failed_at: Timestamp::now(),
-            });
+            if !matches!(record.pod.status, api::PodState::Failed(_)) {
+                record.pod.status = api::PodState::Failed(api::PodFailure {
+                    message: "pod storage is missing".into(),
+                    failed_at: Timestamp::now(),
+                });
+            }
         }
         state.save(record.clone()).await.map_err(state_error)?;
         recovered.insert(record.pod.id.clone(), record);

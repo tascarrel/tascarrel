@@ -156,12 +156,14 @@
 //! complete generation. The temporary archive exists only while a new snapshot
 //! is received or after an interrupted receive.
 //!
-//! The `store` namespace uses Tascarrel Btrfs store format 4. Published image
+//! The `store` namespace uses Tascarrel Btrfs store format 5. Published image
 //! roots are read-only subvolumes. Each pod owns independent writable root,
 //! workspace, and nested-Docker subvolumes. Cache entries are workspace-level
 //! subvolumes shared into pods through idmapped mounts. Transaction, staging,
 //! publishing, and trash directories make Btrfs mutations recoverable after
-//! interruption.
+//! interruption. Publication waits only for the Btrfs transaction containing
+//! the new metadata; it does not issue a full shared-filesystem sync. Pod and
+//! image resource locks keep unrelated mutations independent.
 //!
 //! Repository checkout generations are read-only subvolumes below
 //! `repositories`. The `store/workspace-seed` path is a writable snapshot of
@@ -291,6 +293,7 @@ mod layout;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use database::Database;
 pub use database::DatabaseError;
@@ -334,15 +337,17 @@ impl GuestStorage {
 
         let store_root = layout.store_root().to_owned();
         let btrfs_program = config.btrfs_program;
-        let store =
-            tokio::task::spawn_blocking(move || BtrfsStore::open(store_root, btrfs_program))
-                .await
-                .map_err(|error| {
-                    GuestStorageError::Store
-                        .report()
-                        .message(format!("store initialization task failed: {error}"))
-                })?
-                .map_err(|error| GuestStorageError::Store.report().message(error.to_string()))?;
+        let btrfs_operation_timeout = config.btrfs_operation_timeout;
+        let store = tokio::task::spawn_blocking(move || {
+            BtrfsStore::open_with_timeout(store_root, btrfs_program, btrfs_operation_timeout)
+        })
+        .await
+        .map_err(|error| {
+            GuestStorageError::Store
+                .report()
+                .message(format!("store initialization task failed: {error}"))
+        })?
+        .map_err(|error| GuestStorageError::Store.report().message(error.to_string()))?;
 
         Ok(Self {
             layout,
@@ -411,6 +416,7 @@ impl GuestStorage {
 pub struct GuestStorageConfig {
     root: PathBuf,
     btrfs_program: PathBuf,
+    btrfs_operation_timeout: Duration,
 }
 
 impl GuestStorageConfig {
@@ -420,7 +426,15 @@ impl GuestStorageConfig {
         Self {
             root: root.into(),
             btrfs_program: btrfs_program.into(),
+            btrfs_operation_timeout: Duration::from_mins(2),
         }
+    }
+
+    /// Sets the availability deadline for one Btrfs operation.
+    #[must_use]
+    pub const fn with_btrfs_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.btrfs_operation_timeout = timeout;
+        self
     }
 }
 
