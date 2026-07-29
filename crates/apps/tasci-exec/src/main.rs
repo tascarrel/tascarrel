@@ -4,6 +4,7 @@ use std::env;
 use std::fmt;
 use std::io;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,6 +18,7 @@ use tascarrel_agent::AgentEvent;
 use tascarrel_agent::AgentEventHandler;
 use tascarrel_agent::AgentRun;
 use tascarrel_agent::AgentSession;
+use tascarrel_agent::AgentSessionStore;
 use tascarrel_agent::BashTool;
 use tascarrel_agent::EditTool;
 use tascarrel_agent::FileWorkspace;
@@ -30,6 +32,7 @@ use tascarrel_agent::ReadTool;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
 use tascarrel_agent::TasciHarnessEvent;
+use tascarrel_agent::TasciHarnessSession;
 use tascarrel_agent::ToolArtifact;
 use tascarrel_agent::ToolRegistry;
 use tascarrel_agent::WriteTool;
@@ -41,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 const LOCAL_API_BASE_URL: &str = "http://host.tascarrel.internal:18080/v1";
 const LOCAL_MODEL: &str = "qwen3.6-35b-a3b-q6";
+const TASCI_SESSION_DIRECTORY_ENVIRONMENT: &str = "TASCI_SESSION_DIR";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -126,7 +130,10 @@ async fn run_once(prompt: String) -> TasciExecResult<()> {
 async fn run_harness() -> TasciExecResult<()> {
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
-    let TasciHarnessCommand::Start { configuration } = read_harness_command(&mut input).await?
+    let TasciHarnessCommand::Start {
+        configuration,
+        session: requested_session,
+    } = read_harness_command(&mut input).await?
     else {
         return Err(TasciExecError::ProtocolInput {
             message: "the first harness command must be start".to_owned(),
@@ -135,19 +142,12 @@ async fn run_harness() -> TasciExecResult<()> {
     };
     let runtime = open_agent_runtime(&configuration).await?;
     let mut agent = Arc::new(build_agent(&configuration, &runtime)?);
-    tracing::info!(model = %configuration.model, "Tasci harness started");
-    write_harness_event(&mut output, TasciHarnessEvent::Started).await?;
-    for warning in &runtime.warnings {
-        write_harness_event(
-            &mut output,
-            TasciHarnessEvent::Warning {
-                code: "mcp_server_unavailable".to_owned(),
-                message: warning.clone(),
-            },
-        )
-        .await?;
-    }
-    let mut session = AgentSession::new();
+    let Some((mut session_store, mut session)) =
+        initialize_protocol_session(&configuration, requested_session, &mut output).await?
+    else {
+        return Ok(());
+    };
+    announce_harness_started(&mut output, &configuration.model, &runtime.warnings).await?;
 
     loop {
         match read_harness_command(&mut input).await? {
@@ -172,9 +172,15 @@ async fn run_harness() -> TasciExecResult<()> {
                     agent = Arc::new(build_agent(&configuration, &runtime)?);
                     tracing::info!(model = %configuration.model, "Tasci harness model changed");
                 }
-                let turn =
-                    run_harness_turn(Arc::clone(&agent), session, prompt, &mut input, &mut output)
-                        .await?;
+                let turn = run_harness_turn(
+                    Arc::clone(&agent),
+                    session,
+                    prompt,
+                    &mut session_store,
+                    &mut input,
+                    &mut output,
+                )
+                .await?;
                 session = turn.session;
                 if turn.stop {
                     tracing::info!("Tasci harness stopped");
@@ -183,9 +189,14 @@ async fn run_harness() -> TasciExecResult<()> {
                 }
             }
             TasciHarnessCommand::Compact => {
-                let compaction =
-                    run_harness_compaction(Arc::clone(&agent), session, &mut input, &mut output)
-                        .await?;
+                let compaction = run_harness_compaction(
+                    Arc::clone(&agent),
+                    session,
+                    &mut session_store,
+                    &mut input,
+                    &mut output,
+                )
+                .await?;
                 session = compaction.session;
                 if compaction.stop {
                     tracing::info!("Tasci harness stopped");
@@ -227,6 +238,7 @@ async fn run_harness_turn(
     agent: Arc<Agent>,
     session: AgentSession,
     prompt: String,
+    session_store: &mut Option<AgentSessionStore>,
     input: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     output: &mut tokio::io::Stdout,
 ) -> TasciExecResult<HarnessTurn> {
@@ -274,16 +286,15 @@ async fn run_harness_turn(
     }
     match result {
         Ok(AgentRun { session, .. }) => {
-            tracing::info!("Tasci turn completed");
-            write_harness_event(
+            finish_successful_harness_operation(
+                session_store,
+                session,
+                fallback_session,
+                stop,
                 output,
-                TasciHarnessEvent::TurnFinished {
-                    error: None,
-                    cancelled: false,
-                },
+                "turn",
             )
-            .await?;
-            Ok(HarnessTurn { session, stop })
+            .await
         }
         Err(_error) if cancellation.is_cancelled() => {
             tracing::info!("Tasci turn cancelled");
@@ -322,6 +333,7 @@ async fn run_harness_turn(
 async fn run_harness_compaction(
     agent: Arc<Agent>,
     session: AgentSession,
+    session_store: &mut Option<AgentSessionStore>,
     input: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     output: &mut tokio::io::Stdout,
 ) -> TasciExecResult<HarnessTurn> {
@@ -368,16 +380,15 @@ async fn run_harness_compaction(
     }
     match result {
         Ok(AgentRun { session, .. }) => {
-            tracing::info!("Tasci context compaction completed");
-            write_harness_event(
+            finish_successful_harness_operation(
+                session_store,
+                session,
+                fallback_session,
+                stop,
                 output,
-                TasciHarnessEvent::TurnFinished {
-                    error: None,
-                    cancelled: false,
-                },
+                "context compaction",
             )
-            .await?;
-            Ok(HarnessTurn { session, stop })
+            .await
         }
         Err(_error) if cancellation.is_cancelled() => {
             tracing::info!("Tasci context compaction cancelled");
@@ -411,6 +422,127 @@ async fn run_harness_compaction(
             })
         }
     }
+}
+
+/// Opens the ephemeral, new, or restored native session requested at startup.
+async fn initialize_harness_session(
+    configuration: &TasciHarnessConfiguration,
+    requested_session: Option<TasciHarnessSession>,
+) -> TasciExecResult<(Option<AgentSessionStore>, AgentSession)> {
+    let Some(requested_session) = requested_session else {
+        return Ok((None, AgentSession::new()));
+    };
+    let directory = session_directory()?;
+    match requested_session {
+        TasciHarnessSession::Create { session_id } => {
+            let store =
+                AgentSessionStore::create(directory, &session_id, &configuration.working_directory)
+                    .await
+                    .map_err(|error| error.escalate(TasciExecError::SessionStorage))?;
+            Ok((Some(store), AgentSession::new()))
+        }
+        TasciHarnessSession::Resume { session_id } => {
+            let (store, session) =
+                AgentSessionStore::open(directory, &session_id, &configuration.working_directory)
+                    .await
+                    .map_err(|error| error.escalate(TasciExecError::SessionStorage))?;
+            Ok((Some(store), session))
+        }
+    }
+}
+
+/// Announces readiness and any optional integrations unavailable at startup.
+async fn announce_harness_started(
+    output: &mut tokio::io::Stdout,
+    model: &str,
+    warnings: &[String],
+) -> TasciExecResult<()> {
+    tracing::info!(model, "Tasci harness started");
+    write_harness_event(output, TasciHarnessEvent::Started).await?;
+    for warning in warnings {
+        write_harness_event(
+            output,
+            TasciHarnessEvent::Warning {
+                code: "mcp_server_unavailable".to_owned(),
+                message: warning.clone(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reports session initialization failures through the harness protocol.
+async fn initialize_protocol_session(
+    configuration: &TasciHarnessConfiguration,
+    requested_session: Option<TasciHarnessSession>,
+    output: &mut tokio::io::Stdout,
+) -> TasciExecResult<Option<(Option<AgentSessionStore>, AgentSession)>> {
+    match initialize_harness_session(configuration, requested_session).await {
+        Ok(session) => Ok(Some(session)),
+        Err(error) => {
+            tracing::warn!(%error, "Tasci session initialization failed");
+            write_harness_event(
+                output,
+                TasciHarnessEvent::Failed {
+                    message: error.error().to_string(),
+                },
+            )
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+/// Resolves the configured session root or its pod-home default.
+fn session_directory() -> TasciExecResult<PathBuf> {
+    let directory = env::var_os(TASCI_SESSION_DIRECTORY_ENVIRONMENT)
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".tasci/sessions")))
+        .ok_or_else(|| TasciExecError::MissingSessionDirectory.report())?;
+    if !directory.is_absolute() {
+        return Err(TasciExecError::RelativeSessionDirectory { path: directory }.report());
+    }
+    Ok(directory)
+}
+
+/// Commits a successful operation before acknowledging it to the caller.
+async fn finish_successful_harness_operation(
+    session_store: &mut Option<AgentSessionStore>,
+    session: AgentSession,
+    fallback_session: AgentSession,
+    stop: bool,
+    output: &mut tokio::io::Stdout,
+    operation: &'static str,
+) -> TasciExecResult<HarnessTurn> {
+    if let Some(store) = session_store
+        && let Err(error) = store.persist(&session).await
+    {
+        let error = error.escalate(TasciExecError::SessionStorage);
+        tracing::warn!(%error, operation, "Tasci session persistence failed");
+        write_harness_event(
+            output,
+            TasciHarnessEvent::TurnFinished {
+                error: Some(error.error().to_string()),
+                cancelled: false,
+            },
+        )
+        .await?;
+        return Ok(HarnessTurn {
+            session: fallback_session,
+            stop: true,
+        });
+    }
+    tracing::info!(operation, "Tasci harness operation completed");
+    write_harness_event(
+        output,
+        TasciHarnessEvent::TurnFinished {
+            error: None,
+            cancelled: false,
+        },
+    )
+    .await?;
+    Ok(HarnessTurn { session, stop })
 }
 
 async fn read_harness_command(
@@ -737,6 +869,18 @@ enum TasciExecError {
     /// The agentic loop failed.
     #[error("Tasci agent run failed")]
     Agent,
+    /// A persistent session was requested without a usable storage root.
+    #[error("Tasci session storage requires HOME or TASCI_SESSION_DIR")]
+    MissingSessionDirectory,
+    /// A configured session root could escape the harness account's storage.
+    #[error("Tasci session storage directory must be absolute: {path}")]
+    RelativeSessionDirectory {
+        /// Rejected session root.
+        path: PathBuf,
+    },
+    /// A native session journal could not be opened or extended.
+    #[error("failed to access the Tasci session journal")]
+    SessionStorage,
     /// Interrupt handling failed.
     #[error("failed to wait for an interrupt")]
     Interrupt,

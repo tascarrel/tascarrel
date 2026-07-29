@@ -17,6 +17,7 @@ use tascarrel_agent::AgentEvent;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
 use tascarrel_agent::TasciHarnessEvent;
+use tascarrel_agent::TasciHarnessSession;
 use tempfile::tempdir;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncReadExt as _;
@@ -74,6 +75,7 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
                 working_directory: workspace.path().to_string_lossy().into_owned(),
                 mcp_servers: Vec::new(),
             },
+            session: None,
         },
     )
     .await;
@@ -181,6 +183,7 @@ async fn harness_scenario_reports_an_empty_model_response() {
                 working_directory: workspace.path().to_string_lossy().into_owned(),
                 mcp_servers: Vec::new(),
             },
+            session: None,
         },
     )
     .await;
@@ -247,6 +250,7 @@ async fn harness_scenario_compacts_context_and_continues_from_the_checkpoint() {
                 working_directory: workspace.path().to_string_lossy().into_owned(),
                 mcp_servers: Vec::new(),
             },
+            session: None,
         },
     )
     .await;
@@ -305,6 +309,138 @@ async fn harness_scenario_compacts_context_and_continues_from_the_checkpoint() {
 
     assert_compaction_requests(requests);
     server.await.unwrap();
+}
+
+/// Exercises durable JSONL recovery through two independent harness
+/// processes.
+#[tokio::test]
+async fn harness_scenario_resumes_a_persisted_native_session() {
+    let (base_url, mut requests, server) =
+        serve_model_scenario(["The first answer.", "The resumed answer."]).await;
+    let workspace = tempdir().unwrap();
+    let sessions = tempdir().unwrap();
+    let session_id = "018f2a26-4c89-7f70-a65f-3f956a7d88a1";
+    let mut first = start_persistent_harness(
+        &base_url,
+        workspace.path(),
+        sessions.path(),
+        TasciHarnessSession::Create {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await;
+    send_command(
+        &mut first.input,
+        TasciHarnessCommand::Prompt {
+            prompt: "First question.".to_owned(),
+            configuration: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        read_turn(&mut first.output).await,
+        vec!["The first answer.".to_owned()]
+    );
+    first.stop().await;
+
+    let mut resumed = start_persistent_harness(
+        &base_url,
+        workspace.path(),
+        sessions.path(),
+        TasciHarnessSession::Resume {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await;
+    send_command(
+        &mut resumed.input,
+        TasciHarnessCommand::Prompt {
+            prompt: "Second question.".to_owned(),
+            configuration: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        read_turn(&mut resumed.output).await,
+        vec!["The resumed answer.".to_owned()]
+    );
+    resumed.stop().await;
+
+    let first_request = requests.recv().await.unwrap();
+    let resumed_request = requests.recv().await.unwrap();
+    assert_eq!(
+        message_projection(&resumed_request),
+        vec![
+            ("system", first_request.messages[0].content.as_str()),
+            ("user", "First question."),
+            ("assistant", "The first answer."),
+            ("user", "Second question."),
+        ]
+    );
+    server.await.unwrap();
+}
+
+struct RunningHarness {
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+}
+
+impl RunningHarness {
+    async fn stop(mut self) {
+        send_command(&mut self.input, TasciHarnessCommand::Stop).await;
+        assert_eq!(
+            read_event(&mut self.output).await,
+            TasciHarnessEvent::Stopped
+        );
+        assert!(self.child.wait().await.unwrap().success());
+    }
+}
+
+async fn start_persistent_harness(
+    base_url: &str,
+    workspace: &std::path::Path,
+    session_directory: &std::path::Path,
+    session: TasciHarnessSession,
+) -> RunningHarness {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tasci-exec"))
+        .arg("--harness")
+        .env("TASCI_SESSION_DIR", session_directory)
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let input = child.stdin.take().unwrap();
+    let output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut harness = RunningHarness {
+        child,
+        input,
+        output,
+    };
+    send_command(
+        &mut harness.input,
+        TasciHarnessCommand::Start {
+            configuration: TasciHarnessConfiguration {
+                base_url: format!("{base_url}/v1"),
+                model: "persistent-model".to_owned(),
+                context_window: None,
+                max_output_tokens: None,
+                authorization: None,
+                working_directory: workspace.to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
+            },
+            session: Some(session),
+        },
+    )
+    .await;
+    assert_eq!(
+        read_event(&mut harness.output).await,
+        TasciHarnessEvent::Started
+    );
+    harness
 }
 
 fn compaction_responses() -> Vec<String> {

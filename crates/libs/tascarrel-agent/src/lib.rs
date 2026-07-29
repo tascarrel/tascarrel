@@ -7,6 +7,9 @@
 //! [`McpClient`] discovers text-based operations from configured Streamable
 //! HTTP MCP servers and adapts them to the same registry used by built-in
 //! tools.
+//! [`AgentSession`] retains the complete provider-neutral history, and
+//! [`AgentSessionStore`] persists that history as a recoverable append-only
+//! journal.
 //!
 //! The built-in file tools share a [`FileWorkspace`]. Paged reads record both
 //! file revisions and model-visible byte ranges. Subsequent edits and writes
@@ -29,6 +32,7 @@ mod process_runtime;
 mod prompt;
 mod provider;
 mod session;
+mod session_store;
 mod tool;
 mod tools;
 
@@ -52,6 +56,7 @@ pub use harness_protocol::McpServerConfiguration;
 pub use harness_protocol::TasciHarnessCommand;
 pub use harness_protocol::TasciHarnessConfiguration;
 pub use harness_protocol::TasciHarnessEvent;
+pub use harness_protocol::TasciHarnessSession;
 pub use mcp::DEFAULT_MCP_CONNECT_TIMEOUT;
 pub use mcp::DEFAULT_MCP_OUTPUT_BYTE_LIMIT;
 pub use mcp::DEFAULT_MCP_SSE_EVENT_BYTE_LIMIT;
@@ -87,6 +92,9 @@ pub use session::SessionEntryId;
 pub use session::SessionEntryValue;
 pub use session::SessionError;
 pub use session::SessionResult;
+pub use session_store::AgentSessionStore;
+pub use session_store::AgentSessionStoreError;
+pub use session_store::AgentSessionStoreResult;
 pub use tool::FileChange;
 pub use tool::FileChangeOperation;
 pub use tool::Tool;

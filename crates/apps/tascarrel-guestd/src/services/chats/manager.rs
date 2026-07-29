@@ -1459,7 +1459,7 @@ fn initial_tasci_harness(installed: bool) -> api::ChatHarness {
 fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
     match kind {
         api::ChatHarnessKind::Tasci => api::ChatHarnessCapabilities {
-            resume_session: false,
+            resume_session: true,
             interrupt_turn: true,
             steer_turn: false,
             structured_user_input: false,

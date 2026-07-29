@@ -16,6 +16,7 @@ use tascarrel_agent::ModelUsage;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
 use tascarrel_agent::TasciHarnessEvent;
+use tascarrel_agent::TasciHarnessSession;
 use tascarrel_agent::ToolArtifact;
 use tascarrel_api::ArcVec;
 use tascarrel_api::ids::ChatItemId;
@@ -39,6 +40,7 @@ use tascarrel_api::types::chats::TextContent;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::services::chats::harness::Harness;
 use crate::services::chats::harness::HarnessControl;
@@ -53,11 +55,15 @@ use crate::services::chats::harness::protocol::HarnessEventPayload;
 use crate::services::chats::harness::protocol::HarnessPrompt;
 use crate::services::chats::harness::protocol::HarnessPromptAttachment;
 use crate::services::chats::harness::protocol::ProviderEventReferences;
+use crate::services::chats::harness::protocol::ProviderSessionId;
+use crate::services::chats::harness::protocol::ResumeCursor;
 use crate::services::chats::harness::protocol::SessionState;
 use crate::services::chats::harness::protocol::StartSessionRequest;
 use crate::services::chats::process::HarnessProcessControl;
 use crate::services::chats::process::HarnessProcessLauncher;
 use crate::services::chats::process::HarnessProcessSpec;
+
+const TASCI_RESUME_CURSOR_VERSION: u32 = 1;
 
 /// Adapter for the line-delimited protocol implemented by `tasci-exec`.
 pub struct TasciAdaptor {
@@ -95,12 +101,7 @@ impl Harness for TasciAdaptor {
         request: StartSessionRequest,
     ) -> BoxFuture<'_, Result<HarnessSession, HarnessError>> {
         Box::pin(async move {
-            if request.resume_cursor.is_some() {
-                return Err(harness_error(
-                    HarnessErrorKind::InvalidResumeCursor,
-                    "Tasci session resumption is not available yet",
-                ));
-            }
+            let requested_session = resolve_native_session(request.resume_cursor.as_ref())?;
             if let Some(selection) = request.model
                 && selection != self.configuration.selection
             {
@@ -123,16 +124,30 @@ impl Harness for TasciAdaptor {
                 &process.control,
                 TasciHarnessCommand::Start {
                     configuration: self.configuration.harness.clone(),
+                    session: Some(requested_session.protocol),
                 },
             )
             .await?;
             let mut lines = BufReader::new(process.stdout).lines();
             let started = read_event(&mut lines).await?;
-            if started != TasciHarnessEvent::Started {
-                return Err(harness_error(
-                    HarnessErrorKind::Protocol,
-                    "Tasci did not acknowledge harness initialization",
-                ));
+            match started {
+                TasciHarnessEvent::Started => {}
+                TasciHarnessEvent::Failed { message } => {
+                    return Err(harness_error(
+                        if requested_session.resuming {
+                            HarnessErrorKind::InvalidResumeCursor
+                        } else {
+                            HarnessErrorKind::ProcessStart
+                        },
+                        message,
+                    ));
+                }
+                _ => {
+                    return Err(harness_error(
+                        HarnessErrorKind::Protocol,
+                        "Tasci did not acknowledge harness initialization",
+                    ));
+                }
             }
 
             let state = Arc::new(Mutex::new(TasciSessionState {
@@ -147,31 +162,11 @@ impl Harness for TasciAdaptor {
             }));
             let (events, receiver) = mpsc::unbounded_channel();
             let control_events = events.clone();
-            emit_event(
+            emit_session_started(
                 &events,
-                base_event(None, None, HarnessEventPayload::SessionStarted),
-            );
-            emit_event(
-                &events,
-                base_event(
-                    None,
-                    None,
-                    HarnessEventPayload::ModelChanged {
-                        model: self.configuration.selection.clone(),
-                    },
-                ),
-            );
-            emit_event(
-                &events,
-                base_event(
-                    None,
-                    None,
-                    HarnessEventPayload::SessionStateChanged {
-                        state: SessionState::Ready,
-                        reason: None,
-                    },
-                ),
-            );
+                &requested_session.provider_session_id,
+                &self.configuration.selection,
+            )?;
             let reader_state = Arc::clone(&state);
             let reader_control = Arc::clone(&process.control);
             tokio::spawn(async move {
@@ -1211,6 +1206,17 @@ fn base_event(
     }
 }
 
+fn provider_event(
+    provider_session_id: &ProviderSessionId,
+    turn_id: Option<ChatTurnId>,
+    item_id: Option<ChatItemId>,
+    payload: HarnessEventPayload,
+) -> HarnessEvent {
+    let mut event = base_event(turn_id, item_id, payload);
+    event.provider_references.provider_session_id = Some(provider_session_id.clone());
+    event
+}
+
 fn emit_event(
     output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
     event: HarnessEvent,
@@ -1258,6 +1264,135 @@ struct CompactionPresentation {
     tokens_before: u64,
     estimated_tokens_after: u64,
     error: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TasciResumeCursor {
+    version: u32,
+    session_id: String,
+}
+
+struct TasciNativeSession {
+    provider_session_id: ProviderSessionId,
+    protocol: TasciHarnessSession,
+    resuming: bool,
+}
+
+/// Resolves a durable native-session operation from the engine cursor.
+fn resolve_native_session(
+    cursor: Option<&ResumeCursor>,
+) -> Result<TasciNativeSession, HarnessError> {
+    let resumed_session_id = cursor.map(parse_resume_cursor).transpose()?;
+    let resuming = resumed_session_id.is_some();
+    let provider_session_id =
+        ProviderSessionId(resumed_session_id.unwrap_or_else(|| Uuid::new_v4().to_string()));
+    let protocol = if resuming {
+        TasciHarnessSession::Resume {
+            session_id: provider_session_id.0.clone(),
+        }
+    } else {
+        TasciHarnessSession::Create {
+            session_id: provider_session_id.0.clone(),
+        }
+    };
+    Ok(TasciNativeSession {
+        provider_session_id,
+        protocol,
+        resuming,
+    })
+}
+
+/// Validates and decodes the adaptor-owned cursor representation.
+fn parse_resume_cursor(cursor: &ResumeCursor) -> Result<String, HarnessError> {
+    let cursor = serde_json::from_value::<TasciResumeCursor>(cursor.0.clone()).map_err(|_| {
+        harness_error(
+            HarnessErrorKind::InvalidResumeCursor,
+            "the Tasci resume cursor has an invalid shape",
+        )
+    })?;
+    if cursor.version != TASCI_RESUME_CURSOR_VERSION {
+        return Err(harness_error(
+            HarnessErrorKind::InvalidResumeCursor,
+            format!(
+                "Tasci resume cursor version {} is unsupported",
+                cursor.version
+            ),
+        ));
+    }
+    let session_id = Uuid::parse_str(&cursor.session_id).map_err(|_| {
+        harness_error(
+            HarnessErrorKind::InvalidResumeCursor,
+            "the Tasci resume cursor session id is not a UUID",
+        )
+    })?;
+    Ok(session_id.to_string())
+}
+
+/// Encodes a native session identifier as an opaque engine cursor.
+fn resume_cursor(provider_session_id: &ProviderSessionId) -> Result<ResumeCursor, HarnessError> {
+    serde_json::to_value(TasciResumeCursor {
+        version: TASCI_RESUME_CURSOR_VERSION,
+        session_id: provider_session_id.0.clone(),
+    })
+    .map(ResumeCursor)
+    .map_err(|error| {
+        harness_error(
+            HarnessErrorKind::Internal,
+            format!("failed to encode the Tasci resume cursor: {error}"),
+        )
+    })
+}
+
+/// Publishes the normalized initial state for a durable Tasci session.
+fn emit_session_started(
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    provider_session_id: &ProviderSessionId,
+    model: &ChatModelSelection,
+) -> Result<(), HarnessError> {
+    emit_event(
+        output,
+        provider_event(
+            provider_session_id,
+            None,
+            None,
+            HarnessEventPayload::SessionStarted,
+        ),
+    );
+    emit_event(
+        output,
+        provider_event(
+            provider_session_id,
+            None,
+            None,
+            HarnessEventPayload::ResumeCursorUpdated {
+                resume_cursor: resume_cursor(provider_session_id)?,
+            },
+        ),
+    );
+    emit_event(
+        output,
+        provider_event(
+            provider_session_id,
+            None,
+            None,
+            HarnessEventPayload::ModelChanged {
+                model: model.clone(),
+            },
+        ),
+    );
+    emit_event(
+        output,
+        provider_event(
+            provider_session_id,
+            None,
+            None,
+            HarnessEventPayload::SessionStateChanged {
+                state: SessionState::Ready,
+                reason: None,
+            },
+        ),
+    );
+    Ok(())
 }
 
 fn add_optional_usage(first: Option<u64>, second: Option<u64>) -> Option<u64> {
@@ -1310,6 +1445,18 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies the durable engine cursor round-trips only the versioned native
+    /// session identifier.
+    #[test]
+    fn resume_cursor_round_trips_the_native_session_identifier() {
+        let provider_session_id =
+            ProviderSessionId("018f2a26-4c89-7f70-a65f-3f956a7d88a1".to_owned());
+
+        let cursor = resume_cursor(&provider_session_id).unwrap();
+
+        assert_eq!(parse_resume_cursor(&cursor).unwrap(), provider_session_id.0);
+    }
 
     /// Verifies one turn presents its user message and model change exactly
     /// once.

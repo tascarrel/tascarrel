@@ -43,6 +43,22 @@ pub struct McpServerConfiguration {
     pub headers: BTreeMap<String, String>,
 }
 
+/// Persistent native session requested during harness initialization.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum TasciHarnessSession {
+    /// Creates an empty append-only session journal.
+    Create {
+        /// Harness-owned opaque session identifier.
+        session_id: String,
+    },
+    /// Restores and continues an existing session journal.
+    Resume {
+        /// Harness-owned opaque session identifier.
+        session_id: String,
+    },
+}
+
 /// One command written to a Tasci harness process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -51,6 +67,8 @@ pub enum TasciHarnessCommand {
     Start {
         /// Endpoint, model, and workspace configuration.
         configuration: TasciHarnessConfiguration,
+        /// Persistent session operation, or none for an ephemeral process.
+        session: Option<TasciHarnessSession>,
     },
     /// Starts one agent turn while retaining prior model context.
     Prompt {
