@@ -1,0 +1,351 @@
+//! Durable, approval-gated execution of trusted commands on the physical host.
+//!
+//! A pod requests a configured command and transfers every declared repository
+//! input before the operation can await approval. Host and browser clients may
+//! approve, reject, postpone, or stop an operation. Operation metadata, audit
+//! events, and raw stdout/stderr chunks are retained permanently.
+
+import common::Timestamp
+import pods::PodId
+import processes::ProcessTerminalData
+import protocol::Actor
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Creates one immutable host operation from a trusted workspace command definition.
+record RequestHostOperationAction {
+    /// Workspace whose trusted command definition is selected.
+    workspace: WorkspaceName,
+    /// Configured host-command name.
+    command: string,
+    /// Values for the command's declared parameters.
+    parameters: [string: string],
+}
+
+/// Newly created operation and repository inputs which the pod must upload.
+record RequestHostOperationOutput {
+    /// Stable operation identifier.
+    operation_id: HostOperationId,
+    /// Repository captures required before approval can begin.
+    inputs: [HostOperationPendingInput],
+}
+
+/// Applies a host-authorized decision to an operation awaiting approval.
+record ResolveHostOperationAction {
+    /// Operation receiving the decision.
+    operation_id: HostOperationId,
+    /// Decision to apply.
+    decision: HostOperationDecision,
+}
+
+/// Acknowledges that the decision was durably recorded.
+record ResolveHostOperationOutput {}
+
+/// Stops an approved operation or withdraws one still being prepared or approved.
+record CancelHostOperationAction {
+    /// Operation to stop or withdraw.
+    operation_id: HostOperationId,
+}
+
+/// Acknowledges that cancellation was requested.
+record CancelHostOperationOutput {}
+
+// Subscriptions
+
+/// Subscribes to durable host operations visible to the caller.
+record HostOperationListChangedSubscription {
+    /// Restricts results to one workspace when supplied.
+    workspace?: WorkspaceName,
+    /// Restricts results to one originating pod when supplied.
+    pod_id?: PodId,
+    /// Last complete list revision already observed.
+    cursor?: HostOperationRevision,
+}
+
+/// Complete visible operation list emitted whenever its revision changes.
+record HostOperationListChangedEvent {
+    /// Revision derived from the complete emitted list.
+    revision: HostOperationRevision,
+    /// Operations ordered from newest to oldest.
+    value: HostOperationList,
+}
+
+/// Replays and follows the permanent structured audit stream for one operation.
+record HostOperationAuditSubscription {
+    /// Operation whose audit stream is observed.
+    operation_id: HostOperationId,
+    /// Last sequence already observed, or absent to replay from the beginning.
+    after_sequence?: u64,
+}
+
+/// One audit event or the replay/live boundary.
+record HostOperationAuditEvent {
+    /// Audit update.
+    update: HostOperationAuditUpdate,
+}
+
+/// Replays and follows permanent raw standard output and standard error.
+record HostOperationOutputSubscription {
+    /// Operation whose output is observed.
+    operation_id: HostOperationId,
+    /// Last global chunk sequence already observed, or absent to replay from the beginning.
+    after_sequence?: u64,
+}
+
+/// One raw output chunk or the replay/live boundary.
+record HostOperationOutputEvent {
+    /// Output update.
+    update: HostOperationOutputUpdate,
+}
+
+// Domain Types
+
+/// Identifies one durable host operation.
+#[json(type = "string")]
+#[rust(type = "crate::ids::HostOperationId")]
+opaque HostOperationId
+
+/// SHA-256 revision derived from one complete host-operation list.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper HostOperationRevision: string
+
+/// Complete host-operation inventory.
+record HostOperationList {
+    /// Operations ordered from newest to oldest.
+    operations: [HostOperation],
+}
+
+/// One immutable request and its current durable lifecycle state.
+record HostOperation {
+    /// Stable operation identifier.
+    id: HostOperationId,
+    /// Workspace whose trusted command definition was captured.
+    workspace: WorkspaceName,
+    /// Pod which requested the operation.
+    pod_id: PodId,
+    /// Configured command name.
+    command: string,
+    /// Human-readable purpose captured from configuration.
+    description?: string,
+    /// Caller which created the request.
+    requested_by: Actor,
+    /// Time at which hostd admitted the request.
+    created_at: Timestamp,
+    /// Current lifecycle state.
+    state: HostOperationState,
+    /// Validated parameter values captured with the request.
+    parameters: [string: string],
+    /// Executable shown for approval.
+    program: string,
+    /// Fully expanded argument list shown for approval.
+    arguments: [string],
+    /// Working directory shown for approval once inputs are prepared.
+    working_directory?: string,
+    /// Host environment variable names, never their values, exposed to the process.
+    environment_names: [string],
+    /// Repository inputs pinned for this request.
+    inputs: [HostOperationInput],
+}
+
+/// One repository input which still needs transfer.
+record HostOperationPendingInput {
+    /// Input name from the trusted command definition.
+    name: string,
+    /// Configured repository path below `/workspace`.
+    repository: string,
+    /// Capture policy applied by the pod helper.
+    capture: HostOperationCapture,
+}
+
+/// One pinned repository state included in an operation.
+record HostOperationInput {
+    /// Input name from the trusted command definition.
+    name: string,
+    /// Configured repository path below `/workspace`.
+    repository: string,
+    /// Capture policy used by the pod helper.
+    capture: HostOperationCapture,
+    /// Synthetic or selected Git commit pinned by the host.
+    revision?: string,
+    /// Original repository `HEAD` used for review, when available.
+    base_revision?: string,
+    /// Materialized private host path after transfer.
+    materialized_path?: string,
+    /// Display-safe summary of files changed from the base revision.
+    change_summary?: string,
+}
+
+/// Repository state accepted for a host-command input.
+#[rust(derive(Copy))]
+variant HostOperationCapture {
+    /// Captures staged, unstaged, and non-ignored untracked files in a synthetic commit.
+    WorkingTree,
+    /// Requires a clean worktree and captures `HEAD`.
+    CleanHead,
+    /// Captures `HEAD` without requiring a clean worktree.
+    Commit,
+    /// Captures `HEAD` only when it is reachable from a remote-tracking ref.
+    PublishedRef,
+}
+
+/// Current durable operation state.
+#[json(tag = "status")]
+variant HostOperationState {
+    /// Repository inputs are still being captured and transferred.
+    Preparing,
+    /// All immutable inputs are ready for host approval.
+    AwaitingApproval: HostOperationAwaitingApproval,
+    /// Approval was granted and the process is starting.
+    Starting: HostOperationStarted,
+    /// The host process is running.
+    Running: HostOperationStarted,
+    /// The process exited successfully.
+    Succeeded: HostOperationFinished,
+    /// The process exited unsuccessfully or could not be supervised.
+    Failed: HostOperationFailure,
+    /// The operation was rejected before execution.
+    Rejected: HostOperationFinished,
+    /// The operation was withdrawn or stopped.
+    Canceled: HostOperationFinished,
+    /// Hostd restarted while the process was running.
+    Interrupted: HostOperationFinished,
+}
+
+/// Approval state retained with a ready operation.
+record HostOperationAwaitingApproval {
+    /// Whether a user postponed the automatic approval surface.
+    postponed: bool,
+}
+
+/// Approval and launch metadata.
+record HostOperationStarted {
+    /// Actor which approved execution.
+    approved_by: Actor,
+    /// Time approval was recorded.
+    approved_at: Timestamp,
+    /// Operating-system process identifier after spawn, when available.
+    pid?: u32,
+}
+
+/// Terminal operation metadata.
+record HostOperationFinished {
+    /// Time at which the terminal state was recorded.
+    finished_at: Timestamp,
+    /// Process exit code, when one was reported.
+    exit_code?: i32,
+    /// Signal which terminated the process, when one was reported.
+    signal?: i32,
+}
+
+/// Terminal failure metadata.
+record HostOperationFailure {
+    /// Display-safe failure diagnostic.
+    message: string,
+    /// Time at which failure was recorded.
+    failed_at: Timestamp,
+    /// Process exit code, when one was reported.
+    exit_code?: i32,
+    /// Signal which terminated the process, when one was reported.
+    signal?: i32,
+}
+
+/// Decision available while an operation awaits approval.
+variant HostOperationDecision {
+    /// Authorizes this exact immutable operation.
+    Approve,
+    /// Permanently rejects this operation.
+    Reject,
+    /// Suppresses the automatic approval surface without resolving the operation.
+    Postpone,
+}
+
+/// Structured audit-stream update.
+variant HostOperationAuditUpdate {
+    /// One permanently retained event.
+    Event: HostOperationAuditEntry,
+    /// Marks the sequence captured when this subscription began.
+    CaughtUp: HostOperationCaughtUp,
+}
+
+/// One permanently retained audit event.
+record HostOperationAuditEntry {
+    /// Monotonically increasing sequence within this operation.
+    sequence: u64,
+    /// Time the event was durably appended.
+    timestamp: Timestamp,
+    /// Stable event kind suitable for filtering.
+    kind: HostOperationAuditKind,
+    /// Display-safe event description.
+    message: string,
+    /// Actor responsible for the event, when applicable.
+    actor?: Actor,
+}
+
+/// Kind of lifecycle transition retained in the audit stream.
+#[json(tagged = externally)]
+#[rust(derive(Copy, Eq, Hash, Ord, PartialOrd))]
+variant HostOperationAuditKind {
+    /// A pod requested the operation.
+    Requested,
+    /// One repository input was verified and pinned.
+    InputCaptured,
+    /// A host user postponed the approval surface.
+    Postponed,
+    /// A host user approved execution.
+    Approved,
+    /// A host user rejected execution.
+    Rejected,
+    /// The host process started.
+    Started,
+    /// Termination of the host process was requested.
+    CancelRequested,
+    /// The operation or host process was canceled.
+    Canceled,
+    /// The host process exceeded its configured timeout.
+    TimedOut,
+    /// The host process completed successfully.
+    Succeeded,
+    /// The operation failed.
+    Failed,
+    /// Hostd restarted while the host process was active.
+    Interrupted,
+}
+
+/// Raw output-stream update.
+variant HostOperationOutputUpdate {
+    /// One permanently retained chunk.
+    Chunk: HostOperationOutputChunk,
+    /// Marks the global sequence captured when this subscription began.
+    CaughtUp: HostOperationCaughtUp,
+}
+
+/// One permanently retained unmodified output chunk.
+record HostOperationOutputChunk {
+    /// Monotonically increasing global chunk sequence across stdout and stderr.
+    sequence: u64,
+    /// Source stream.
+    source: HostOperationOutputSource,
+    /// Inclusive byte offset within the selected source stream.
+    start_offset: u64,
+    /// Exclusive byte offset within the selected source stream.
+    end_offset: u64,
+    /// Time at which hostd read the chunk.
+    timestamp: Timestamp,
+    /// Unmodified bytes.
+    data: ProcessTerminalData,
+}
+
+/// Source of one raw output chunk.
+variant HostOperationOutputSource {
+    /// Process standard output.
+    Stdout,
+    /// Process standard error.
+    Stderr,
+}
+
+/// Replay/live boundary shared by operation streams.
+record HostOperationCaughtUp {
+    /// Last durable sequence present when the subscription began.
+    sequence: u64,
+}

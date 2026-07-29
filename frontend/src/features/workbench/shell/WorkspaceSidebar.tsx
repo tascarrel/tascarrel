@@ -7,6 +7,7 @@ import {
   Play,
   Plus,
   Settings,
+  ShieldCheck,
   Square,
   Trash2,
   X,
@@ -29,7 +30,7 @@ import { SidebarSectionOverline } from "./SidebarSectionOverline.tsx";
 import { ShellPanelToggle } from "./ShellPanelToggle.tsx";
 import { WorkspaceResourceAlert } from "./WorkspaceResourceAlert.tsx";
 
-export type WorkspaceControlView = "images" | "network" | "repositories" | "settings";
+export type WorkspaceControlView = "images" | "network" | "repositories" | "operations" | "settings";
 
 export function WorkspaceSidebar({
   workspaces,
@@ -45,6 +46,7 @@ export function WorkspaceSidebar({
   attentionPodIds,
   agentNeedsInput,
   repositoryApprovalCount,
+  hostOperationApprovalCount,
   activeWorkspaceView,
   shortcut,
   onSelectWorkspace,
@@ -74,6 +76,7 @@ export function WorkspaceSidebar({
   attentionPodIds: ReadonlySet<pods.PodId>;
   agentNeedsInput: boolean;
   repositoryApprovalCount?: number;
+  hostOperationApprovalCount?: number;
   activeWorkspaceView?: WorkspaceControlView;
   shortcut: ReadonlyArray<string>;
   onSelectWorkspace: (workspace: workspaces.WorkspaceName) => void;
@@ -290,6 +293,25 @@ export function WorkspaceSidebar({
         </div>
         <nav className="workspace-controls" aria-label="Workspace controls">
           <SidebarSectionOverline>Workspace</SidebarSectionOverline>
+          <button
+            className="workspace-control-button"
+            type="button"
+            data-active={activeWorkspaceView === "operations" || undefined}
+            aria-current={activeWorkspaceView === "operations" ? "page" : undefined}
+            title="Review durable host operations"
+            onClick={() => onSelectWorkspaceView("operations")}
+          >
+            <ShieldCheck aria-hidden="true" size={14} />
+            <span>Host Operations</span>
+            {hostOperationApprovalCount ? (
+              <CountBadge
+                className="ml-auto"
+                count={hostOperationApprovalCount}
+                aria-label={`${hostOperationApprovalCount} host ${hostOperationApprovalCount === 1 ? "operation" : "operations"} waiting for approval`}
+                tone="warning"
+              />
+            ) : null}
+          </button>
           <button
             className="workspace-control-button"
             type="button"

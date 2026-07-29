@@ -2,6 +2,7 @@
 
 mod changes;
 mod files;
+mod host_operations;
 mod network;
 mod processes;
 mod repositories;

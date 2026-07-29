@@ -9,6 +9,7 @@ mod client;
 mod device;
 mod error;
 mod git;
+mod host_operations;
 mod repository_import;
 
 use std::io;
@@ -24,6 +25,7 @@ use reportify::ResultExt as _;
 use serde::Serialize;
 use tascarrel_api::ArcVec;
 use tascarrel_api::types::chats;
+use tascarrel_api::types::host_operations as host_operations_api;
 use tascarrel_api::types::network;
 use tascarrel_api::types::pods;
 use tascarrel_api::types::processes;
@@ -75,6 +77,11 @@ enum Command {
         #[command(subcommand)]
         command: HttpCommand,
     },
+    /// Request and inspect approval-gated commands executed by hostd.
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
     /// Internal guestd helper run as VM root inside a pod's namespaces.
     #[command(hide = true)]
     DeviceLink {
@@ -118,6 +125,26 @@ enum ProcessCommand {
         process_id: processes::ProcessId,
         #[arg(long, value_enum, default_value_t = ProcessSignal::Terminate)]
         signal: ProcessSignal,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HostCommand {
+    /// Create an immutable request, transfer inputs, and follow output to
+    /// completion.
+    Run {
+        /// Trusted command name from the workspace configuration.
+        command: String,
+        /// Declared parameter in `name=value` form. May be supplied more than
+        /// once.
+        #[arg(short = 'p', long = "parameter")]
+        parameters: Vec<String>,
+    },
+    /// List durable operations initiated by this pod.
+    List,
+    /// Withdraw an unapproved request or stop an active host process.
+    Cancel {
+        operation_id: host_operations_api::HostOperationId,
     },
 }
 
@@ -262,6 +289,20 @@ async fn run_cli() -> PodctlResult<()> {
         Command::Chats { command } => run_chat_command(&client, command).await?,
         Command::Ports { command } => run_port_command(&client, command).await?,
         Command::Http { command } => run_http_command(&client, command).await?,
+        Command::Host { command } => match command {
+            HostCommand::Run {
+                command,
+                parameters,
+            } => {
+                host_operations::run(&client, command, parameters).await?;
+            }
+            HostCommand::List => {
+                print_json(&host_operations::list(&client).await?)?;
+            }
+            HostCommand::Cancel { operation_id } => {
+                host_operations::cancel(&client, operation_id).await?;
+            }
+        },
         Command::DeviceLink { .. }
         | Command::DeviceRemove { .. }
         | Command::RepositoryImport { .. } => unreachable!(),

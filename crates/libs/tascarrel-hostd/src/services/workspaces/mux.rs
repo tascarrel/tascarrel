@@ -15,6 +15,7 @@ use tascarrel_protocol::Framed;
 use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
 use tascarrel_protocol::MUX_CA_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_GIT_HOST_ENDPOINT;
+use tascarrel_protocol::MUX_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
@@ -33,6 +34,7 @@ use tracing::warn;
 
 use crate::HostRepositoryManager;
 use crate::WorkspaceAuthority;
+use crate::services::host_operations::WorkspaceHostOperationInputRequest;
 use crate::services::network::NetworkPolicy;
 use crate::services::network::NetworkPolicySource;
 
@@ -44,6 +46,12 @@ pub(crate) type WorkspaceNetworkRequests = mpsc::Receiver<WorkspaceNetworkReques
 pub(crate) type WorkspaceEnvironmentRequestSender = mpsc::Sender<WorkspaceEnvironmentRequest>;
 /// Receives accepted environment channels for the host secrets service.
 pub(crate) type WorkspaceEnvironmentRequests = mpsc::Receiver<WorkspaceEnvironmentRequest>;
+/// Sends authenticated host-operation input channels to their durable service.
+pub(crate) type WorkspaceHostOperationInputRequestSender =
+    mpsc::Sender<WorkspaceHostOperationInputRequest>;
+/// Receives authenticated host-operation input channels.
+pub(crate) type WorkspaceHostOperationInputRequests =
+    mpsc::Receiver<WorkspaceHostOperationInputRequest>;
 
 /// One authenticated guest request for its host-resolved startup environment.
 #[derive(Debug)]
@@ -78,6 +86,7 @@ pub(crate) struct WorkspaceMuxHostConfig {
     pub workspace: WorkspaceName,
     pub network_requests: WorkspaceNetworkRequestSender,
     pub environment_requests: WorkspaceEnvironmentRequestSender,
+    pub host_operation_input_requests: WorkspaceHostOperationInputRequestSender,
     pub policy: NetworkPolicySource,
     pub authority: Option<Arc<WorkspaceAuthority>>,
     pub repositories: Option<Arc<HostRepositoryManager>>,
@@ -137,6 +146,7 @@ impl WorkspaceMuxHost {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Endpoint dispatch remains a single bounded routing table.
     fn accept(
         &self,
         request: IncomingRequest,
@@ -211,6 +221,22 @@ impl WorkspaceMuxHost {
                     .serve_upload_pack(channel)
                     .await
                     .map_err(|error| service_error(format!("repository service failed: {error:?}")))
+            });
+        } else if endpoint == MUX_HOST_OPERATION_INPUT_ENDPOINT {
+            let Ok(permit) = self.config.host_operation_input_requests.try_reserve() else {
+                reject_request(request, b"host operation input capacity exhausted");
+                return;
+            };
+            let channel = match request.accept() {
+                Ok(channel) => channel,
+                Err(error) => {
+                    warn!(?error, "failed to accept host operation input channel");
+                    return;
+                }
+            };
+            permit.send(WorkspaceHostOperationInputRequest {
+                workspace: self.config.workspace.clone(),
+                channel,
             });
         } else if endpoint == MUX_WORKSPACE_HOST_ENDPOINT {
             let Ok(channel) = request.accept() else {

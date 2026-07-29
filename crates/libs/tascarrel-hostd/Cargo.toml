@@ -29,10 +29,11 @@ hickory-proto.workspace = true
 hickory-resolver.workspace = true
 hmac.workspace = true
 jiff.workspace = true
-nix = { workspace = true, features = ["net", "user"] }
+nix = { workspace = true, features = ["net", "signal", "user"] }
 notify.workspace = true
 rand.workspace = true
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+regex.workspace = true
 reportify.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 rustls = "0.23"

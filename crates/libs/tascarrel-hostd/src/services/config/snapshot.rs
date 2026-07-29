@@ -284,6 +284,7 @@ pub(crate) fn decode_config(text: &str) -> Result<api::WorkspaceConfig, Report<C
         return Err(ConfigLoadError::UnknownFields(unknown.into_iter().collect()).report());
     }
     validate_slash_commands(&config)?;
+    validate_host_commands(&config)?;
     Ok(config)
 }
 
@@ -321,6 +322,210 @@ fn valid_slash_command_name(name: &str) -> bool {
         && characters.all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
+}
+
+/// Rejects malformed privileged command definitions before they become the
+/// current trusted workspace configuration.
+fn validate_host_commands(config: &api::WorkspaceConfig) -> Result<(), Report<ConfigLoadError>> {
+    let Some(commands) = &config.host_commands else {
+        return Ok(());
+    };
+    for (name, command) in commands {
+        validate_host_command(config, name, command)?;
+    }
+    Ok(())
+}
+
+fn validate_host_command(
+    config: &api::WorkspaceConfig,
+    name: &str,
+    command: &api::WorkspaceHostCommandConfig,
+) -> Result<(), Report<ConfigLoadError>> {
+    if !valid_host_command_name(name) {
+        return Err(invalid_host_command(
+            name,
+            "name must use ASCII letters, digits, hyphens, or underscores",
+        ));
+    }
+    if command.program.is_empty() || command.program.contains('\0') {
+        return Err(invalid_host_command(name, "program must not be empty"));
+    }
+    if command.timeout_seconds == Some(0) {
+        return Err(invalid_host_command(
+            name,
+            "timeout-seconds must be greater than zero",
+        ));
+    }
+    validate_host_parameters(name, command)?;
+    validate_host_inputs(config, name, command)?;
+    for argument in command.arguments.as_deref().unwrap_or_default() {
+        if argument.contains('\0') {
+            return Err(invalid_host_command(name, "argument must not contain NUL"));
+        }
+        validate_host_placeholder(name, argument, command)?;
+    }
+    if let Some(working_directory) = &command.working_directory {
+        if working_directory.contains('\0') {
+            return Err(invalid_host_command(
+                name,
+                "working-directory must not contain NUL",
+            ));
+        }
+        validate_host_placeholder(name, working_directory, command)?;
+    }
+    validate_host_environment(name, command)
+}
+
+fn validate_host_parameters(
+    command_name: &str,
+    command: &api::WorkspaceHostCommandConfig,
+) -> Result<(), Report<ConfigLoadError>> {
+    for (name, parameter) in command.parameters.iter().flatten() {
+        if !valid_host_command_name(name) {
+            return Err(invalid_host_command(
+                command_name,
+                "parameter name is invalid",
+            ));
+        }
+        if parameter.required == Some(true) && parameter.default.is_some() {
+            return Err(invalid_host_command(
+                command_name,
+                "a required parameter must not define a default",
+            ));
+        }
+        if parameter
+            .allowed_values
+            .as_ref()
+            .is_some_and(|values| values.is_empty())
+        {
+            return Err(invalid_host_command(
+                command_name,
+                "allowed-values must not be empty",
+            ));
+        }
+        if let Some(pattern) = &parameter.pattern
+            && regex::Regex::new(&format!(r"\A(?:{pattern})\z")).is_err()
+        {
+            return Err(invalid_host_command(
+                command_name,
+                "parameter pattern is invalid",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_inputs(
+    config: &api::WorkspaceConfig,
+    command_name: &str,
+    command: &api::WorkspaceHostCommandConfig,
+) -> Result<(), Report<ConfigLoadError>> {
+    for (name, input) in command.inputs.iter().flatten() {
+        if !valid_host_command_name(name) {
+            return Err(invalid_host_command(command_name, "input name is invalid"));
+        }
+        if config
+            .repos
+            .as_ref()
+            .is_none_or(|repositories| !repositories.contains_key(&input.repository))
+        {
+            return Err(invalid_host_command(
+                command_name,
+                "input references an unconfigured repository",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_environment(
+    command_name: &str,
+    command: &api::WorkspaceHostCommandConfig,
+) -> Result<(), Report<ConfigLoadError>> {
+    let Some(environment) = &command.environment else {
+        return Ok(());
+    };
+    for variable in environment.inherit.as_deref().unwrap_or_default() {
+        if !valid_environment_name(variable) {
+            return Err(invalid_host_command(
+                command_name,
+                "inherited environment variable name is invalid",
+            ));
+        }
+    }
+    for (variable, value) in environment.values.iter().flatten() {
+        if !valid_environment_name(variable) {
+            return Err(invalid_host_command(
+                command_name,
+                "environment variable name is invalid",
+            ));
+        }
+        if value.contains('\0') {
+            return Err(invalid_host_command(
+                command_name,
+                "environment value must not contain NUL",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_placeholder(
+    command_name: &str,
+    value: &str,
+    command: &api::WorkspaceHostCommandConfig,
+) -> Result<(), Report<ConfigLoadError>> {
+    if !value.contains("${") {
+        return Ok(());
+    }
+    if let Some(name) = value
+        .strip_prefix("${parameters.")
+        .and_then(|name| name.strip_suffix('}'))
+        && command
+            .parameters
+            .as_ref()
+            .is_some_and(|parameters| parameters.contains_key(name))
+    {
+        return Ok(());
+    }
+    if let Some(name) = value
+        .strip_prefix("${inputs.")
+        .and_then(|name| name.strip_suffix('}'))
+        && command
+            .inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.contains_key(name))
+    {
+        return Ok(());
+    }
+    Err(invalid_host_command(
+        command_name,
+        "placeholder must occupy a complete value and reference a declared parameter or input",
+    ))
+}
+
+fn valid_host_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn invalid_host_command(name: &str, reason: &'static str) -> Report<ConfigLoadError> {
+    ConfigLoadError::InvalidHostCommand {
+        name: name.to_owned(),
+        reason,
+    }
+    .report()
 }
 
 /// Reads optional portable workspace settings through the generated type.
@@ -402,6 +607,8 @@ pub(crate) enum ConfigLoadError {
     UnknownFields(Vec<String>),
     #[error("config.toml contains invalid slash command {name:?}: {reason}")]
     InvalidSlashCommand { name: String, reason: &'static str },
+    #[error("config.toml contains invalid host command {name:?}: {reason}")]
+    InvalidHostCommand { name: String, reason: &'static str },
 }
 
 impl ConfigLoadError {
@@ -538,6 +745,80 @@ mod tests {
         let message = invalid.last_config_error.unwrap().message;
         assert!(message.contains("Bad_Name"));
         assert!(!message.contains("Do not expose this text"));
+    }
+
+    /// Verifies host-command variants use their typed TOML representation.
+    #[test]
+    fn snapshot_decodes_host_command_variants() {
+        let temporary = tempdir().unwrap();
+        let workspace = temporary.path().join("demo");
+        fs::create_dir_all(workspace.join("image")).unwrap();
+        fs::write(
+            workspace.join("config.toml"),
+            r#"
+[repos.application]
+source = "https://example.invalid/application.git"
+
+[host-commands.deploy]
+program = "/bin/true"
+approval = "always"
+
+[host-commands.deploy.inputs.application]
+repository = "application"
+capture = "published-ref"
+"#,
+        )
+        .unwrap();
+
+        let event = load(&workspace, 4 * 1024 * 1024).unwrap().into_event(None);
+        let command = event
+            .config
+            .unwrap()
+            .host_commands
+            .unwrap()
+            .get("deploy")
+            .unwrap()
+            .clone();
+
+        assert!(matches!(
+            command.approval,
+            Some(api::WorkspaceHostCommandApproval::Always)
+        ));
+        assert!(matches!(
+            command.inputs.unwrap().get("application").unwrap().capture,
+            Some(api::WorkspaceHostCommandCapture::PublishedRef)
+        ));
+    }
+
+    /// Verifies that malformed host-command environment names invalidate the
+    /// trusted workspace configuration.
+    #[test]
+    fn snapshot_validates_host_command_environment() {
+        let temporary = tempdir().unwrap();
+        let workspace = temporary.path().join("demo");
+        fs::create_dir_all(workspace.join("image")).unwrap();
+        fs::write(
+            workspace.join("config.toml"),
+            r#"
+[host-commands.deploy]
+program = "/bin/true"
+
+[host-commands.deploy.environment]
+inherit = ["REGISTRY-TOKEN"]
+"#,
+        )
+        .unwrap();
+
+        let event = load(&workspace, 4 * 1024 * 1024).unwrap().into_event(None);
+
+        assert!(event.config.is_none());
+        assert!(
+            event
+                .last_config_error
+                .unwrap()
+                .message
+                .contains("environment")
+        );
     }
 
     /// Verifies settings are decoded and a later invalid value retains the

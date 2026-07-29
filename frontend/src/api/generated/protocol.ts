@@ -11,6 +11,7 @@ import * as __schema_config from "./config";
 import * as __schema_files from "./files";
 import * as __schema_guest from "./guest";
 import * as __schema_host from "./host";
+import * as __schema_host_operations from "./host_operations";
 import * as __schema_images from "./images";
 import * as __schema_network from "./network";
 import * as __schema_pods from "./pods";

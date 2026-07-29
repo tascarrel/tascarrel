@@ -2,6 +2,7 @@
 
 mod auth;
 mod config;
+mod host_operations;
 mod network;
 mod repositories;
 mod secrets;

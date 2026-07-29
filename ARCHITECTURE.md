@@ -199,9 +199,10 @@ and CLI therefore use the same control plane over different transports.
 
 Host-owned services manage workspace configuration, QEMU lifecycle, repository
 caches and approvals, secret providers, external networking, published
-services, and USB forwarding. A workspace virtual machine starts lazily when an
-operation needs it. The host owns QEMU and any filesystem-sharing helper
-processes, and stops and reaps them when the workspace or daemon stops.
+services, approval-gated host operations, and USB forwarding. A workspace
+virtual machine starts lazily when an operation needs it. The host owns QEMU
+and any filesystem-sharing helper processes, and stops and reaps them when the
+workspace or daemon stops.
 
 Each managed virtual machine boots directly into a small NixOS system from an
 immutable system image. Its persistent state disk is sparse, so host storage is
@@ -233,6 +234,45 @@ identity of the client, workspace, or pod that initiated it. The first daemon
 assigns an identity when necessary, and each later hop validates it before
 forwarding the request. A caller therefore cannot claim to be another
 workspace or pod.
+
+### Approval-Gated Host Operations
+
+A workspace definition may declare generic host commands. A pod requests one
+by name with validated string parameters; it never supplies an executable,
+shell fragment, environment name, or argument outside that trusted definition.
+Hostd captures the selected definition and values in a durable immutable
+operation before asking a host client for approval.
+
+Declared repository inputs are transferred on a dedicated data-plane channel.
+For a working-tree capture, `podctl` constructs a synthetic Git commit using a
+temporary index. Staged changes, unstaged changes, and non-ignored untracked
+files are included without moving the branch or replacing the ordinary index.
+Guestd adds the identity from the pod-private listener, and the workspace mux
+adds the authenticated workspace identity. Hostd accepts the bundle only for a
+matching pending operation, verifies its exact commit, and materializes the
+tree in that operation's private host state directory.
+
+Approval authorizes exactly the captured program, argument vector, validated
+parameters, explicitly selected environment names, materialized inputs, and
+timeout. Hostd then starts an ordinary process directly on the physical host as
+the Tascarrel OS user. It does not create a container or virtual machine for
+the execution. This is a deliberate, high-authority exception to the workspace
+VM boundary; the approval and narrow trusted definition are the authority
+boundary, not a sandbox claim.
+
+Literal environment values in a host-command definition must be non-secret.
+For inherited variables, an operation retains only the configured names and
+resolves their values from hostd immediately before process launch. Inherited
+values, such as registry credentials, are never written to operation storage or
+included in the API and audit streams.
+
+Every operation is host-owned and remains available if its pod or workspace
+stops. Metadata is atomically persisted, while structured audit events and
+unmodified stdout/stderr chunks are append-only. Both streams have monotonic
+sequences and support replay followed by live delivery. Tascarrel currently
+retains all operation records and stream data permanently and has no pruning
+or retention policy. A daemon restart marks a process that was starting or
+running as interrupted rather than guessing whether it completed.
 
 ### Guest Control Plane and Process Supervision
 

@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use tascarrel_api::ArcStr;
 use tascarrel_api::types::auth;
 use tascarrel_api::types::config;
+use tascarrel_api::types::host_operations;
 use tascarrel_api::types::network;
 use tascarrel_api::types::protocol as wire;
 use tascarrel_api::types::repositories;

@@ -21,6 +21,9 @@ export type HostActions = {
   "repositories_GetApprovalReview": { input: types.repositories.GetRepositoryApprovalReviewAction; output: types.repositories.GetRepositoryApprovalReviewOutput };
   "repositories_GetApprovalCommitChanges": { input: types.repositories.GetRepositoryApprovalCommitChangesAction; output: types.repositories.GetRepositoryApprovalCommitChangesOutput };
   "repositories_ResolveApproval": { input: types.repositories.ResolveRepositoryApprovalAction; output: types.repositories.ResolveRepositoryApprovalOutput };
+  "hostOperations_Request": { input: types.host_operations.RequestHostOperationAction; output: types.host_operations.RequestHostOperationOutput };
+  "hostOperations_Resolve": { input: types.host_operations.ResolveHostOperationAction; output: types.host_operations.ResolveHostOperationOutput };
+  "hostOperations_Cancel": { input: types.host_operations.CancelHostOperationAction; output: types.host_operations.CancelHostOperationOutput };
   "workspaces_Create": { input: types.workspaces.CreateWorkspaceAction; output: types.workspaces.CreateWorkspaceOutput };
   "workspaces_Start": { input: types.workspaces.StartWorkspaceAction; output: types.workspaces.StartWorkspaceOutput };
   "workspaces_Stop": { input: types.workspaces.StopWorkspaceAction; output: types.workspaces.StopWorkspaceOutput };
@@ -85,6 +88,9 @@ export type HostSubscriptions = {
   "repositories_ApprovalRequestsChanged": { input: types.repositories.RepositoryApprovalRequestListChangedSubscription; output: types.repositories.RepositoryApprovalRequestListChangedEvent };
   "repositories_PushStatusChanged": { input: types.repositories.RepositoryPushStatusChangedSubscription; output: types.repositories.RepositoryPushStatusChangedEvent };
   "repositories_Changed": { input: types.repositories.RepositoryListChangedSubscription; output: types.repositories.RepositoryListChangedEvent };
+  "hostOperations_Changed": { input: types.host_operations.HostOperationListChangedSubscription; output: types.host_operations.HostOperationListChangedEvent };
+  "hostOperations_Audit": { input: types.host_operations.HostOperationAuditSubscription; output: types.host_operations.HostOperationAuditEvent };
+  "hostOperations_Output": { input: types.host_operations.HostOperationOutputSubscription; output: types.host_operations.HostOperationOutputEvent };
   "workspaces_Changed": { input: types.workspaces.WorkspaceListChangedSubscription; output: types.workspaces.WorkspaceListChangedEvent };
   "workspaces_VmLog": { input: types.workspaces.WorkspaceVmLogSubscription; output: types.workspaces.WorkspaceVmLogEvent };
   "workspaces_UsbDevicesChanged": { input: types.workspaces.UsbDevicesChangedSubscription; output: types.workspaces.UsbDevicesChangedEvent };

@@ -307,5 +307,6 @@ function isDesktopOnlyView(view: WorkbenchRoute["view"]): boolean {
     || view === "images"
     || view === "network"
     || view === "repositories"
+    || view === "operations"
     || view === "settings";
 }

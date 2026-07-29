@@ -7,6 +7,7 @@ export * as config from "./config";
 export * as files from "./files";
 export * as guest from "./guest";
 export * as host from "./host";
+export * as host_operations from "./host_operations";
 export * as images from "./images";
 export * as network from "./network";
 export * as pods from "./pods";

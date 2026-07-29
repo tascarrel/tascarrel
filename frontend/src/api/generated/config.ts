@@ -11,6 +11,7 @@ import * as __schema_config from "./config";
 import * as __schema_files from "./files";
 import * as __schema_guest from "./guest";
 import * as __schema_host from "./host";
+import * as __schema_host_operations from "./host_operations";
 import * as __schema_images from "./images";
 import * as __schema_network from "./network";
 import * as __schema_pods from "./pods";
@@ -391,6 +392,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Repositories keyed by their destination path below `/workspace`.
                                             */
                                                         "repos"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceRepositoryConfig>, /**
+                                            * Privileged commands which pods may ask the host to execute after host-side approval.
+                                            */
+                                                        "host-commands"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceHostCommandConfig>, /**
                                             * Shared host-enforced network policy.
                                             */
                                                         "network"?: WorkspaceNetworkConfig };
@@ -568,6 +572,83 @@ import * as __schema_workspaces from "./workspaces";
                                             * Publication action: `"allow"`, `"deny"`, or `"require-approval"`.
                                             */
                                                         "policy": __sidex_types.builtins.String };
+/**
+ * One trusted host command available to pods in this workspace. Host commands
+ * execute directly as the Tascarrel host user. They are not
+ * sandboxed by a per-operation container or virtual machine.
+ */
+ export type WorkspaceHostCommandConfig = { /**
+                                            * Human-readable purpose shown when approval is requested.
+                                            */
+                                                        "description"?: __sidex_types.builtins.String, /**
+                                            * Absolute executable path or bare executable name resolved from hostd's `PATH`.
+                                            */
+                                                        "program": __sidex_types.builtins.String, /**
+                                            * Individual arguments, optionally consisting entirely of one parameter or input placeholder.
+                                            */
+                                                        "arguments"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Private work-directory-relative path, absolute host path, or one complete input placeholder.
+                                            */
+                                                        "working-directory"?: __sidex_types.builtins.String, /**
+                                            * Validated string parameters keyed by names used in `${parameters.<name>}` placeholders.
+                                            */
+                                                        "parameters"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceHostCommandParameterConfig>, /**
+                                            * Repository snapshots keyed by names used in `${inputs.<name>}` placeholders.
+                                            */
+                                                        "inputs"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceHostCommandInputConfig>, /**
+                                            * Explicit environment made available to the host process.
+                                            */
+                                                        "environment"?: WorkspaceHostCommandEnvironmentConfig, /**
+                                            * Approval policy, defaulting to [`WorkspaceHostCommandApproval::Always`].
+                                            */
+                                                        "approval"?: WorkspaceHostCommandApproval, /**
+                                            * Maximum execution time in seconds, or no command-specific timeout when omitted.
+                                            */
+                                                        "timeout-seconds"?: __sidex_types.builtins.U64 };
+/**
+ * Validation applied to one host-command string parameter.
+ */
+ export type WorkspaceHostCommandParameterConfig = { /**
+                                            * Whether a request must supply the parameter when no default is configured.
+                                            */
+                                                        "required"?: __sidex_types.builtins.Bool, /**
+                                            * Value used when a request omits the parameter.
+                                            */
+                                                        "default"?: __sidex_types.builtins.String, /**
+                                            * Complete set of accepted values, when constrained to a finite choice.
+                                            */
+                                                        "allowed-values"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Rust regular expression which the complete value must match.
+                                            */
+                                                        "pattern"?: __sidex_types.builtins.String };
+/**
+ * One repository working state captured from the requesting pod.
+ */
+ export type WorkspaceHostCommandInputConfig = { /**
+                                            * Configured repository path below `/workspace`.
+                                            */
+                                                        "repository": __sidex_types.builtins.String, /**
+                                            * Capture policy, defaulting to [`WorkspaceHostCommandCapture::WorkingTree`].
+                                            */
+                                                        "capture"?: WorkspaceHostCommandCapture };
+/**
+ * Approval policies available to trusted host commands.
+ */
+ export type WorkspaceHostCommandApproval = ("always");
+/**
+ * Repository capture policies available to trusted host commands.
+ */
+ export type WorkspaceHostCommandCapture = ("working-tree" | "clean-head" | "commit" | "published-ref");
+/**
+ * Environment explicitly exposed to one approved host process.
+ */
+ export type WorkspaceHostCommandEnvironmentConfig = { /**
+                                            * Host environment variable names resolved at process launch and never retained by the operation.
+                                            */
+                                                        "inherit"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Literal non-secret environment values.
+                                            */
+                                                        "values"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, __sidex_types.builtins.String> };
 /**
  * Shared host-enforced workspace network policy.
  */

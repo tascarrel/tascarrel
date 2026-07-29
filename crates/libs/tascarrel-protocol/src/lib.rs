@@ -7,8 +7,8 @@
 //! asynchronous byte streams.
 //!
 //! Dedicated multiplex endpoints carry streaming chat attachments, pod
-//! workspace file bodies, and validated workspace input snapshots outside the
-//! control plane.
+//! workspace file bodies, validated workspace input snapshots, and immutable
+//! host-operation repository inputs outside the control plane.
 //!
 //! Dedicated streaming messages use UTF-8 JSON preceded by a fixed 12-byte
 //! header. The header consists of [`MAGIC`], a big-endian [`PROTOCOL_VERSION`],

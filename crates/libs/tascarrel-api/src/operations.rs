@@ -172,6 +172,9 @@ macro_rules! with_hostd_operations {
             ("repositories_GetApprovalReview", repositories::GetRepositoryApprovalReviewAction, repositories::GetRepositoryApprovalReviewOutput),
             ("repositories_GetApprovalCommitChanges", repositories::GetRepositoryApprovalCommitChangesAction, repositories::GetRepositoryApprovalCommitChangesOutput),
             ("repositories_ResolveApproval", repositories::ResolveRepositoryApprovalAction, repositories::ResolveRepositoryApprovalOutput),
+            ("hostOperations_Request", host_operations::RequestHostOperationAction, host_operations::RequestHostOperationOutput),
+            ("hostOperations_Resolve", host_operations::ResolveHostOperationAction, host_operations::ResolveHostOperationOutput),
+            ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
             ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
             ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
             ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -194,6 +197,9 @@ macro_rules! with_hostd_operations {
             ("repositories_ApprovalRequestsChanged", repositories::RepositoryApprovalRequestListChangedSubscription, repositories::RepositoryApprovalRequestListChangedEvent),
             ("repositories_PushStatusChanged", repositories::RepositoryPushStatusChangedSubscription, repositories::RepositoryPushStatusChangedEvent),
             ("repositories_Changed", repositories::RepositoryListChangedSubscription, repositories::RepositoryListChangedEvent),
+            ("hostOperations_Changed", host_operations::HostOperationListChangedSubscription, host_operations::HostOperationListChangedEvent),
+            ("hostOperations_Audit", host_operations::HostOperationAuditSubscription, host_operations::HostOperationAuditEvent),
+            ("hostOperations_Output", host_operations::HostOperationOutputSubscription, host_operations::HostOperationOutputEvent),
             ("workspaces_Changed", workspaces::WorkspaceListChangedSubscription, workspaces::WorkspaceListChangedEvent),
             ("workspaces_VmLog", workspaces::WorkspaceVmLogSubscription, workspaces::WorkspaceVmLogEvent),
             ("workspaces_UsbDevicesChanged", workspaces::UsbDevicesChangedSubscription, workspaces::UsbDevicesChangedEvent),
@@ -229,6 +235,9 @@ macro_rules! with_all_actions {
                 ("repositories_GetApprovalReview", repositories::GetRepositoryApprovalReviewAction, repositories::GetRepositoryApprovalReviewOutput),
                 ("repositories_GetApprovalCommitChanges", repositories::GetRepositoryApprovalCommitChangesAction, repositories::GetRepositoryApprovalCommitChangesOutput),
                 ("repositories_ResolveApproval", repositories::ResolveRepositoryApprovalAction, repositories::ResolveRepositoryApprovalOutput),
+                ("hostOperations_Request", host_operations::RequestHostOperationAction, host_operations::RequestHostOperationOutput),
+                ("hostOperations_Resolve", host_operations::ResolveHostOperationAction, host_operations::ResolveHostOperationOutput),
+                ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
                 ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
                 ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
                 ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -258,6 +267,9 @@ macro_rules! with_all_subscriptions {
                 ("repositories_ApprovalRequestsChanged", repositories::RepositoryApprovalRequestListChangedSubscription, repositories::RepositoryApprovalRequestListChangedEvent),
                 ("repositories_PushStatusChanged", repositories::RepositoryPushStatusChangedSubscription, repositories::RepositoryPushStatusChangedEvent),
                 ("repositories_Changed", repositories::RepositoryListChangedSubscription, repositories::RepositoryListChangedEvent),
+                ("hostOperations_Changed", host_operations::HostOperationListChangedSubscription, host_operations::HostOperationListChangedEvent),
+                ("hostOperations_Audit", host_operations::HostOperationAuditSubscription, host_operations::HostOperationAuditEvent),
+                ("hostOperations_Output", host_operations::HostOperationOutputSubscription, host_operations::HostOperationOutputEvent),
                 ("workspaces_Changed", workspaces::WorkspaceListChangedSubscription, workspaces::WorkspaceListChangedEvent),
                 ("workspaces_VmLog", workspaces::WorkspaceVmLogSubscription, workspaces::WorkspaceVmLogEvent),
                 ("workspaces_UsbDevicesChanged", workspaces::UsbDevicesChangedSubscription, workspaces::UsbDevicesChangedEvent),
@@ -344,6 +356,7 @@ mod action_impls {
     use crate::types::config;
     use crate::types::files;
     use crate::types::guest;
+    use crate::types::host_operations;
     use crate::types::images;
     use crate::types::network;
     use crate::types::pods;
@@ -373,6 +386,7 @@ mod subscription_impls {
     use crate::types::code;
     use crate::types::config;
     use crate::types::guest;
+    use crate::types::host_operations;
     use crate::types::images;
     use crate::types::network;
     use crate::types::pods;
@@ -430,6 +444,7 @@ mod guest_operation_impls {
 mod host_operation_impls {
     use crate::types::auth;
     use crate::types::config;
+    use crate::types::host_operations;
     use crate::types::network;
     use crate::types::repositories;
     use crate::types::secrets;

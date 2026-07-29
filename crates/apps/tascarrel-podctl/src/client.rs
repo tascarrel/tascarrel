@@ -11,6 +11,7 @@ use reportify::ResultExt as _;
 use tascarrel_api::Action;
 use tascarrel_api::Subscription;
 use tascarrel_api::types::protocol as wire;
+use tascarrel_mux::MuxHandle;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
 use tascarrel_protocol::PodControlIdentity;
@@ -28,6 +29,7 @@ use crate::error::PodctlResult;
 pub(crate) struct PodClient {
     identity: PodControlIdentity,
     peer: server::Peer,
+    mux: MuxHandle,
     _incoming: tascarrel_mux::Incoming,
     mux_task: JoinHandle<tascarrel_mux::Result<()>>,
     control_task: JoinHandle<control_plane::Result<()>>,
@@ -69,6 +71,7 @@ impl PodClient {
         Ok(Self {
             identity,
             peer,
+            mux,
             _incoming: incoming,
             mux_task,
             control_task,
@@ -116,6 +119,17 @@ impl PodClient {
         S: Subscription,
     {
         self.first_event(wire::Address::Host, input).await
+    }
+
+    /// Opens one pod-private streaming data-plane channel.
+    pub(crate) async fn open_channel(
+        &self,
+        endpoint: &str,
+    ) -> PodctlResult<tascarrel_mux::Channel> {
+        self.mux
+            .open(endpoint)
+            .await
+            .map_err(|error| error.escalate(PodctlError::Multiplexer))
     }
 
     /// Invokes one typed action at an explicitly selected daemon target.

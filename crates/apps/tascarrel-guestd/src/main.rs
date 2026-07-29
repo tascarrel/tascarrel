@@ -94,18 +94,23 @@ use tascarrel_protocol::ChatAttachmentUploadResponse;
 use tascarrel_protocol::ErrorCode;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::GuestControlIdentity;
+use tascarrel_protocol::HostOperationInputRequest;
+use tascarrel_protocol::HostOperationInputResponse;
 use tascarrel_protocol::MAX_WORKSPACE_ENVIRONMENT_FRAME_LEN;
 use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
 use tascarrel_protocol::MUX_CA_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_READ_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
 use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
+use tascarrel_protocol::MUX_HOST_OPERATION_INPUT_ENDPOINT;
+use tascarrel_protocol::MUX_POD_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_PUBLISH_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_FILE_READ_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
 use tascarrel_protocol::Pod;
+use tascarrel_protocol::PodHostOperationInputRequest;
 use tascarrel_protocol::PodId;
 use tascarrel_protocol::PublishedPortConnect;
 use tascarrel_protocol::PublishedPortConnectResponse;
@@ -153,6 +158,9 @@ enum PodControlListenerError {
     /// Guestd could not resolve the listener's authenticated identity.
     #[error("failed to resolve the pod control identity")]
     Identity,
+    /// A repository input could not be relayed to hostd.
+    #[error("failed to relay a host operation repository input")]
+    HostOperationInput,
 }
 
 const DEFAULT_WORKSPACE_INPUT_TRANSFER_TIMEOUT_SECONDS: u64 = 120;
@@ -1151,6 +1159,7 @@ async fn main() -> Result<()> {
         pod_control_connections,
         control.control_plane.clone(),
         repository_manager.clone(),
+        Arc::clone(&network_service),
         pods.clone(),
     ));
 
@@ -1444,6 +1453,7 @@ async fn run_pod_control_listeners(
     mut listeners: tokio::sync::mpsc::Receiver<PodControlConnection>,
     control_plane: GuestControlService,
     repositories: Option<Arc<GuestRepositoryManager>>,
+    network_service: Arc<GuestNetworkService>,
     pods: tascarrel_guest::PodService,
 ) {
     let mut active =
@@ -1461,6 +1471,7 @@ async fn run_pod_control_listeners(
         let task_pod_id = pod_id.clone();
         let control_plane = control_plane.clone();
         let repositories = repositories.clone();
+        let network_service = Arc::clone(&network_service);
         let pods = pods.clone();
         let task = tokio::spawn(async move {
             if let Err(error) = serve_pod_listener(
@@ -1468,6 +1479,7 @@ async fn run_pod_control_listeners(
                 task_pod_id,
                 control_plane,
                 repositories,
+                network_service,
                 pods,
             )
             .await
@@ -1505,6 +1517,7 @@ async fn serve_pod_listener(
     pod_id: tascarrel_api::types::pods::PodId,
     control_plane: GuestControlService,
     repositories: Option<Arc<GuestRepositoryManager>>,
+    network_service: Arc<GuestNetworkService>,
     pods: tascarrel_guest::PodService,
 ) -> std::result::Result<(), Report<PodControlListenerError>> {
     let mut connections = JoinSet::new();
@@ -1514,6 +1527,7 @@ async fn serve_pod_listener(
                 let (stream, _) = accepted.escalate(PodControlListenerError::Accept)?;
                 let control_plane = control_plane.clone();
                 let repositories = repositories.clone();
+                let network_service = Arc::clone(&network_service);
                 let pods = pods.clone();
                 let connection_pod_id = pod_id.clone();
                 connections.spawn(async move {
@@ -1522,6 +1536,7 @@ async fn serve_pod_listener(
                         connection_pod_id,
                         control_plane,
                         repositories,
+                        network_service,
                         pods,
                     ).await {
                         warn!(%error, "pod multiplex connection ended with an error");
@@ -1544,6 +1559,7 @@ async fn serve_pod_mux_connection(
     pod_id: tascarrel_api::types::pods::PodId,
     control_plane: GuestControlService,
     repositories: Option<Arc<GuestRepositoryManager>>,
+    network_service: Arc<GuestNetworkService>,
     pods: tascarrel_guest::PodService,
 ) -> std::result::Result<(), Report<PodControlListenerError>> {
     let mut session = MuxSession::connect(stream).map_err(|error| {
@@ -1601,6 +1617,23 @@ async fn serve_pod_mux_connection(
                             warn!(%error, "pod Git channel ended with an error");
                         }
                     });
+                } else if request.endpoint() == MUX_POD_HOST_OPERATION_INPUT_ENDPOINT {
+                    let channel = request
+                        .accept()
+                        .map_err(|error| error.escalate(PodControlListenerError::LogicalChannel))?;
+                    let input_pod_id = pod_id.clone();
+                    let network_service = Arc::clone(&network_service);
+                    channels.spawn(async move {
+                        if let Err(error) = relay_host_operation_input(
+                            channel,
+                            input_pod_id,
+                            &network_service,
+                        )
+                        .await
+                        {
+                            warn!(%error, "host operation input relay failed");
+                        }
+                    });
                 } else {
                     request.reject(b"unknown pod endpoint")
                         .map_err(|error| error.escalate(PodControlListenerError::LogicalChannel))?;
@@ -1613,6 +1646,77 @@ async fn serve_pod_mux_connection(
             }
         }
     }
+}
+
+/// Relays one bounded repository bundle while adding guest-authenticated pod
+/// identity.
+#[tracing::instrument(level = "debug", skip_all, fields(pod_id = %pod_id.0), err)]
+async fn relay_host_operation_input(
+    channel: Channel,
+    pod_id: tascarrel_api::types::pods::PodId,
+    network_service: &GuestNetworkService,
+) -> std::result::Result<(), Report<PodControlListenerError>> {
+    let mut pod = Framed::new(channel);
+    let request = pod
+        .read::<PodHostOperationInputRequest>()
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?
+        .ok_or_else(|| {
+            PodControlListenerError::HostOperationInput
+                .report()
+                .message("pod closed host operation input before its header")
+        })?;
+    let host_channel = network_service
+        .open_channel(MUX_HOST_OPERATION_INPUT_ENDPOINT)
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?;
+    let mut host = Framed::new(host_channel);
+    host.write(&HostOperationInputRequest {
+        pod_id: tascarrel_protocol::PodId(pod_id.0.to_string()),
+        input: request.clone(),
+    })
+    .await
+    .escalate(PodControlListenerError::HostOperationInput)?;
+    let response = host
+        .read::<HostOperationInputResponse>()
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?
+        .ok_or_else(|| {
+            PodControlListenerError::HostOperationInput
+                .report()
+                .message("host closed input transfer before accepting it")
+        })?;
+    pod.write(&response)
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?;
+    if !matches!(response, HostOperationInputResponse::Ready) {
+        return Ok(());
+    }
+    let mut pod = pod.into_inner();
+    let mut host = host.into_inner();
+    let copied = tokio::io::copy(&mut (&mut pod).take(request.length), &mut host)
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?;
+    if copied != request.length {
+        return Err(PodControlListenerError::HostOperationInput
+            .report()
+            .message("pod input transfer ended before its declared length"));
+    }
+    let mut host = Framed::new(host);
+    let response = host
+        .read::<HostOperationInputResponse>()
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?
+        .ok_or_else(|| {
+            PodControlListenerError::HostOperationInput
+                .report()
+                .message("host closed input transfer before completing it")
+        })?;
+    Framed::new(pod)
+        .write(&response)
+        .await
+        .escalate(PodControlListenerError::HostOperationInput)?;
+    Ok(())
 }
 
 /// Classifies the terminal result of one pod-private multiplexer connection.

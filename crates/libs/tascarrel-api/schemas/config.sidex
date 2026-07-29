@@ -315,6 +315,8 @@ record WorkspaceConfig {
     git?: WorkspaceGitConfig,
     /// Repositories keyed by their destination path below `/workspace`.
     repos?: [string: WorkspaceRepositoryConfig],
+    /// Privileged commands which pods may ask the host to execute after host-side approval.
+    host_commands?: [string: WorkspaceHostCommandConfig],
     /// Shared host-enforced network policy.
     network?: WorkspaceNetworkConfig,
 }
@@ -481,6 +483,84 @@ record WorkspaceGitRuleConfig {
     pattern: string,
     /// Publication action: `"allow"`, `"deny"`, or `"require-approval"`.
     policy: string,
+}
+
+/// One trusted host command available to pods in this workspace. Host commands
+/// execute directly as the Tascarrel host user. They are not
+/// sandboxed by a per-operation container or virtual machine.
+#[json(rename_all = "kebab-case")]
+record WorkspaceHostCommandConfig {
+    /// Human-readable purpose shown when approval is requested.
+    description?: string,
+    /// Absolute executable path or bare executable name resolved from hostd's `PATH`.
+    program: string,
+    /// Individual arguments, optionally consisting entirely of one parameter or input placeholder.
+    arguments?: [string],
+    /// Private work-directory-relative path, absolute host path, or one complete input placeholder.
+    working_directory?: string,
+    /// Validated string parameters keyed by names used in `${parameters.<name>}` placeholders.
+    parameters?: [string: WorkspaceHostCommandParameterConfig],
+    /// Repository snapshots keyed by names used in `${inputs.<name>}` placeholders.
+    inputs?: [string: WorkspaceHostCommandInputConfig],
+    /// Explicit environment made available to the host process.
+    environment?: WorkspaceHostCommandEnvironmentConfig,
+    /// Approval policy, defaulting to [`WorkspaceHostCommandApproval::Always`].
+    approval?: WorkspaceHostCommandApproval,
+    /// Maximum execution time in seconds, or no command-specific timeout when omitted.
+    timeout_seconds?: u64,
+}
+
+/// Validation applied to one host-command string parameter.
+#[json(rename_all = "kebab-case")]
+record WorkspaceHostCommandParameterConfig {
+    /// Whether a request must supply the parameter when no default is configured.
+    required?: bool,
+    /// Value used when a request omits the parameter.
+    default?: string,
+    /// Complete set of accepted values, when constrained to a finite choice.
+    allowed_values?: [string],
+    /// Rust regular expression which the complete value must match.
+    pattern?: string,
+}
+
+/// One repository working state captured from the requesting pod.
+#[json(rename_all = "kebab-case")]
+record WorkspaceHostCommandInputConfig {
+    /// Configured repository path below `/workspace`.
+    repository: string,
+    /// Capture policy, defaulting to [`WorkspaceHostCommandCapture::WorkingTree`].
+    capture?: WorkspaceHostCommandCapture,
+}
+
+/// Approval policies available to trusted host commands.
+#[json(rename_all = "kebab-case", tagged = externally)]
+#[rust(derive(Copy))]
+variant WorkspaceHostCommandApproval {
+    /// Requires host approval for every operation.
+    Always,
+}
+
+/// Repository capture policies available to trusted host commands.
+#[json(rename_all = "kebab-case", tagged = externally)]
+#[rust(derive(Copy))]
+variant WorkspaceHostCommandCapture {
+    /// Captures staged, unstaged, and non-ignored untracked files in a synthetic commit.
+    WorkingTree,
+    /// Requires a clean worktree and captures `HEAD`.
+    CleanHead,
+    /// Captures `HEAD` without requiring a clean worktree.
+    Commit,
+    /// Captures `HEAD` only when it is reachable from a remote-tracking ref.
+    PublishedRef,
+}
+
+/// Environment explicitly exposed to one approved host process.
+#[json(rename_all = "kebab-case")]
+record WorkspaceHostCommandEnvironmentConfig {
+    /// Host environment variable names resolved at process launch and never retained by the operation.
+    inherit?: [string],
+    /// Literal non-secret environment values.
+    values?: [string: string],
 }
 
 /// Shared host-enforced workspace network policy.

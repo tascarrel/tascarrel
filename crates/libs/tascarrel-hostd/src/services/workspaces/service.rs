@@ -70,6 +70,8 @@ use tracing::warn;
 
 use super::mux::WorkspaceEnvironmentRequestSender;
 use super::mux::WorkspaceEnvironmentRequests;
+use super::mux::WorkspaceHostOperationInputRequestSender;
+use super::mux::WorkspaceHostOperationInputRequests;
 use super::mux::WorkspaceMuxHost;
 use super::mux::WorkspaceMuxHostConfig;
 use super::mux::WorkspaceMuxHostError;
@@ -372,6 +374,7 @@ struct WorkspaceServiceInner {
     request_senders: WorkspaceRequestSenders,
     pending_network_requests: StdMutex<Option<WorkspaceNetworkRequests>>,
     pending_environment_requests: StdMutex<Option<WorkspaceEnvironmentRequests>>,
+    pending_host_operation_input_requests: StdMutex<Option<WorkspaceHostOperationInputRequests>>,
     usb_devices: UsbDeviceRegistry,
 }
 
@@ -380,6 +383,7 @@ struct WorkspaceServiceInner {
 struct WorkspaceRequestSenders {
     network: WorkspaceNetworkRequestSender,
     environment: WorkspaceEnvironmentRequestSender,
+    host_operation_inputs: WorkspaceHostOperationInputRequestSender,
 }
 
 #[derive(Default)]
@@ -479,6 +483,8 @@ impl WorkspaceService {
             mpsc::channel(config.network_request_queue_capacity);
         let (environment_requests, pending_environment_requests) =
             mpsc::channel(config.network_request_queue_capacity);
+        let (host_operation_input_requests, pending_host_operation_input_requests) =
+            mpsc::channel(config.network_request_queue_capacity);
         let usb_supported =
             cfg!(target_os = "linux") && matches!(&config.mode, WorkspaceMode::Managed(_));
         let usb_devices = UsbDeviceRegistry::new(usb_supported);
@@ -497,9 +503,13 @@ impl WorkspaceService {
                 request_senders: WorkspaceRequestSenders {
                     network: network_requests,
                     environment: environment_requests,
+                    host_operation_inputs: host_operation_input_requests,
                 },
                 pending_network_requests: StdMutex::new(Some(pending_network_requests)),
                 pending_environment_requests: StdMutex::new(Some(pending_environment_requests)),
+                pending_host_operation_input_requests: StdMutex::new(Some(
+                    pending_host_operation_input_requests,
+                )),
                 usb_devices: usb_devices.clone(),
             }),
         };
@@ -555,6 +565,20 @@ impl WorkspaceService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .ok_or_else(|| internal("workspace environment request stream was already taken"))
+    }
+
+    /// Takes the private host-operation input stream for operation by hostd.
+    pub(crate) fn take_host_operation_input_requests(
+        &self,
+    ) -> Result<WorkspaceHostOperationInputRequests, Report<WorkspaceServiceError>> {
+        self.inner
+            .pending_host_operation_input_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                internal("workspace host operation input request stream was already taken")
+            })
     }
 
     /// Prepares a complete workspace in an unpublished staging directory.
@@ -2567,6 +2591,7 @@ async fn finish_workspace_start(
             workspace: tascarrel_api::types::workspaces::WorkspaceName::new(workspace.as_str()),
             network_requests: request_senders.network.clone(),
             environment_requests: request_senders.environment.clone(),
+            host_operation_input_requests: request_senders.host_operation_inputs.clone(),
             repositories,
             policy,
             authority,

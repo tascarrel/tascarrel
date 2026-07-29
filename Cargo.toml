@@ -33,6 +33,7 @@ libc = "0.2"
 nix = "0.30"
 notify = "8.2"
 rand = "0.9"
+regex = "1"
 reportify = "0.2.2"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-native-roots",

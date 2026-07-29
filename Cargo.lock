@@ -3229,6 +3229,7 @@ dependencies = [
  "notify",
  "rand 0.9.5",
  "rcgen",
+ "regex",
  "reportify",
  "rustix",
  "rustls",

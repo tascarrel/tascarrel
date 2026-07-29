@@ -19,6 +19,7 @@ use tascarrel_api::types::protocol as wire;
 use crate::services::auth::AuthService;
 use crate::services::auth::AuthServiceError;
 use crate::services::config::ConfigService;
+use crate::services::host_operations::HostOperationService;
 use crate::services::network::NetworkService;
 use crate::services::repositories::RepositoryService;
 use crate::services::secrets::SecretsService;
@@ -30,6 +31,7 @@ pub struct HostState {
     auth: AuthService,
     workspaces: WorkspaceService,
     config: ConfigService,
+    host_operations: HostOperationService,
     network: NetworkService,
     repositories: RepositoryService,
     secrets: SecretsService,
@@ -42,6 +44,7 @@ impl HostState {
         auth: AuthService,
         workspaces: WorkspaceService,
         config: ConfigService,
+        host_operations: HostOperationService,
         network: NetworkService,
         repositories: RepositoryService,
         secrets: SecretsService,
@@ -50,6 +53,7 @@ impl HostState {
             auth,
             workspaces,
             config,
+            host_operations,
             network,
             repositories,
             secrets,
@@ -69,6 +73,11 @@ impl HostState {
     /// Returns the workspace configuration service.
     pub(crate) fn config(&self) -> &ConfigService {
         &self.config
+    }
+
+    /// Returns the durable approval-gated host process service.
+    pub(crate) fn host_operations(&self) -> &HostOperationService {
+        &self.host_operations
     }
 
     /// Returns the host-owned network service.

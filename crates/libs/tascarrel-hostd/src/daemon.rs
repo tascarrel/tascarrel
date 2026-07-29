@@ -51,6 +51,8 @@ use crate::services::auth::AuthService;
 use crate::services::auth::AuthServiceConfig;
 use crate::services::config::ConfigService;
 use crate::services::config::ConfigServiceConfig;
+use crate::services::host_operations::HostOperationService;
+use crate::services::host_operations::HostOperationServiceConfig;
 use crate::services::network::NetworkService;
 use crate::services::network::NetworkServiceConfig;
 use crate::services::repositories::RepositoryService;
@@ -566,16 +568,27 @@ async fn serve_workspace_requests(state: HostState) -> Result<()> {
         .take_environment_requests()
         .map_err(|error| anyhow!(error.to_string()))
         .context("attach workspace environment request stream")?;
+    let host_operation_input_requests = state
+        .workspaces()
+        .take_host_operation_input_requests()
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("attach workspace host operation input request stream")?;
     let network = state
         .network()
         .serve_workspace_requests(network_requests, state.secrets().clone());
     let environment = state
         .secrets()
         .serve_workspace_requests(environment_requests, state.config().clone());
-    tokio::pin!(network, environment);
+    let host_operation_inputs = state
+        .host_operations()
+        .serve_workspace_requests(host_operation_input_requests);
+    tokio::pin!(network, environment, host_operation_inputs);
     tokio::select! {
         () = &mut network => bail!("workspace network request stream closed"),
         () = &mut environment => bail!("workspace environment request stream closed"),
+        () = &mut host_operation_inputs => {
+            bail!("workspace host operation input request stream closed")
+        },
     }
 }
 
@@ -675,6 +688,12 @@ impl Initialized {
             ConfigService::open(ConfigServiceConfig::new(&prepared.workspaces_dir))
                 .map_err(|error| anyhow!(error.to_string()))
                 .context("start host configuration service")?;
+        let host_operation_service = HostOperationService::open(HostOperationServiceConfig::new(
+            &prepared.host_operations_dir,
+            &prepared.workspace_service.git,
+        ))
+        .map_err(|error| anyhow!(error.to_string()))
+        .context("start host operation service")?;
         let network_service = NetworkService::new(NetworkServiceConfig {
             dns_resolver: args.dns_resolver,
             host_port_host: args.host_port_host,
@@ -693,6 +712,7 @@ impl Initialized {
             auth,
             workspace_service,
             config_service,
+            host_operation_service,
             network_service,
             repository_service.clone(),
             secrets_service,
@@ -711,6 +731,7 @@ struct Prepared {
     socket: PathBuf,
     workspaces_dir: PathBuf,
     repository_cache_dir: PathBuf,
+    host_operations_dir: PathBuf,
     sops: PathBuf,
     workspace_service: WorkspaceServiceConfig,
     ui_root: Option<PathBuf>,
@@ -754,6 +775,7 @@ impl Prepared {
         let git = resolve_executable(&args.git, "Git")?;
         let sops = host_executable_path(&args.sops)?;
         let repository_cache_dir = state_dir.join("repos");
+        let host_operations_dir = state_dir.join("host-operations");
 
         let mode = if let Some(guest_socket) = args.guest_socket.clone() {
             let workspace = args
@@ -813,6 +835,7 @@ impl Prepared {
             socket,
             workspaces_dir,
             repository_cache_dir,
+            host_operations_dir,
             sops,
             workspace_service: WorkspaceServiceConfig {
                 runtime_dir,

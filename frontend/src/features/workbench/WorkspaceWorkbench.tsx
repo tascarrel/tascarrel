@@ -40,6 +40,7 @@ import { chatModelPreferences } from "../chat/model/modelPreferences.ts";
 import { useChat, useChatHarnesses, useChatList } from "../chat/state.ts";
 import { codeFolderLabel, DEFAULT_CODE_FOLDER } from "../code/folders.ts";
 import { useCodeSessions } from "../code/state.ts";
+import { useHostOperations } from "../hostOperations/state.ts";
 import { MobileChangesView } from "../changes/MobileChangesView.tsx";
 import {
   summarizePodChanges,
@@ -93,6 +94,11 @@ const ImagesView = lazy(() =>
 );
 const NetworkView = lazy(() =>
   import("../network/NetworkView.tsx").then((module) => ({ default: module.NetworkView }))
+);
+const HostOperationsView = lazy(() =>
+  import("../hostOperations/HostOperationsView.tsx").then((module) => ({
+    default: module.HostOperationsView,
+  }))
 );
 const ProcessManager = lazy(() =>
   import("../processes/ProcessManager.tsx").then((module) => ({
@@ -162,6 +168,7 @@ export function WorkspaceWorkbench({
   const codeSessionState = useCodeSessions(workspace);
   const repositoryState = useRepositories(workspace);
   const repositoryApprovalState = useRepositoryApprovals(workspace);
+  const hostOperationState = useHostOperations(workspace);
   const repositoryStatusState = useRepositoryStatuses(workspace);
   const pods = podState.value?.pods ?? [];
   const currentWorkspace = allWorkspaces.find((candidate) => candidate.name === workspace);
@@ -169,6 +176,7 @@ export function WorkspaceWorkbench({
     || route.view === "images"
     || route.view === "network"
     || route.view === "repositories"
+    || route.view === "operations"
     || route.view === "settings";
   const routedPod = pods.find((pod) => pod.id === route.pod);
   const selectedPod = workspacePanelOpen
@@ -771,6 +779,11 @@ export function WorkspaceWorkbench({
                 <RepositoriesView workspace={workspace} />
               </DesktopPanel>
             )}
+            operationsView={(
+              <DesktopPanel loadingDetail="Loading host operations…">
+                <HostOperationsView workspace={workspace} />
+              </DesktopPanel>
+            )}
             publishedWebPreviews={publishedWebPreviews}
             publishedWebPreviewsReady={httpRouteState.ready}
             retainedPublishedWebPreviewIds={retainedPublishedWebPreviewIds}
@@ -801,6 +814,9 @@ export function WorkspaceWorkbench({
             attentionPodIds={attentionPodIds}
             agentNeedsInput={selectedSummary?.agentStatus === "UserInputRequired"}
             repositoryApprovalCount={repositoryApprovalState.value?.requests.length}
+            hostOperationApprovalCount={(hostOperationState.value?.operations ?? []).filter(
+              (operation) => operation.state.status === "AwaitingApproval",
+            ).length}
             onSelectAgent={(chatId) => selectChat(chatId as chats.ChatId)}
             onNewAgent={newChat}
             onArchiveAgent={(chatId) => {
@@ -947,7 +963,7 @@ export function UnavailableWorkspace({
         view={view}
         workspaceConnection={connection}
         workspaceConnectionAttempt={connectionAttempt}
-        workspaceScreen={lifecycleScreen}
+        workspaceScreen={view === "operations" ? undefined : lifecycleScreen}
         onSelectWorkspace={onSelectWorkspace}
         onCreateWorkspace={onCreateWorkspace}
         onStartWorkspace={onStartWorkspace}
@@ -969,6 +985,9 @@ export function UnavailableWorkspace({
         imagesView={null}
         networkView={null}
         repositoriesView={null}
+        operationsView={selectedWorkspace
+          ? <HostOperationsView workspace={selectedWorkspace.name} />
+          : null}
         settingsView={null}
         publishedWebPreviewsReady={false}
         agentTabs={[]}

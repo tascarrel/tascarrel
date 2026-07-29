@@ -136,6 +136,30 @@ pub(crate) enum PodctlError {
     /// Guestd closed the control-plane connection during an operation.
     #[error("pod control-plane connection closed")]
     ControlConnectionClosed,
+    /// A host-command parameter did not use `name=value` exactly once.
+    #[error("invalid host command parameter: expected a unique name=value")]
+    InvalidHostParameter,
+    /// A repository working state could not be captured as a Git bundle.
+    #[error("failed to capture host operation repository input")]
+    CaptureHostInput,
+    /// A host-operation input channel or body transfer failed.
+    #[error("failed to transfer host operation repository input")]
+    HostInputTransfer,
+    /// Hostd rejected an input-transfer request or bundle.
+    #[error("host operation input was rejected")]
+    HostInputRejected(#[source] RemoteError),
+    /// A requested host operation disappeared from the visible inventory.
+    #[error("host operation is unavailable")]
+    HostOperationUnavailable,
+    /// An approved host process failed.
+    #[error("host operation failed: {0}")]
+    HostOperationFailed(String),
+    /// A user rejected the host operation.
+    #[error("host operation was rejected")]
+    HostOperationRejected,
+    /// The host operation was canceled or interrupted.
+    #[error("host operation was canceled")]
+    HostOperationCanceled,
     /// A chat subscription emitted an invalid or incomplete bootstrap sequence.
     #[error("invalid chat subscription bootstrap: {0}")]
     InvalidChatBootstrap(&'static str),

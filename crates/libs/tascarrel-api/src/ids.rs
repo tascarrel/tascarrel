@@ -113,6 +113,11 @@ crate::ids::define_ids! {
         "Identifier for one host-owned repository push operation."
     ),
     (
+        HostOperationId,
+        "host_operation_",
+        "Identifier for one durable approval-gated process executed by the host daemon."
+    ),
+    (
         TraceId,
         "trace_",
         "Identifier for one distributed trace."
