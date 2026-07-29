@@ -129,6 +129,7 @@
           cargoPackage = "tascarrel-podctl";
           binaryName = "podctl";
           description = "Tascarrel in-pod control client";
+          nativeCheckInputs = [ (guestPkgsFor system).git ];
         };
 
       tasciExecPackageFor =
