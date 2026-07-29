@@ -1,7 +1,5 @@
-import { useNavigate } from "@tanstack/react-router";
 import {
   Check,
-  FileDiff,
   GitBranch,
   LoaderCircle,
   Tag,
@@ -18,8 +16,8 @@ import { CountBadge } from "../../components/ui/CountBadge.tsx";
 import {
   displayApprovalReference,
   formatApprovalUpdateCount,
-  useApprovalReviewDelay,
 } from "./approvalPresentation.ts";
+import { RepositoryApprovalReview } from "./RepositoryApprovalReview.tsx";
 
 type ApprovalDecision = "approve" | "reject";
 
@@ -132,12 +130,7 @@ function MobileRepositoryApprovalCard({
   submitting: boolean;
   onDecide: (decision: ApprovalDecision) => void;
 }) {
-  const navigate = useNavigate();
-  const reviewed = useApprovalReviewDelay(approval.id);
-  const reviewUpdates = approval.updates.filter((update) =>
-    update.reference.startsWith("refs/heads/")
-    && update.previousObject !== undefined
-  );
+  const [reviewReady, setReviewReady] = useState(false);
 
   return (
     <article className="min-w-0 max-w-full overflow-hidden rounded-2xl border border-amber-500/25 bg-amber-500/[0.04]">
@@ -190,28 +183,13 @@ function MobileRepositoryApprovalCard({
         ))}
       </ul>
 
+      <RepositoryApprovalReview
+        approval={approval}
+        workspace={workspace}
+        onReadyChange={setReviewReady}
+      />
+
       <div className="p-3">
-        {reviewUpdates.map((update) => (
-          <Button
-            className="mb-2 h-11 w-full"
-            disabled={submitting}
-            key={update.reference}
-            onClick={() => void navigate({
-              to: "/workspaces/$workspace/pods/$pod/changes",
-              params: { workspace, pod: approval.podId },
-              search: {
-                repository: approval.path,
-                base: update.previousObject,
-                head: update.proposedObject,
-              },
-            })}
-          >
-            <FileDiff aria-hidden="true" className="size-3.5" />
-            {reviewUpdates.length === 1
-              ? "Review Proposed Changes"
-              : `Review ${displayApprovalReference(update.reference)}`}
-          </Button>
-        ))}
         <div className="grid grid-cols-2 gap-2">
           <Button
             className="h-11"
@@ -229,7 +207,7 @@ function MobileRepositoryApprovalCard({
           <Button
             className="h-11"
             variant="primary"
-            disabled={submitting || approval.status.tag !== "Pending" || !reviewed}
+            disabled={submitting || approval.status.tag !== "Pending" || !reviewReady}
             onClick={() => onDecide("approve")}
           >
             {submitting ? (
@@ -240,9 +218,9 @@ function MobileRepositoryApprovalCard({
             Approve
           </Button>
         </div>
-        {approval.status.tag === "Pending" && !reviewed ? (
+        {approval.status.tag === "Pending" && !reviewReady ? (
           <p className="mt-2 text-center text-[10px] leading-4 text-subtle" aria-live="polite">
-            Review the publication details before approving.
+            Commit review must load before approving.
           </p>
         ) : null}
       </div>

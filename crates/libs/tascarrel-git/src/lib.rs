@@ -1,11 +1,12 @@
 //! Managed Git mechanics shared by Tascarrel host and guest services.
 //!
 //! [`RepositoryStore`] owns one bare object database containing cached
-//! upstream branches and tags plus hidden, capture-scoped refs. It refreshes
-//! upstream state, imports exact refs from another Git service, compares
-//! captured commits, publishes approved ref sets with explicit leases, and
-//! performs incremental maintenance. [`GitService`] exposes upload-pack and
-//! receive-pack over any asynchronous full-duplex byte stream.
+//! upstream branches and tags plus hidden capture- and approval-scoped refs. It
+//! refreshes upstream state, imports exact refs from another Git service,
+//! compares captured commits, inspects approval-retained history, publishes
+//! approved ref sets with explicit leases, and performs incremental
+//! maintenance. [`GitService`] exposes upload-pack and receive-pack over any
+//! asynchronous full-duplex byte stream.
 //!
 //! [`GitBinary`] deliberately invokes the system Git executable. A host-side
 //! caller can therefore reuse the user's credential helpers, SSH agent, proxy,
@@ -34,9 +35,12 @@ pub use remote_helper::RemoteService;
 pub use remote_helper::run_remote_helper;
 pub use store::RepositoryStore;
 pub use transport::GitService;
+pub use types::ApprovalId;
 pub use types::CaptureId;
 pub use types::CapturedReference;
+pub use types::GitCommit;
 pub use types::GitLimits;
+pub use types::GitSignature;
 pub use types::ObjectId;
 pub use types::ObjectKind;
 pub use types::PodId;

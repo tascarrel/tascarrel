@@ -12,9 +12,13 @@ use reportify::Report;
 use serde::Serialize;
 use sha2::Digest as _;
 use sha2::Sha256;
+use tascarrel_api::types::changes as change_api;
 use tascarrel_api::types::pods::PodId as ApiPodId;
 use tascarrel_api::types::repositories as api;
 use tascarrel_api::types::workspaces::WorkspaceName as ApiWorkspaceName;
+use tascarrel_git::GitCommit;
+use tascarrel_git::GitSignature;
+use tascarrel_git::ObjectId;
 use tascarrel_git::RepositoryStatistics;
 use tascarrel_protocol::WorkspaceName;
 use thiserror::Error;
@@ -25,10 +29,15 @@ use tracing::warn;
 
 use super::HostRepositoryCache;
 use super::HostRepositoryCacheReady;
+use super::HostRepositoryError;
 use super::HostRepositoryManager;
 use super::HostRepositoryStatus;
 use super::HostRepositoryVersion;
 use super::RepositoryApproval;
+use super::RepositoryApprovalCommitDiffOutcome;
+use super::RepositoryApprovalReview;
+use super::RepositoryApprovalReviewOutcome;
+use super::RepositoryApprovalUpdateReview;
 use super::RepositoryPushState;
 use super::RepositoryPushStatusStore;
 
@@ -204,6 +213,99 @@ impl RepositoryService {
         Ok(api::RefreshRepositorySnapshotOutput {
             repositories: api_versions(repositories).into(),
         })
+    }
+
+    /// Gets commits introduced through every reference in one pending approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace or approval is invalid or its
+    /// retained Git objects cannot be inspected.
+    #[tracing::instrument(
+        name = "tascarrel_host.repositories.approval_review",
+        level = "debug",
+        skip(self),
+        fields(workspace = %input.workspace, approval_id = %input.approval_id.0),
+        err
+    )]
+    pub async fn approval_review(
+        &self,
+        input: api::GetRepositoryApprovalReviewAction,
+    ) -> Result<api::GetRepositoryApprovalReviewOutput, Report<RepositoryServiceError>> {
+        let workspace = parse_workspace(&input.workspace)?;
+        let manager = self.manager(&workspace)?;
+        let result = manager
+            .approval_review(&input.approval_id)
+            .await
+            .map_err(|report| {
+                approval_inspection_report(report, "inspect repository approval commits")
+            })?;
+        let result = match result {
+            RepositoryApprovalReviewOutcome::Review(review) => {
+                api::RepositoryApprovalReviewResult::Review(api_approval_review(review)?)
+            }
+            RepositoryApprovalReviewOutcome::TooLarge(maximum_bytes) => {
+                api::RepositoryApprovalReviewResult::TooLarge(change_api::ResultTooLarge {
+                    maximum_bytes: usize_to_u64(maximum_bytes)?,
+                })
+            }
+        };
+        Ok(api::GetRepositoryApprovalReviewOutput { result })
+    }
+
+    /// Gets the exact patch introduced by one commit in a pending approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace, approval, reference, or commit is
+    /// invalid or retained Git objects cannot be inspected.
+    #[tracing::instrument(
+        name = "tascarrel_host.repositories.approval_commit_changes",
+        level = "debug",
+        skip(self),
+        fields(
+            workspace = %input.workspace,
+            approval_id = %input.approval_id.0,
+            reference = %input.reference,
+            commit = %input.commit,
+        ),
+        err
+    )]
+    pub async fn approval_commit_changes(
+        &self,
+        input: api::GetRepositoryApprovalCommitChangesAction,
+    ) -> Result<api::GetRepositoryApprovalCommitChangesOutput, Report<RepositoryServiceError>> {
+        let workspace = parse_workspace(&input.workspace)?;
+        let manager = self.manager(&workspace)?;
+        let commit = ObjectId::new(input.commit.to_string()).map_err(|error| {
+            error
+                .escalate(RepositoryServiceError::InvalidRequest(
+                    "commit is not a complete Git object identifier".to_owned(),
+                ))
+                .message("parse repository approval commit")
+        })?;
+        let result = manager
+            .approval_commit_diff(&input.approval_id, input.reference.as_ref(), &commit)
+            .await
+            .map_err(|report| {
+                approval_inspection_report(report, "inspect repository approval commit changes")
+            })?;
+        let result = match result {
+            RepositoryApprovalCommitDiffOutcome::Diff(diff) => {
+                api::RepositoryApprovalCommitChangesResult::Changes(
+                    api::RepositoryApprovalCommitChanges {
+                        commit: input.commit,
+                        diff: change_api::UnifiedDiff::new(diff),
+                    },
+                )
+            }
+            RepositoryApprovalCommitDiffOutcome::TooLarge(maximum_bytes) => {
+                api::RepositoryApprovalCommitChangesResult::TooLarge(change_api::ResultTooLarge {
+                    maximum_bytes: usize_to_u64(maximum_bytes)?,
+                })
+            }
+        };
+        Ok(api::GetRepositoryApprovalCommitChangesOutput { result })
     }
 
     /// Claims, rejects, or postpones one repository approval.
@@ -674,11 +776,11 @@ pub enum RepositoryServiceError {
     /// The service was constructed with invalid paths or polling policy.
     #[error("repository service configuration is invalid")]
     InvalidConfiguration,
-    /// A subscription input is invalid.
+    /// A caller supplied an invalid repository request.
     #[error("invalid repository request: {0}")]
     InvalidRequest(String),
-    /// The requested workspace configuration is unavailable.
-    #[error("repository inventory is unavailable: {0}")]
+    /// The requested repository state or upstream operation is unavailable.
+    #[error("repository service is unavailable: {0}")]
     Unavailable(String),
     /// Repository configuration or cache inspection failed unexpectedly.
     #[error("repository service failed: {0}")]
@@ -752,6 +854,75 @@ fn api_approval(
     })
 }
 
+/// Converts one complete internal approval review to its API representation.
+fn api_approval_review(
+    review: RepositoryApprovalReview,
+) -> Result<api::RepositoryApprovalReview, Report<RepositoryServiceError>> {
+    let updates = review
+        .updates
+        .into_iter()
+        .map(api_approval_update_review)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(api::RepositoryApprovalReview {
+        updates: updates.into(),
+    })
+}
+
+/// Converts one reference's approval review to its API representation.
+fn api_approval_update_review(
+    review: RepositoryApprovalUpdateReview,
+) -> Result<api::RepositoryApprovalUpdateReview, Report<RepositoryServiceError>> {
+    let commits = review
+        .commits
+        .into_iter()
+        .map(api_git_commit)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(api::RepositoryApprovalUpdateReview {
+        reference: review.reference.into(),
+        added_commits: commits.into(),
+    })
+}
+
+/// Converts retained Git commit metadata to the shared API type.
+fn api_git_commit(
+    commit: GitCommit,
+) -> Result<change_api::GitCommit, Report<RepositoryServiceError>> {
+    let parents = commit
+        .parents
+        .into_iter()
+        .map(|parent| change_api::GitObjectId::new(parent.to_string()))
+        .collect::<Vec<_>>();
+    Ok(change_api::GitCommit {
+        id: change_api::GitObjectId::new(commit.id.to_string()),
+        parents: parents.into(),
+        author: api_git_signature(commit.author)?,
+        committer: api_git_signature(commit.committer)?,
+        subject: commit.subject.into(),
+        body: commit.body.into(),
+    })
+}
+
+/// Converts a Git identity and validates its absolute timestamp.
+fn api_git_signature(
+    signature: GitSignature,
+) -> Result<change_api::GitSignature, Report<RepositoryServiceError>> {
+    let timestamp = signature
+        .timestamp
+        .parse::<jiff::Timestamp>()
+        .map_err(|error| {
+            error
+                .escalate(RepositoryServiceError::Internal(
+                    "Git commit contains an invalid timestamp".to_owned(),
+                ))
+                .message("parse repository approval commit timestamp")
+        })?;
+    Ok(change_api::GitSignature {
+        name: signature.name.into(),
+        email: signature.email.into(),
+        timestamp,
+    })
+}
+
 fn api_push_status(state: RepositoryPushState) -> api::RepositoryPushStatus {
     match state {
         RepositoryPushState::Published => api::RepositoryPushStatus::Published,
@@ -768,6 +939,27 @@ fn bounded_error(error: &impl std::fmt::Display) -> String {
     const MAX_CHARS: usize = 2048;
 
     error.to_string().chars().take(MAX_CHARS).collect()
+}
+
+/// Preserves approval inspection reports while classifying caller errors.
+fn approval_inspection_report(
+    report: Report<HostRepositoryError>,
+    action: &'static str,
+) -> Report<RepositoryServiceError> {
+    let message = bounded_error(&report);
+    let error = match report.error() {
+        HostRepositoryError::InvalidRequest => RepositoryServiceError::InvalidRequest(message),
+        HostRepositoryError::InvalidConfiguration
+        | HostRepositoryError::UnsafeState
+        | HostRepositoryError::Io
+        | HostRepositoryError::Task
+        | HostRepositoryError::Protocol
+        | HostRepositoryError::Git
+        | HostRepositoryError::Approval
+        | HostRepositoryError::PushStatus
+        | HostRepositoryError::CacheState => RepositoryServiceError::Unavailable(message),
+    };
+    report.escalate(error).message(action)
 }
 
 fn api_repository(

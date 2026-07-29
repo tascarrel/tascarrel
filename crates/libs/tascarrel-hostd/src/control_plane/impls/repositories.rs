@@ -81,6 +81,66 @@ impl ExecuteAction for api::RefreshRepositorySnapshotAction {
 }
 
 #[async_trait]
+impl ExecuteAction for api::GetRepositoryApprovalReviewAction {
+    async fn check_permissions(
+        &self,
+        context: &InvocationCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        if context
+            .require_routing_context()?
+            .caller
+            .is_host_or_client()
+        {
+            Ok(())
+        } else {
+            Err(wire::OperationError::forbidden())
+        }
+    }
+
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        context
+            .state()
+            .repositories()
+            .approval_review(self)
+            .await
+            .map_err(repository_error)
+    }
+}
+
+#[async_trait]
+impl ExecuteAction for api::GetRepositoryApprovalCommitChangesAction {
+    async fn check_permissions(
+        &self,
+        context: &InvocationCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        if context
+            .require_routing_context()?
+            .caller
+            .is_host_or_client()
+        {
+            Ok(())
+        } else {
+            Err(wire::OperationError::forbidden())
+        }
+    }
+
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        context
+            .state()
+            .repositories()
+            .approval_commit_changes(self)
+            .await
+            .map_err(repository_error)
+    }
+}
+
+#[async_trait]
 impl ExecuteAction for api::ResolveRepositoryApprovalAction {
     async fn check_permissions(
         &self,

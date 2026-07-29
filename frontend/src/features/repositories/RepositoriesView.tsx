@@ -16,6 +16,7 @@ import { hostApi } from "../../api/client.ts";
 import type { repositories, workspaces } from "../../api/generated/index.ts";
 import { Badge, type BadgeTone } from "../../components/ui/Badge.tsx";
 import { Button } from "../../components/ui/Button.tsx";
+import { RepositoryApprovalReview } from "./RepositoryApprovalReview.tsx";
 import { useRepositories, useRepositoryApprovals } from "./state.ts";
 
 export function RepositoriesView({ workspace }: { workspace: workspaces.WorkspaceName }) {
@@ -122,6 +123,7 @@ export function RepositoriesView({ workspace }: { workspace: workspaces.Workspac
                   <ApprovalCard
                     approval={approval}
                     key={approval.id}
+                    workspace={workspace}
                     onApprove={() => void resolveApproval(approval, { tag: "Approve" })}
                     onReject={() => void resolveApproval(approval, { tag: "Reject" })}
                   />
@@ -177,15 +179,18 @@ export function RepositoriesView({ workspace }: { workspace: workspaces.Workspac
 
 function ApprovalCard({
   approval,
+  workspace,
   onApprove,
   onReject,
 }: {
   approval: repositories.RepositoryApprovalRequest;
+  workspace: workspaces.WorkspaceName;
   onApprove: () => void;
   onReject: () => void;
 }) {
   const publishing = approval.status.tag === "Publishing";
   const postponed = approval.status.tag === "Pending" && approval.postponed;
+  const [reviewReady, setReviewReady] = useState(false);
   return (
     <li className="overflow-hidden rounded-xl border border-amber-500/20 bg-surface/60">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-ui-border px-4 py-3">
@@ -236,12 +241,23 @@ function ApprovalCard({
         ))}
       </ul>
 
+      <RepositoryApprovalReview
+        approval={approval}
+        workspace={workspace}
+        onReadyChange={setReviewReady}
+      />
+
       <div className="flex justify-end gap-2 border-t border-ui-border bg-canvas/40 px-4 py-3">
         <Button size="small" variant="danger" disabled={publishing} onClick={onReject}>
           <X aria-hidden="true" className="size-3.5" />
           Reject
         </Button>
-        <Button size="small" variant="primary" disabled={publishing} onClick={onApprove}>
+        <Button
+          size="small"
+          variant="primary"
+          disabled={publishing || !reviewReady}
+          onClick={onApprove}
+        >
           {publishing
             ? <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />
             : <Check aria-hidden="true" className="size-3.5" />}

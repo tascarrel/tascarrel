@@ -9,8 +9,8 @@ import {
   approvalReferenceKind,
   displayApprovalReference,
   formatApprovalUpdateCount,
-  useApprovalReviewDelay,
 } from "./approvalPresentation.ts";
+import { RepositoryApprovalReview } from "./RepositoryApprovalReview.tsx";
 
 export function RepositoryApprovalOverlay({
   workspace,
@@ -50,6 +50,7 @@ export function RepositoryApprovalOverlay({
       approval={approval}
       key={approval.id}
       podTitle={podTitlesById?.get(approval.podId) ?? "Unknown pod"}
+      workspace={workspace}
       onApprove={() => resolve(approval, { tag: "Approve" })}
       onPostpone={() => resolve(approval, { tag: "Postpone" })}
       onReject={() => resolve(approval, { tag: "Reject" })}
@@ -60,17 +61,19 @@ export function RepositoryApprovalOverlay({
 function RepositoryApprovalDialog({
   approval,
   podTitle,
+  workspace,
   onApprove,
   onPostpone,
   onReject,
 }: {
   approval: repositories.RepositoryApprovalRequest;
   podTitle: string;
+  workspace: workspaces.WorkspaceName;
   onApprove: () => Promise<void>;
   onPostpone: () => Promise<void>;
   onReject: () => Promise<void>;
 }) {
-  const approvalEnabled = useApprovalReviewDelay(approval.id);
+  const [reviewReady, setReviewReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const submit = (action: () => Promise<void>) => {
@@ -89,7 +92,7 @@ function RepositoryApprovalDialog({
       <AlertDialog.Portal>
         <AlertDialog.Backdrop className="fixed inset-0 z-[90] bg-black/75 backdrop-blur-sm transition-opacity data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <AlertDialog.Viewport className="fixed inset-0 z-[90] grid place-items-center overflow-y-auto p-4">
-          <AlertDialog.Popup className="flex max-h-[min(44rem,calc(100dvh-2rem))] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-ui-border-strong bg-surface-raised text-foreground shadow-2xl shadow-black/70 outline-none transition-[transform,opacity] data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0">
+          <AlertDialog.Popup className="flex max-h-[min(54rem,calc(100dvh-2rem))] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-ui-border-strong bg-surface-raised text-foreground shadow-2xl shadow-black/70 outline-none transition-[transform,opacity] data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0">
             <div className="border-b border-ui-border px-5 py-4">
               <AlertDialog.Title className="text-base font-semibold">
                 Approve Repository Publication?
@@ -149,11 +152,18 @@ function RepositoryApprovalDialog({
                   </li>
                 ))}
               </ul>
+              <RepositoryApprovalReview
+                approval={approval}
+                workspace={workspace}
+                onReadyChange={setReviewReady}
+              />
             </div>
 
             <div className="border-t border-ui-border bg-canvas/40 px-5 py-4">
               <p className="mb-3 text-[11px] leading-4 text-subtle">
-                Approve becomes available after this request has been visible for one second.
+                {reviewReady
+                  ? "Approve publishes the exact references and commits shown above."
+                  : "Commit review must load successfully before this publication can be approved."}
               </p>
               <div className="flex flex-wrap justify-end gap-2">
                 <Button autoFocus disabled={submitting} onClick={() => submit(onPostpone)}>
@@ -168,7 +178,7 @@ function RepositoryApprovalDialog({
                 </Button>
                 <Button
                   variant="primary"
-                  disabled={!approvalEnabled || submitting}
+                  disabled={!reviewReady || submitting}
                   onClick={() => submit(onApprove)}
                 >
                   Approve

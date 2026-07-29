@@ -5,6 +5,7 @@
 //! until the corresponding state changes.
 
 import common::Timestamp
+import changes::{GitCommit, GitObjectId, ResultTooLarge, UnifiedDiff}
 import pods::PodId
 import workspaces::WorkspaceName
 
@@ -34,6 +35,38 @@ record RefreshRepositorySnapshotAction {
 record RefreshRepositorySnapshotOutput {
     /// Current cache identity and version for each selected path.
     repositories: [RepositoryCacheVersion],
+}
+
+/// Gets the commits introduced by one pending repository approval.
+record GetRepositoryApprovalReviewAction {
+    /// Workspace which owns the pending request.
+    workspace: WorkspaceName,
+    /// Pending request whose retained objects are inspected.
+    approval_id: RepositoryApprovalId,
+}
+
+/// Result of inspecting commits retained by one repository approval.
+record GetRepositoryApprovalReviewOutput {
+    /// Complete review or a domain condition preventing a bounded result.
+    result: RepositoryApprovalReviewResult,
+}
+
+/// Gets the exact patch introduced by one commit in a pending approval.
+record GetRepositoryApprovalCommitChangesAction {
+    /// Workspace which owns the pending request.
+    workspace: WorkspaceName,
+    /// Pending request whose retained commit is inspected.
+    approval_id: RepositoryApprovalId,
+    /// Updated reference through which the commit was introduced.
+    reference: string,
+    /// Exact introduced commit to inspect.
+    commit: GitObjectId,
+}
+
+/// Result of inspecting one commit retained by a repository approval.
+record GetRepositoryApprovalCommitChangesOutput {
+    /// Complete patch or a domain condition preventing a bounded result.
+    result: RepositoryApprovalCommitChangesResult,
 }
 
 /// Publishes, rejects, or postpones one repository approval.
@@ -216,6 +249,46 @@ record RepositoryApprovalUpdate {
     proposed_object: string,
     /// Whether publication may rewrite existing history or replace an existing tag.
     rewrites: bool,
+}
+
+/// Domain result of inspecting commits retained by one approval.
+#[json(tag = "status")]
+variant RepositoryApprovalReviewResult {
+    /// Complete commit metadata was produced successfully.
+    Review: RepositoryApprovalReview,
+    /// The complete result exceeds the configured control-plane budget.
+    TooLarge: ResultTooLarge,
+}
+
+/// Commits introduced by every reference update in one approval.
+record RepositoryApprovalReview {
+    /// Per-reference reviews in the same order as the approval updates.
+    updates: [RepositoryApprovalUpdateReview],
+}
+
+/// Commits introduced through one exact branch or tag update.
+record RepositoryApprovalUpdateReview {
+    /// Full upstream branch or tag reference.
+    reference: string,
+    /// Commits reachable from the proposed object but not its previous object, with ancestors first.
+    added_commits: [GitCommit],
+}
+
+/// Domain result of inspecting one commit retained by an approval.
+#[json(tag = "status")]
+variant RepositoryApprovalCommitChangesResult {
+    /// Complete unified diff was produced successfully.
+    Changes: RepositoryApprovalCommitChanges,
+    /// The complete result exceeds the configured control-plane budget.
+    TooLarge: ResultTooLarge,
+}
+
+/// Exact patch introduced by one commit retained for approval.
+record RepositoryApprovalCommitChanges {
+    /// Commit represented by the patch.
+    commit: GitObjectId,
+    /// Changes from the commit's first parent, or the empty tree for a root commit.
+    diff: UnifiedDiff,
 }
 
 /// Complete configured repository inventory for one workspace.

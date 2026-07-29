@@ -39,6 +39,12 @@ pub enum GitError {
         /// Invalid capture identifier.
         capture_id: String,
     },
+    /// An approval identifier cannot safely form part of an internal ref.
+    #[error("invalid Git approval identifier {approval_id:?}")]
+    InvalidApprovalId {
+        /// Invalid approval identifier.
+        approval_id: String,
+    },
     /// A receive-pack namespace cannot safely form part of an internal ref.
     #[error("invalid Git receive-pack namespace {namespace:?}")]
     InvalidReceiveNamespace {

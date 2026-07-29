@@ -15,6 +15,8 @@ The frontend selects one of two presentation shells while sharing routes, backen
 feature components. The desktop workbench provides the multi-panel development environment. The
 mobile client focuses on creating pods, monitoring chats, resolving input requests, approving
 repository publications, managing pod lifecycles, and reviewing individual changed-file diffs.
+Repository approval surfaces load introduced commits and their exact patches from immutable
+host-retained Git objects rather than from a pod checkout.
 Its workspace index subscribes to every running workspace and collects active chats and unblock
 requests into one live attention view. Within a workspace, users open a pod before choosing or
 starting a chat, with the most recently created pods listed first. Mobile pod screens stay within

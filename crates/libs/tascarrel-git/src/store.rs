@@ -1,4 +1,5 @@
-//! Managed bare object stores, hidden captures, and upstream publication.
+//! Managed bare object stores, hidden captures, approval review, and upstream
+//! publication.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -15,12 +16,15 @@ use reportify::Report;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use crate::ApprovalId;
 use crate::CaptureId;
 use crate::CapturedReference;
 use crate::GitBinary;
+use crate::GitCommit;
 use crate::GitError;
 use crate::GitLimits;
 use crate::GitResult;
+use crate::GitSignature;
 use crate::ObjectId;
 use crate::ObjectKind;
 use crate::PodId;
@@ -40,6 +44,7 @@ use crate::WorkspaceId;
 use crate::command::GitCommandOutput;
 
 const TASCARREL_REFS: &str = "refs/tascarrel";
+const APPROVAL_REFS: &str = "refs/tascarrel/approvals";
 /// Hidden dangling target used to prevent stale cached `HEAD` advertisements.
 const NO_DEFAULT_BRANCH_REF: &str = "refs/tascarrel/no-default-branch";
 const WORKSPACE_REFS: &str = "refs/tascarrel/workspaces";
@@ -463,6 +468,62 @@ impl RepositoryStore {
         Ok(refs.len())
     }
 
+    /// Retains one approval baseline object under a hidden review ref.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when the object is unavailable or Git cannot update
+    /// the hidden ref.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.retain_approval_base",
+        level = "info",
+        skip(self, object),
+        fields(
+            repository = %self.path().display(),
+            approval_id = %approval_id,
+            update = update_index,
+        ),
+        err
+    )]
+    pub async fn retain_approval_base(
+        &self,
+        approval_id: &ApprovalId,
+        update_index: usize,
+        object: &ObjectId,
+    ) -> GitResult<ReferenceName> {
+        let _mutation = self.core.mutation.lock().await;
+        let reference = approval_base_reference(approval_id, update_index)?;
+        let mut command = self.command();
+        command
+            .args(["update-ref", "--create-reflog", "--"])
+            .arg(reference.as_str())
+            .arg(object.as_str());
+        self.run(command, "retain repository approval base", &[])
+            .await?
+            .success("retain repository approval base")?;
+        Ok(reference)
+    }
+
+    /// Removes every hidden baseline ref retained for one approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when refs cannot be enumerated or deleted.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.remove_approval",
+        level = "info",
+        skip(self),
+        fields(repository = %self.path().display(), approval_id = %approval_id),
+        err
+    )]
+    pub async fn remove_approval(&self, approval_id: &ApprovalId) -> GitResult<usize> {
+        let _mutation = self.core.mutation.lock().await;
+        let prefix = format!("{APPROVAL_REFS}/{approval_id}/");
+        let refs = self.reference_names(&[&prefix]).await?;
+        self.delete_references(&refs).await?;
+        Ok(refs.len())
+    }
+
     /// Copies current upstream branches and tags into an isolated receive
     /// namespace and returns the exact advertised baseline.
     ///
@@ -710,6 +771,146 @@ impl RepositoryStore {
             insertions,
             deletions,
             binary_files,
+        })
+    }
+
+    /// Lists commits reachable from one proposed object but not its previous
+    /// object.
+    ///
+    /// Both objects may be commits or tags which peel to commits. A missing
+    /// previous object represents a newly created reference and therefore
+    /// returns the complete proposed history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when an object does not peel to a commit, Git fails,
+    /// or the bounded command output is exceeded.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.commits_between",
+        level = "debug",
+        skip(self),
+        fields(repository = %self.path().display()),
+        err
+    )]
+    pub async fn commits_between(
+        &self,
+        previous: Option<&ObjectId>,
+        proposed: &ObjectId,
+    ) -> GitResult<Vec<GitCommit>> {
+        let proposed = self.require_peeled_commit(proposed).await?;
+        let previous = match previous {
+            Some(previous) => Some(self.require_peeled_commit(previous).await?),
+            None => None,
+        };
+        let mut command = self.command();
+        command.args([
+            "log",
+            "--reverse",
+            "--topo-order",
+            "--no-show-signature",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%b%x00",
+        ]);
+        command.arg(proposed.as_str());
+        if let Some(previous) = &previous {
+            command.arg(format!("^{}", previous.as_str()));
+        }
+        let output = self
+            .run(command, "list repository approval commits", &[])
+            .await?
+            .success("list repository approval commits")?;
+        parse_commits(&output)
+    }
+
+    /// Returns whether one commit belongs to an exact previous/proposed
+    /// comparison.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when a comparison endpoint does not peel to a commit
+    /// or Git cannot inspect ancestry. An unavailable candidate returns
+    /// `false`.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.commit_is_between",
+        level = "debug",
+        skip(self),
+        fields(repository = %self.path().display()),
+        err
+    )]
+    pub async fn commit_is_between(
+        &self,
+        previous: Option<&ObjectId>,
+        proposed: &ObjectId,
+        commit: &ObjectId,
+    ) -> GitResult<bool> {
+        let proposed = self.require_peeled_commit(proposed).await?;
+        let Some(commit) = self
+            .rev_parse(&format!("{}^{{commit}}", commit.as_str()))
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !self.is_ancestor(&commit, &proposed).await? {
+            return Ok(false);
+        }
+        let Some(previous) = previous else {
+            return Ok(true);
+        };
+        let previous = self.require_peeled_commit(previous).await?;
+        Ok(!self.is_ancestor(&commit, &previous).await?)
+    }
+
+    /// Builds the unified diff introduced by one exact commit.
+    ///
+    /// Merge commits are compared with their first parent. Root commits are
+    /// compared with the empty tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns a report when the object is not a commit, Git fails, or the
+    /// bounded command output is exceeded.
+    #[tracing::instrument(
+        name = "tascarrel_git.store.commit_diff",
+        level = "debug",
+        skip(self),
+        fields(repository = %self.path().display()),
+        err
+    )]
+    pub async fn commit_diff(&self, commit: &ObjectId) -> GitResult<String> {
+        let commit = self.require_peeled_commit(commit).await?;
+        let parent = self.rev_parse(&format!("{}^1", commit.as_str())).await?;
+        let mut command = self.command();
+        if let Some(parent) = parent {
+            command.args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--find-renames",
+                "--find-copies",
+            ]);
+            command.arg(parent.as_str()).arg(commit.as_str()).arg("--");
+        } else {
+            command.args([
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--find-renames",
+                "--find-copies",
+                "-p",
+            ]);
+            command.arg(commit.as_str()).arg("--");
+        }
+        let output = self
+            .run(command, "generate repository approval commit diff", &[])
+            .await?
+            .success("generate repository approval commit diff")?;
+        String::from_utf8(output).map_err(|_| {
+            Report::new(GitError::MalformedOutput {
+                action: "generate repository approval commit diff",
+            })
         })
     }
 
@@ -1063,6 +1264,17 @@ impl RepositoryStore {
     async fn peel_commit(&self, reference: &ReferenceName) -> GitResult<Option<ObjectId>> {
         self.rev_parse(&format!("{}^{{commit}}", reference.as_str()))
             .await
+    }
+
+    /// Resolves an object to its commit target or returns `NotCommit`.
+    async fn require_peeled_commit(&self, object: &ObjectId) -> GitResult<ObjectId> {
+        self.rev_parse(&format!("{}^{{commit}}", object.as_str()))
+            .await?
+            .ok_or_else(|| {
+                Report::new(GitError::NotCommit {
+                    reference: object.to_string(),
+                })
+            })
     }
 
     async fn is_ancestor(&self, ancestor: &ObjectId, descendant: &ObjectId) -> GitResult<bool> {
@@ -1423,6 +1635,70 @@ fn capture_reference(
         capture_id.as_str(),
         source.as_str()
     ))
+}
+
+/// Builds the hidden ref retaining one approval update's baseline.
+fn approval_base_reference(
+    approval_id: &ApprovalId,
+    update_index: usize,
+) -> GitResult<ReferenceName> {
+    ReferenceName::new(format!(
+        "{APPROVAL_REFS}/{}/bases/{update_index}",
+        approval_id.as_str()
+    ))
+}
+
+/// Parses the NUL-delimited records emitted by `commits_between`.
+fn parse_commits(output: &[u8]) -> GitResult<Vec<GitCommit>> {
+    let mut commits = Vec::new();
+    let mut fields = output.split(|byte| *byte == 0);
+    while let Some(id) = fields.next() {
+        let id = id.strip_prefix(b"\n").unwrap_or(id);
+        if id.iter().all(u8::is_ascii_whitespace) {
+            if fields.all(|field| field.iter().all(u8::is_ascii_whitespace)) {
+                break;
+            }
+            return Err(malformed_commit_metadata());
+        }
+        let mut record = Vec::with_capacity(10);
+        record.push(id);
+        for _ in 1..10 {
+            record.push(fields.next().ok_or_else(malformed_commit_metadata)?);
+        }
+        let parents = utf8_field(record[1])?
+            .split_whitespace()
+            .map(ObjectId::new)
+            .collect::<GitResult<Vec<_>>>()?;
+        commits.push(GitCommit {
+            id: ObjectId::new(utf8_field(record[0])?.trim())?,
+            parents,
+            author: GitSignature {
+                name: utf8_field(record[2])?.to_owned(),
+                email: utf8_field(record[3])?.to_owned(),
+                timestamp: utf8_field(record[4])?.to_owned(),
+            },
+            committer: GitSignature {
+                name: utf8_field(record[5])?.to_owned(),
+                email: utf8_field(record[6])?.to_owned(),
+                timestamp: utf8_field(record[7])?.to_owned(),
+            },
+            subject: utf8_field(record[8])?.to_owned(),
+            body: utf8_field(record[9])?.to_owned(),
+        });
+    }
+    Ok(commits)
+}
+
+/// Validates one textual field in Git's structured commit output.
+fn utf8_field(bytes: &[u8]) -> GitResult<&str> {
+    std::str::from_utf8(bytes).map_err(|_| malformed_commit_metadata())
+}
+
+/// Reports malformed structured commit output consistently.
+fn malformed_commit_metadata() -> Report<GitError> {
+    Report::new(GitError::MalformedOutput {
+        action: "list repository approval commits",
+    })
 }
 
 fn parse_count_objects(output: &str) -> GitResult<BTreeMap<&str, u64>> {

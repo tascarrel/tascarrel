@@ -3,8 +3,9 @@
 //!
 //! [`HostRepositoryManager`] binds configured repository sources to one
 //! workspace-owned object-store root. It refreshes those stores with host
-//! credentials, captures exact pod refs, publishes approved branches and tags,
-//! and exposes bounded cache inventory without contacting upstreams.
+//! credentials, captures exact pod refs, retains immutable approval history,
+//! publishes approved branches and tags, and exposes bounded cache inventory
+//! without contacting upstreams.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,9 +28,12 @@ use sha2::Digest;
 use sha2::Sha256;
 use tascarrel_api::ids::RepositoryApprovalId;
 use tascarrel_api::ids::RepositoryPushId;
+use tascarrel_git::ApprovalId as GitApprovalId;
 use tascarrel_git::CaptureId;
 use tascarrel_git::CapturedReference;
 use tascarrel_git::GitBinary;
+use tascarrel_git::GitCommit;
+use tascarrel_git::GitError;
 use tascarrel_git::ObjectId;
 use tascarrel_git::ObjectKind;
 use tascarrel_git::PodId as GitPodId;
@@ -157,6 +161,110 @@ impl HostRepositoryManager {
     )]
     pub(crate) fn approvals(&self) -> HostRepositoryResult<Vec<RepositoryApproval>> {
         self.approvals.list().map_err(approval_report)
+    }
+
+    /// Inspects commits introduced by every update in one pending approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the approval is invalid or retained Git state
+    /// cannot be inspected.
+    pub(crate) async fn approval_review(
+        &self,
+        approval_id: &RepositoryApprovalId,
+    ) -> HostRepositoryResult<RepositoryApprovalReviewOutcome> {
+        let _operation = self.operation.lock().await;
+        let approval = self
+            .approvals
+            .read(approval_id)
+            .map_err(approval_request_report)?;
+        let _cache_lock = self.lock_store_by_id(&approval.repository_id).await?;
+        let store = RepositoryStore::open_existing(
+            self.git.clone(),
+            self.cache_path_by_id(&approval.repository_id),
+        )
+        .map_err(git_report)?;
+        let mut updates = Vec::with_capacity(approval.updates.len());
+        for update in approval.updates {
+            let previous = update
+                .expected
+                .as_deref()
+                .map(ObjectId::new)
+                .transpose()
+                .map_err(git_report)?;
+            let proposed = ObjectId::new(update.proposed).map_err(git_report)?;
+            let commits = match store.commits_between(previous.as_ref(), &proposed).await {
+                Ok(commits) => commits,
+                Err(report) => {
+                    if let GitError::OutputLimit { limit, .. } = report.error() {
+                        return Ok(RepositoryApprovalReviewOutcome::TooLarge(*limit));
+                    }
+                    return Err(git_report(report));
+                }
+            };
+            updates.push(RepositoryApprovalUpdateReview {
+                reference: update.destination,
+                commits,
+            });
+        }
+        Ok(RepositoryApprovalReviewOutcome::Review(
+            RepositoryApprovalReview { updates },
+        ))
+    }
+
+    /// Builds the exact patch for one commit introduced by a pending approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the approval, reference, or commit is invalid or
+    /// retained Git state cannot be inspected.
+    pub(crate) async fn approval_commit_diff(
+        &self,
+        approval_id: &RepositoryApprovalId,
+        reference: &str,
+        commit: &ObjectId,
+    ) -> HostRepositoryResult<RepositoryApprovalCommitDiffOutcome> {
+        let _operation = self.operation.lock().await;
+        let approval = self
+            .approvals
+            .read(approval_id)
+            .map_err(approval_request_report)?;
+        let update = approval
+            .updates
+            .iter()
+            .find(|update| update.destination == reference)
+            .ok_or_else(|| invalid_request("reference is not part of the repository approval"))?;
+        let previous = update
+            .expected
+            .as_deref()
+            .map(ObjectId::new)
+            .transpose()
+            .map_err(git_report)?;
+        let proposed = ObjectId::new(&update.proposed).map_err(git_report)?;
+        let _cache_lock = self.lock_store_by_id(&approval.repository_id).await?;
+        let store = RepositoryStore::open_existing(
+            self.git.clone(),
+            self.cache_path_by_id(&approval.repository_id),
+        )
+        .map_err(git_report)?;
+        if !store
+            .commit_is_between(previous.as_ref(), &proposed, commit)
+            .await
+            .map_err(git_report)?
+        {
+            return Err(invalid_request(
+                "commit is not introduced by the repository approval reference",
+            ));
+        }
+        match store.commit_diff(commit).await {
+            Ok(diff) => Ok(RepositoryApprovalCommitDiffOutcome::Diff(diff)),
+            Err(report) => {
+                if let GitError::OutputLimit { limit, .. } = report.error() {
+                    return Ok(RepositoryApprovalCommitDiffOutcome::TooLarge(*limit));
+                }
+                Err(git_report(report))
+            }
+        }
     }
 
     /// Inspects every configured repository without contacting its upstream.
@@ -570,7 +678,12 @@ impl HostRepositoryManager {
             None,
             None,
         );
-        self.approvals.create(&approval).map_err(approval_report)?;
+        self.retain_approval_bases(store, &approval).await?;
+        if let Err(report) = self.approvals.create(&approval) {
+            self.remove_unrecorded_approval_bases(store, &approval.id)
+                .await;
+            return Err(approval_report(report));
+        }
         Ok(id)
     }
 
@@ -744,7 +857,7 @@ impl HostRepositoryManager {
                 "approval is already being published in the background",
             ));
         }
-        self.remove_approval_namespace(&approval).await?;
+        self.remove_approval_references(&approval).await?;
         if let Some(push_id) = &approval.push_id {
             self.transition_push_status(push_id, RepositoryPushState::Rejected)?;
         }
@@ -830,20 +943,21 @@ impl HostRepositoryManager {
                 warn!(approval_id = %approval.id.0, %error, "could not remove published approval namespace");
             }
         }
+        let git_approval_id = GitApprovalId::new(approval.id.0.to_string()).map_err(git_report)?;
+        if let Err(error) = store.remove_approval(&git_approval_id).await {
+            warn!(approval_id = %approval.id.0, %error, "could not remove published approval review refs");
+        }
         if let Err(error) = self.approvals.complete_claim(approval_id) {
             warn!(approval_id = %approval.id.0, %error, "could not remove published approval state");
         }
         Ok(approval)
     }
 
-    /// Removes namespaced refs retained by a rejected receive-pack request.
-    async fn remove_approval_namespace(
+    /// Removes every Git ref retained exclusively by a rejected approval.
+    async fn remove_approval_references(
         &self,
         approval: &RepositoryApproval,
     ) -> HostRepositoryResult<()> {
-        let Some(namespace) = &approval.receive_namespace else {
-            return Ok(());
-        };
         let cache_path = self.cache_path_by_id(&approval.repository_id);
         let metadata = match fs::symlink_metadata(&cache_path) {
             Ok(metadata) => metadata,
@@ -864,9 +978,16 @@ impl HostRepositoryManager {
         let _cache_lock = self.lock_store_by_id(&approval.repository_id).await?;
         let store =
             RepositoryStore::open_existing(self.git.clone(), cache_path).map_err(git_report)?;
-        let namespace = ReceiveNamespace::new(namespace).map_err(git_report)?;
+        if let Some(namespace) = &approval.receive_namespace {
+            let namespace = ReceiveNamespace::new(namespace).map_err(git_report)?;
+            store
+                .remove_receive_namespace(&namespace)
+                .await
+                .map_err(git_report)?;
+        }
+        let git_approval_id = GitApprovalId::new(approval.id.0.to_string()).map_err(git_report)?;
         store
-            .remove_receive_namespace(&namespace)
+            .remove_approval(&git_approval_id)
             .await
             .map_err(git_report)?;
         Ok(())
@@ -1240,7 +1361,10 @@ impl HostRepositoryManager {
         received: &[ReceivedReferenceUpdate],
     ) -> HostRepositoryResult<()> {
         let approval_id = RepositoryApprovalId::generate();
-        let updates = received.iter().map(repository_approval_update).collect();
+        let updates = received
+            .iter()
+            .map(repository_approval_update)
+            .collect::<Vec<_>>();
         let approval = RepositoryApproval::new(
             approval_id.clone(),
             pod_id.0.clone(),
@@ -1251,12 +1375,32 @@ impl HostRepositoryManager {
             Some(push_id.clone()),
             Some(namespace.to_string()),
         );
-        self.record_push_status(
+        if let Err(report) = self.retain_approval_bases(store, &approval).await {
+            if let Err(cleanup) = store.remove_receive_namespace(namespace).await {
+                warn!(approval_id = %approval.id.0, error = %cleanup, "could not remove approval namespace after review retention failed");
+            }
+            self.record_push_status(
+                push_id,
+                pod_id,
+                RepositoryPushState::Failed(bounded_git_error(&report)),
+            )?;
+            return Ok(());
+        }
+        if let Err(report) = self.record_push_status(
             push_id,
             pod_id,
             RepositoryPushState::ApprovalRequired(approval_id),
-        )?;
+        ) {
+            self.remove_unrecorded_approval_bases(store, &approval.id)
+                .await;
+            if let Err(cleanup) = store.remove_receive_namespace(namespace).await {
+                warn!(approval_id = %approval.id.0, error = %cleanup, "could not remove approval namespace after status persistence failed");
+            }
+            return Err(report);
+        }
         if let Err(report) = self.approvals.create(&approval) {
+            self.remove_unrecorded_approval_bases(store, &approval.id)
+                .await;
             if let Err(cleanup) = store.remove_receive_namespace(namespace).await {
                 warn!(approval_id = %approval.id.0, error = %cleanup, "could not remove unrecorded approval namespace");
             }
@@ -1266,6 +1410,49 @@ impl HostRepositoryManager {
             )?;
         }
         Ok(())
+    }
+
+    /// Retains every existing destination tip needed for exact later review.
+    async fn retain_approval_bases(
+        &self,
+        store: &RepositoryStore,
+        approval: &RepositoryApproval,
+    ) -> HostRepositoryResult<()> {
+        let git_approval_id = GitApprovalId::new(approval.id.0.to_string()).map_err(git_report)?;
+        for (index, update) in approval.updates.iter().enumerate() {
+            let Some(expected) = &update.expected else {
+                continue;
+            };
+            let expected = ObjectId::new(expected).map_err(git_report)?;
+            if let Err(report) = store
+                .retain_approval_base(&git_approval_id, index, &expected)
+                .await
+            {
+                self.remove_unrecorded_approval_bases(store, &approval.id)
+                    .await;
+                return Err(git_report(report));
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort rollback for review refs created before durable approval
+    /// state.
+    async fn remove_unrecorded_approval_bases(
+        &self,
+        store: &RepositoryStore,
+        approval_id: &RepositoryApprovalId,
+    ) {
+        let git_approval_id = match GitApprovalId::new(approval_id.0.to_string()) {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(approval_id = %approval_id.0, %error, "could not validate unrecorded approval identifier");
+                return;
+            }
+        };
+        if let Err(error) = store.remove_approval(&git_approval_id).await {
+            warn!(approval_id = %approval_id.0, %error, "could not remove unrecorded approval review refs");
+        }
     }
 
     #[allow(
@@ -1779,6 +1966,40 @@ pub(crate) struct HostRepositoryCacheReady {
     pub(crate) state: RepositoryCacheState,
 }
 
+/// Bounded result of inspecting commits introduced by an approval.
+#[derive(Clone, Debug)]
+pub(crate) enum RepositoryApprovalReviewOutcome {
+    /// Complete per-reference commit metadata.
+    Review(RepositoryApprovalReview),
+    /// Configured Git output bound exceeded by the complete result.
+    TooLarge(usize),
+}
+
+/// Complete commit review for one pending approval.
+#[derive(Clone, Debug)]
+pub(crate) struct RepositoryApprovalReview {
+    /// Reviews in the same order as the durable approval updates.
+    pub(crate) updates: Vec<RepositoryApprovalUpdateReview>,
+}
+
+/// Commits introduced through one updated reference.
+#[derive(Clone, Debug)]
+pub(crate) struct RepositoryApprovalUpdateReview {
+    /// Full upstream branch or tag reference.
+    pub(crate) reference: String,
+    /// Introduced commits in ancestor-first order.
+    pub(crate) commits: Vec<GitCommit>,
+}
+
+/// Bounded result of inspecting one approval commit patch.
+#[derive(Clone, Debug)]
+pub(crate) enum RepositoryApprovalCommitDiffOutcome {
+    /// Complete unified diff.
+    Diff(String),
+    /// Configured Git output bound exceeded by the complete result.
+    TooLarge(usize),
+}
+
 /// Failure while enforcing repository policy or operating host-owned state.
 #[derive(Debug, Error)]
 pub enum HostRepositoryError {
@@ -1903,6 +2124,17 @@ fn git_report(report: reportify::Report<tascarrel_git::GitError>) -> Report<Host
 
 fn approval_report(report: Report<RepositoryApprovalStoreError>) -> Report<HostRepositoryError> {
     report.escalate(HostRepositoryError::Approval)
+}
+
+/// Maps a missing approval supplied by the caller to a contract error.
+fn approval_request_report(
+    report: Report<RepositoryApprovalStoreError>,
+) -> Report<HostRepositoryError> {
+    if matches!(report.error(), RepositoryApprovalStoreError::NotFound) {
+        report.escalate(HostRepositoryError::InvalidRequest)
+    } else {
+        approval_report(report)
+    }
 }
 
 fn policy_report(report: Report<RepositoryPolicyError>) -> Report<HostRepositoryError> {
@@ -2431,6 +2663,111 @@ mod tests {
         Ok(())
     }
 
+    /// Approval review remains exact after the upstream moves and rejects
+    /// commits outside the retained update.
+    #[tokio::test]
+    async fn approval_review_survives_upstream_refresh() -> HostRepositoryResult<()> {
+        let temporary = test_io(tempfile::tempdir(), "create temporary directory")?;
+        let git = test_git()?;
+        let upstream = temporary.path().join("upstream.git");
+        let source = temporary.path().join("source");
+        run_test_git(&git, temporary.path(), &["init", "--bare", path(&upstream)])?;
+        run_test_git(&git, temporary.path(), &["init", path(&source)])?;
+        run_test_git(&git, &source, &["config", "user.name", "Tascarrel Test"])?;
+        run_test_git(
+            &git,
+            &source,
+            &["config", "user.email", "tascarrel@example.invalid"],
+        )?;
+        test_io(
+            fs::write(source.join("README.md"), "initial\n"),
+            "write source",
+        )?;
+        run_test_git(&git, &source, &["add", "README.md"])?;
+        run_test_git(&git, &source, &["commit", "-m", "initial"])?;
+        run_test_git(&git, &source, &["branch", "-M", "main"])?;
+        run_test_git(&git, &source, &["remote", "add", "origin", path(&upstream)])?;
+        run_test_git(&git, &source, &["push", "-u", "origin", "main"])?;
+        run_test_git(
+            &git,
+            &upstream,
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+        )?;
+        let manager = approval_review_manager(git.clone(), temporary.path(), &upstream)?;
+        manager.prepare_versions().await?;
+
+        run_test_git(&git, &source, &["checkout", "--orphan", "replacement"])?;
+        test_io(
+            fs::remove_file(source.join("README.md")),
+            "remove old source",
+        )?;
+        test_io(
+            fs::write(source.join("replacement.txt"), "replacement\n"),
+            "write replacement source",
+        )?;
+        run_test_git(&git, &source, &["add", "-A"])?;
+        run_test_git(
+            &git,
+            &source,
+            &["commit", "-m", "replace repository history"],
+        )?;
+        let cache = manager.cache_path(path(&upstream));
+        run_test_git(
+            &git,
+            &cache,
+            &["fetch", path(&source), "HEAD:refs/tascarrel/test-approval"],
+        )?;
+        let pod_id = PodId(tascarrel_api::ids::PodId::generate().0.to_string());
+        let approval_id = manager
+            .request_captured_branch_approval(
+                &pod_id,
+                "src/tascarrel",
+                "refs/tascarrel/test-approval",
+                Some("main"),
+                true,
+            )
+            .await?;
+
+        run_test_git(
+            &git,
+            &source,
+            &["push", "--force", "origin", "replacement:main"],
+        )?;
+        manager.refresh_versions(None).await?;
+
+        let RepositoryApprovalReviewOutcome::Review(review) =
+            manager.approval_review(&approval_id).await?
+        else {
+            return Err(invalid_request(
+                "approval review unexpectedly exceeded its limit",
+            ));
+        };
+        assert_eq!(review.updates.len(), 1);
+        assert_eq!(review.updates[0].commits.len(), 1);
+        assert_eq!(
+            review.updates[0].commits[0].subject,
+            "replace repository history"
+        );
+        let commit = review.updates[0].commits[0].id.clone();
+        let RepositoryApprovalCommitDiffOutcome::Diff(diff) = manager
+            .approval_commit_diff(&approval_id, "refs/heads/main", &commit)
+            .await?
+        else {
+            return Err(invalid_request(
+                "approval diff unexpectedly exceeded its limit",
+            ));
+        };
+        assert!(diff.contains("+replacement"));
+        let unapproved =
+            ObjectId::new("0000000000000000000000000000000000000000").map_err(git_report)?;
+        let error = manager
+            .approval_commit_diff(&approval_id, "refs/heads/main", &unapproved)
+            .await
+            .expect_err("an object outside the approval must be rejected");
+        assert!(matches!(error.error(), HostRepositoryError::InvalidRequest));
+        Ok(())
+    }
+
     /// Verifies an empty upstream produces a stable successful cache version.
     #[tokio::test]
     async fn cache_versions_accept_an_empty_upstream() -> HostRepositoryResult<()> {
@@ -2546,6 +2883,23 @@ mod tests {
         assert_eq!(removed_tag[0].cache_id, initial[0].cache_id);
         assert_eq!(removed_tag[0].version, 4);
         Ok(())
+    }
+
+    /// Creates a manager configured for the approval-retention fixture.
+    fn approval_review_manager(
+        git: PathBuf,
+        root: &Path,
+        upstream: &Path,
+    ) -> HostRepositoryResult<Arc<HostRepositoryManager>> {
+        let config = root.join("config.toml");
+        test_io(
+            fs::write(
+                &config,
+                format!("[repos.\"src/tascarrel\"]\nsource = {:?}\n", path(upstream)),
+            ),
+            "write repository configuration",
+        )?;
+        HostRepositoryManager::load(git, root.join("repositories"), &config)
     }
 
     fn test_git() -> HostRepositoryResult<PathBuf> {

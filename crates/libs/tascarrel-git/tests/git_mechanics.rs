@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+use tascarrel_git::ApprovalId;
 use tascarrel_git::CaptureId;
 use tascarrel_git::GitBinary;
 use tascarrel_git::GitError;
@@ -294,6 +295,91 @@ async fn captures_compares_publishes_and_retries_a_branch() {
         .unwrap();
     assert!(!retried.changed);
     assert!(retried.references[0].already_present);
+}
+
+/// Verifies approval review lists exact commits, produces per-commit patches,
+/// and owns the hidden refs retaining its baseline.
+#[tokio::test]
+async fn approval_review_inspects_and_releases_retained_history() {
+    let fixture = Fixture::new().await;
+    let pod = fixture.clone_pod("approval-review");
+    fs::write(pod.join("first.txt"), "first\n").unwrap();
+    run_git(&fixture.git, &pod, &["add", "first.txt"]);
+    run_git(
+        &fixture.git,
+        &pod,
+        &["commit", "-m", "first approval commit"],
+    );
+    fs::write(pod.join("second.txt"), "second\n").unwrap();
+    run_git(&fixture.git, &pod, &["add", "second.txt"]);
+    run_git(
+        &fixture.git,
+        &pod,
+        &["commit", "-m", "second approval commit"],
+    );
+    let capture = fixture
+        .store
+        .import_capture(
+            &Remote::new(path(&pod)).unwrap(),
+            &WorkspaceId::new("workspace").unwrap(),
+            &PodId::new("pod_approval_review").unwrap(),
+            &SourceReference::new("refs/heads/main").unwrap(),
+            &CaptureId::new("cap_approval_review").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let commits = fixture
+        .store
+        .commits_between(Some(&fixture.initial), &capture.object)
+        .await
+        .unwrap();
+    assert_eq!(
+        commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect::<Vec<_>>(),
+        ["first approval commit", "second approval commit"]
+    );
+    let last = &commits[1].id;
+    assert!(
+        fixture
+            .store
+            .commit_is_between(Some(&fixture.initial), &capture.object, last)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .store
+            .commit_is_between(Some(&fixture.initial), &capture.object, &fixture.initial)
+            .await
+            .unwrap()
+    );
+    let diff = fixture.store.commit_diff(last).await.unwrap();
+    assert!(diff.contains("diff --git a/second.txt b/second.txt"));
+    assert!(diff.contains("+second"));
+
+    let approval_id = ApprovalId::new("approval_review").unwrap();
+    let retained = fixture
+        .store
+        .retain_approval_base(&approval_id, 0, &fixture.initial)
+        .await
+        .unwrap();
+    assert!(reference_exists(
+        &fixture.git,
+        fixture.store.path(),
+        retained.as_str()
+    ));
+    assert_eq!(
+        fixture.store.remove_approval(&approval_id).await.unwrap(),
+        1
+    );
+    assert!(!reference_exists(
+        &fixture.git,
+        fixture.store.path(),
+        retained.as_str()
+    ));
 }
 
 /// Verifies annotated tag objects survive capture and publication without

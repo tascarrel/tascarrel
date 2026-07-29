@@ -18,6 +18,8 @@ export type HostActions = {
   "network_CreatePodHostForward": { input: types.network.CreatePodHostForwardAction; output: types.network.CreatePodHostForwardOutput };
   "network_DeletePodHostForward": { input: types.network.DeletePodHostForwardAction; output: types.network.DeletePodHostForwardOutput };
   "repositories_RefreshSnapshot": { input: types.repositories.RefreshRepositorySnapshotAction; output: types.repositories.RefreshRepositorySnapshotOutput };
+  "repositories_GetApprovalReview": { input: types.repositories.GetRepositoryApprovalReviewAction; output: types.repositories.GetRepositoryApprovalReviewOutput };
+  "repositories_GetApprovalCommitChanges": { input: types.repositories.GetRepositoryApprovalCommitChangesAction; output: types.repositories.GetRepositoryApprovalCommitChangesOutput };
   "repositories_ResolveApproval": { input: types.repositories.ResolveRepositoryApprovalAction; output: types.repositories.ResolveRepositoryApprovalOutput };
   "workspaces_Create": { input: types.workspaces.CreateWorkspaceAction; output: types.workspaces.CreateWorkspaceOutput };
   "workspaces_Start": { input: types.workspaces.StartWorkspaceAction; output: types.workspaces.StartWorkspaceOutput };

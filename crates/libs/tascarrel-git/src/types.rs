@@ -124,6 +124,48 @@ impl fmt::Display for CaptureId {
     }
 }
 
+/// Opaque identifier used to retain objects required for approval review.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ApprovalId(String);
+
+impl ApprovalId {
+    /// Validates an approval identifier for use in internal refs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError::InvalidApprovalId`] when the identifier is empty,
+    /// too long, or contains characters outside ASCII letters, digits, `_`,
+    /// and `-`.
+    pub fn new(value: impl Into<String>) -> GitResult<Self> {
+        const MAX_APPROVAL_ID_BYTES: usize = 128;
+
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_APPROVAL_ID_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(Report::new(GitError::InvalidApprovalId {
+                approval_id: value,
+            }));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the opaque approval identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ApprovalId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Opaque Git namespace used for one receive-pack staging operation.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReceiveNamespace(String);
@@ -412,6 +454,34 @@ pub struct ReferenceComparison {
     pub deletions: u64,
     /// Files for which Git reported binary changes.
     pub binary_files: u64,
+}
+
+/// Metadata recorded for one Git commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCommit {
+    /// Exact commit object identifier.
+    pub id: ObjectId,
+    /// Parent commit identifiers in recorded order.
+    pub parents: Vec<ObjectId>,
+    /// Author identity and timestamp recorded by the commit.
+    pub author: GitSignature,
+    /// Committer identity and timestamp recorded by the commit.
+    pub committer: GitSignature,
+    /// First line of the commit message.
+    pub subject: String,
+    /// Remaining commit message after the subject.
+    pub body: String,
+}
+
+/// Identity and ISO 8601 timestamp recorded in a Git commit signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitSignature {
+    /// Display name recorded by Git.
+    pub name: String,
+    /// Email address recorded by Git.
+    pub email: String,
+    /// Absolute timestamp emitted by Git's strict ISO 8601 formatter.
+    pub timestamp: String,
 }
 
 /// Approved update from a retained cache ref to an upstream branch or tag.

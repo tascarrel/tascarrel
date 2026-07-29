@@ -52,6 +52,46 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "repositories": __sidex_types.builtins.Sequence<RepositoryCacheVersion> };
 /**
+ * Gets the commits introduced by one pending repository approval.
+ */
+ export type GetRepositoryApprovalReviewAction = { /**
+                                            * Workspace which owns the pending request.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Pending request whose retained objects are inspected.
+                                            */
+                                                        "approvalId": RepositoryApprovalId };
+/**
+ * Result of inspecting commits retained by one repository approval.
+ */
+ export type GetRepositoryApprovalReviewOutput = { /**
+                                            * Complete review or a domain condition preventing a bounded result.
+                                            */
+                                                        "result": RepositoryApprovalReviewResult };
+/**
+ * Gets the exact patch introduced by one commit in a pending approval.
+ */
+ export type GetRepositoryApprovalCommitChangesAction = { /**
+                                            * Workspace which owns the pending request.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Pending request whose retained commit is inspected.
+                                            */
+                                                        "approvalId": RepositoryApprovalId, /**
+                                            * Updated reference through which the commit was introduced.
+                                            */
+                                                        "reference": __sidex_types.builtins.String, /**
+                                            * Exact introduced commit to inspect.
+                                            */
+                                                        "commit": __schema_changes.GitObjectId };
+/**
+ * Result of inspecting one commit retained by a repository approval.
+ */
+ export type GetRepositoryApprovalCommitChangesOutput = { /**
+                                            * Complete patch or a domain condition preventing a bounded result.
+                                            */
+                                                        "result": RepositoryApprovalCommitChangesResult };
+/**
  * Publishes, rejects, or postpones one repository approval.
  */
  export type ResolveRepositoryApprovalAction = { /**
@@ -236,6 +276,41 @@ import * as __schema_workspaces from "./workspaces";
                                             * Whether publication may rewrite existing history or replace an existing tag.
                                             */
                                                         "rewrites": __sidex_types.builtins.Bool };
+/**
+ * Domain result of inspecting commits retained by one approval.
+ */
+ export type RepositoryApprovalReviewResult = (({ "status": "Review" } & RepositoryApprovalReview) | ({ "status": "TooLarge" } & __schema_changes.ResultTooLarge));
+/**
+ * Commits introduced by every reference update in one approval.
+ */
+ export type RepositoryApprovalReview = { /**
+                                            * Per-reference reviews in the same order as the approval updates.
+                                            */
+                                                        "updates": __sidex_types.builtins.Sequence<RepositoryApprovalUpdateReview> };
+/**
+ * Commits introduced through one exact branch or tag update.
+ */
+ export type RepositoryApprovalUpdateReview = { /**
+                                            * Full upstream branch or tag reference.
+                                            */
+                                                        "reference": __sidex_types.builtins.String, /**
+                                            * Commits reachable from the proposed object but not its previous object, with ancestors first.
+                                            */
+                                                        "addedCommits": __sidex_types.builtins.Sequence<__schema_changes.GitCommit> };
+/**
+ * Domain result of inspecting one commit retained by an approval.
+ */
+ export type RepositoryApprovalCommitChangesResult = (({ "status": "Changes" } & RepositoryApprovalCommitChanges) | ({ "status": "TooLarge" } & __schema_changes.ResultTooLarge));
+/**
+ * Exact patch introduced by one commit retained for approval.
+ */
+ export type RepositoryApprovalCommitChanges = { /**
+                                            * Commit represented by the patch.
+                                            */
+                                                        "commit": __schema_changes.GitObjectId, /**
+                                            * Changes from the commit's first parent, or the empty tree for a root commit.
+                                            */
+                                                        "diff": __schema_changes.UnifiedDiff };
 /**
  * Complete configured repository inventory for one workspace.
  */
