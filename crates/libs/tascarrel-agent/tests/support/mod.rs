@@ -144,7 +144,10 @@ impl ScenarioEngine {
             }
             (None, Ok(run)) => {
                 check_recorded_events(&self.scenario.name, &observed_events, &run.events)?;
-                self.check_run(&run.messages, &run.events)?;
+                self.check_run(
+                    &run.session.messages().cloned().collect::<Vec<_>>(),
+                    &run.events,
+                )?;
             }
         }
 
@@ -202,6 +205,7 @@ impl ScenarioEngine {
                 } => Some((tool_name, content, *is_error)),
                 ModelMessage::System { .. }
                 | ModelMessage::User { .. }
+                | ModelMessage::ContextSummary { .. }
                 | ModelMessage::Assistant(_) => None,
             })
             .collect::<Vec<_>>();
@@ -678,6 +682,10 @@ fn event_kind(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::ModelRequestStarted { .. } => "model_request_started",
         AgentEvent::ModelRequestRetrying { .. } => "model_request_retrying",
+        AgentEvent::ModelUsage { .. } => "model_usage",
+        AgentEvent::ContextCompactionStarted { .. } => "context_compaction_started",
+        AgentEvent::ContextCompactionCompleted { .. } => "context_compaction_completed",
+        AgentEvent::ContextCompactionFailed { .. } => "context_compaction_failed",
         AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
         AgentEvent::TextDelta { .. } => "text_delta",
         AgentEvent::ToolCallStarted { .. } => "tool_call_started",

@@ -1463,7 +1463,7 @@ fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
             interrupt_turn: true,
             steer_turn: false,
             structured_user_input: false,
-            compact_context: false,
+            compact_context: true,
             model_switching: api::ChatModelSwitching::InSession,
         },
         api::ChatHarnessKind::Codex => api::ChatHarnessCapabilities {

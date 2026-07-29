@@ -203,6 +203,8 @@ async fn resolve_tasci_model(
         selected_model: selected_model.to_owned().into(),
         base_url: endpoint.base_url.clone(),
         provider_model: model.model.clone(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
         authorization_header,
         authorization_value,
         default_model: default_model.into(),

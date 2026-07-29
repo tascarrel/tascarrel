@@ -15,13 +15,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AgentError;
 use crate::AgentResult;
+use crate::AgentSession;
 use crate::AssistantMessage;
+use crate::CompactionConfig;
+use crate::CompactionReason;
+use crate::CompactionRecord;
 use crate::FileWorkspace;
 use crate::FinishReason;
 use crate::ModelBackend;
 use crate::ModelMessage;
 use crate::ModelRequest;
 use crate::ModelStreamEvent;
+use crate::ModelUsage;
 use crate::ToolArtifact;
 use crate::ToolCall;
 use crate::ToolContext;
@@ -35,6 +40,11 @@ pub struct Agent {
     tools: ToolRegistry,
     files: Arc<FileWorkspace>,
     config: AgentConfig,
+}
+
+struct AgentEventSink<'a> {
+    events: &'a mut Vec<AgentEvent>,
+    handler: Option<&'a AgentEventHandler>,
 }
 
 impl Agent {
@@ -66,7 +76,7 @@ impl Agent {
         prompt: String,
         cancellation: CancellationToken,
     ) -> BoxFuture<'_, AgentResult<AgentRun>> {
-        self.run_inner(Vec::new(), prompt, cancellation, None)
+        self.run_inner(AgentSession::new(), prompt, cancellation, None)
             .boxed()
     }
 
@@ -87,15 +97,20 @@ impl Agent {
         cancellation: CancellationToken,
         event_handler: AgentEventHandler,
     ) -> BoxFuture<'_, AgentResult<AgentRun>> {
-        self.run_inner(Vec::new(), prompt, cancellation, Some(event_handler))
-            .boxed()
+        self.run_inner(
+            AgentSession::new(),
+            prompt,
+            cancellation,
+            Some(event_handler),
+        )
+        .boxed()
     }
 
     /// Continues a preceding run while reporting observable events.
     ///
-    /// The supplied history should be the `messages` value returned by the
-    /// previous [`AgentRun`]. Tasci rebuilds the system prompt only for an
-    /// empty history.
+    /// The supplied session should be the `session` value returned by the
+    /// previous [`AgentRun`]. Its append-only log retains original messages
+    /// even when the effective model context has been compacted.
     ///
     /// # Errors
     ///
@@ -104,46 +119,95 @@ impl Agent {
     #[must_use]
     pub fn continue_with_event_handler(
         &self,
-        history: Vec<ModelMessage>,
+        session: AgentSession,
         prompt: String,
         cancellation: CancellationToken,
         event_handler: AgentEventHandler,
     ) -> BoxFuture<'_, AgentResult<AgentRun>> {
-        self.run_inner(history, prompt, cancellation, Some(event_handler))
+        self.run_inner(session, prompt, cancellation, Some(event_handler))
             .boxed()
+    }
+
+    /// Compacts an idle session while reporting compaction lifecycle events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no discardable history, cancellation is
+    /// requested, or the summary model request fails.
+    #[must_use]
+    pub fn compact_with_event_handler(
+        &self,
+        session: AgentSession,
+        cancellation: CancellationToken,
+        event_handler: AgentEventHandler,
+    ) -> BoxFuture<'_, AgentResult<AgentRun>> {
+        async move {
+            let mut session = session;
+            let mut events = Vec::new();
+            let result = self
+                .compact_session(
+                    &mut session,
+                    CompactionReason::Manual,
+                    &cancellation,
+                    &mut events,
+                    Some(&event_handler),
+                )
+                .await;
+            if let Err(error) = result {
+                record_event(
+                    &mut events,
+                    Some(&event_handler),
+                    AgentEvent::ContextCompactionFailed {
+                        reason: CompactionReason::Manual,
+                        message: error.error().to_string(),
+                    },
+                );
+                return Err(error);
+            }
+            Ok(AgentRun { session, events })
+        }
+        .boxed()
     }
 
     #[tracing::instrument(level = "info", skip_all)]
     async fn run_inner(
         &self,
-        mut messages: Vec<ModelMessage>,
+        mut session: AgentSession,
         prompt: String,
         cancellation: CancellationToken,
         event_handler: Option<AgentEventHandler>,
     ) -> AgentResult<AgentRun> {
         let tools = self.tools.definitions();
-        if messages.is_empty() {
+        if session.entries().is_empty() {
             let system_prompt =
                 crate::prompt::build_system_prompt(&tools, self.files.root(), &self.config).await?;
-            messages.push(ModelMessage::System {
-                content: system_prompt,
-            });
-        } else if !matches!(messages.first(), Some(ModelMessage::System { .. })) {
-            return invalid_stream("conversation history must start with a system message");
+            append_session_message(
+                &mut session,
+                ModelMessage::System {
+                    content: system_prompt,
+                },
+            )?;
+        } else {
+            effective_messages(&session)?;
         }
-        messages.push(ModelMessage::User { content: prompt });
+        append_session_message(&mut session, ModelMessage::User { content: prompt })?;
         let mut events = Vec::new();
+        let mut overflow_recovery_attempted = false;
 
         for step in 0..self.config.max_steps {
             ensure_running(&cancellation)?;
+            let mut event_sink = AgentEventSink {
+                events: &mut events,
+                handler: event_handler.as_ref(),
+            };
             let response = self
-                .request_model(
+                .request_with_overflow_recovery(
                     step,
-                    &messages,
+                    &mut session,
                     &tools,
                     &cancellation,
-                    &mut events,
-                    event_handler.as_ref(),
+                    &mut event_sink,
+                    &mut overflow_recovery_attempted,
                 )
                 .await?;
             if response.finish_reason == FinishReason::ToolCalls
@@ -151,7 +215,17 @@ impl Agent {
             {
                 return invalid_stream("model reported a tool-call finish without any tool calls");
             }
-            messages.push(ModelMessage::Assistant(response.message.clone()));
+            if let Some(usage) = response.message.usage.clone() {
+                record_event(
+                    &mut events,
+                    event_handler.as_ref(),
+                    AgentEvent::ModelUsage { usage },
+                );
+            }
+            append_session_message(
+                &mut session,
+                ModelMessage::Assistant(response.message.clone()),
+            )?;
 
             if response.message.tool_calls.is_empty() {
                 record_event(
@@ -161,7 +235,15 @@ impl Agent {
                         content: response.message.content.clone(),
                     },
                 );
-                return Ok(AgentRun { messages, events });
+                self.compact_completed_session(
+                    &mut session,
+                    &tools,
+                    &cancellation,
+                    &mut events,
+                    event_handler.as_ref(),
+                )
+                .await?;
+                return Ok(AgentRun { session, events });
             }
 
             if response.finish_reason == FinishReason::Length {
@@ -174,7 +256,7 @@ impl Agent {
             self.execute_tool_calls(
                 response.message.tool_calls,
                 &cancellation,
-                &mut messages,
+                &mut session,
                 &mut events,
                 event_handler.as_ref(),
             )
@@ -184,6 +266,105 @@ impl Agent {
         Err(Report::new(AgentError::StepLimit {
             limit: self.config.max_steps,
         }))
+    }
+
+    async fn request_with_overflow_recovery(
+        &self,
+        step: usize,
+        session: &mut AgentSession,
+        tools: &[ToolDefinition],
+        cancellation: &CancellationToken,
+        event_sink: &mut AgentEventSink<'_>,
+        overflow_recovery_attempted: &mut bool,
+    ) -> AgentResult<CollectedResponse> {
+        loop {
+            let messages = effective_messages(session)?;
+            match self
+                .request_model(
+                    step,
+                    &messages,
+                    tools,
+                    cancellation,
+                    event_sink.events,
+                    event_sink.handler,
+                )
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if matches!(error.error(), AgentError::ContextOverflow)
+                        && self.config.compaction.enabled
+                        && !*overflow_recovery_attempted =>
+                {
+                    *overflow_recovery_attempted = true;
+                    if let Err(compaction_error) = self
+                        .compact_session(
+                            session,
+                            CompactionReason::Overflow,
+                            cancellation,
+                            event_sink.events,
+                            event_sink.handler,
+                        )
+                        .await
+                    {
+                        record_event(
+                            event_sink.events,
+                            event_sink.handler,
+                            AgentEvent::ContextCompactionFailed {
+                                reason: CompactionReason::Overflow,
+                                message: compaction_error.error().to_string(),
+                            },
+                        );
+                        return Err(compaction_error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn compact_completed_session(
+        &self,
+        session: &mut AgentSession,
+        tools: &[ToolDefinition],
+        cancellation: &CancellationToken,
+        events: &mut Vec<AgentEvent>,
+        event_handler: Option<&AgentEventHandler>,
+    ) -> AgentResult<()> {
+        if !self.config.compaction.enabled {
+            return Ok(());
+        }
+        let effective = self
+            .config
+            .compaction
+            .effective(self.config.context_window, self.config.max_output_tokens);
+        if crate::compaction::should_compact(session, tools, effective)
+            .map_err(session_error)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        if let Err(error) = self
+            .compact_session(
+                session,
+                CompactionReason::Threshold,
+                cancellation,
+                events,
+                event_handler,
+            )
+            .await
+        {
+            tracing::warn!(%error, "automatic Tasci context compaction failed");
+            record_event(
+                events,
+                event_handler,
+                AgentEvent::ContextCompactionFailed {
+                    reason: CompactionReason::Threshold,
+                    message: error.error().to_string(),
+                },
+            );
+        }
+        Ok(())
     }
 
     async fn request_model(
@@ -206,6 +387,7 @@ impl Agent {
             let request = ModelRequest {
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
+                max_output_tokens: self.config.max_output_tokens,
             };
             let model_request = self.model.stream(request, cancellation.child_token());
             let stream = match cancellation.run_until_cancelled(model_request).await {
@@ -265,7 +447,7 @@ impl Agent {
         &self,
         calls: Vec<ToolCall>,
         cancellation: &CancellationToken,
-        messages: &mut Vec<ModelMessage>,
+        session: &mut AgentSession,
         events: &mut Vec<AgentEvent>,
         event_handler: Option<&AgentEventHandler>,
     ) -> AgentResult<()> {
@@ -304,12 +486,15 @@ impl Agent {
                             is_error: false,
                         },
                     );
-                    messages.push(ModelMessage::Tool {
-                        tool_call_id: call.id,
-                        tool_name: call.name,
-                        content: output.content,
-                        is_error: false,
-                    });
+                    append_session_message(
+                        session,
+                        ModelMessage::Tool {
+                            tool_call_id: call.id,
+                            tool_name: call.name,
+                            content: output.content,
+                            is_error: false,
+                        },
+                    )?;
                 }
                 Err(error) => {
                     if matches!(error.error(), ToolError::Cancelled) {
@@ -327,16 +512,171 @@ impl Agent {
                             is_error: true,
                         },
                     );
-                    messages.push(ModelMessage::Tool {
-                        tool_call_id: call.id,
-                        tool_name: call.name,
-                        content,
-                        is_error: true,
-                    });
+                    append_session_message(
+                        session,
+                        ModelMessage::Tool {
+                            tool_call_id: call.id,
+                            tool_name: call.name,
+                            content,
+                            is_error: true,
+                        },
+                    )?;
                 }
             }
         }
         Ok(())
+    }
+
+    #[tracing::instrument(level = "info", skip_all, fields(?reason))]
+    async fn compact_session(
+        &self,
+        session: &mut AgentSession,
+        reason: CompactionReason,
+        cancellation: &CancellationToken,
+        events: &mut Vec<AgentEvent>,
+        event_handler: Option<&AgentEventHandler>,
+    ) -> AgentResult<CompactionRecord> {
+        ensure_running(cancellation)?;
+        let config = self
+            .config
+            .compaction
+            .effective(self.config.context_window, self.config.max_output_tokens);
+        let preparation = crate::compaction::prepare_compaction(session, config)
+            .map_err(session_error)?
+            .ok_or_else(|| Report::new(AgentError::NothingToCompact))?;
+        record_event(
+            events,
+            event_handler,
+            AgentEvent::ContextCompactionStarted { reason },
+        );
+        let history = if let Some(prompt) =
+            crate::compaction::history_summary_prompt(&preparation, config.summary_output)
+        {
+            Some(self.request_summary(prompt, cancellation).await?)
+        } else {
+            None
+        };
+        let turn_prefix = if let Some(prompt) =
+            crate::compaction::turn_prefix_summary_prompt(&preparation, config.turn_prefix_output)
+        {
+            Some(self.request_summary(prompt, cancellation).await?)
+        } else {
+            None
+        };
+        let summary = crate::compaction::combine_summary(
+            &preparation,
+            history
+                .as_ref()
+                .map(|response| response.message.content.clone()),
+            turn_prefix
+                .as_ref()
+                .map(|response| response.message.content.clone()),
+        );
+        if summary.trim().is_empty() {
+            return invalid_stream("compaction model returned an empty summary");
+        }
+        let usage = crate::compaction::combine_usage(
+            history.and_then(|response| response.message.usage),
+            turn_prefix.and_then(|response| response.message.usage),
+        );
+        let mut record = CompactionRecord {
+            summary,
+            first_kept_entry_id: preparation.first_kept_entry_id,
+            tokens_before: preparation.tokens_before,
+            estimated_tokens_after: 0,
+            usage,
+            read_files: preparation.read_files,
+            modified_files: preparation.modified_files,
+        };
+        let mut projected = session.clone();
+        projected
+            .append_compaction(record.clone())
+            .map_err(session_error)?;
+        record.estimated_tokens_after =
+            crate::compaction::estimate_messages(&effective_messages(&projected)?);
+        session
+            .append_compaction(record.clone())
+            .map_err(session_error)?;
+        record_event(
+            events,
+            event_handler,
+            AgentEvent::ContextCompactionCompleted {
+                reason,
+                summary: record.summary.clone(),
+                tokens_before: record.tokens_before,
+                estimated_tokens_after: record.estimated_tokens_after,
+                usage: record.usage.clone(),
+            },
+        );
+        Ok(record)
+    }
+
+    async fn request_summary(
+        &self,
+        prompt: crate::compaction::SummaryPrompt,
+        cancellation: &CancellationToken,
+    ) -> AgentResult<CollectedResponse> {
+        let request = ModelRequest {
+            messages: vec![
+                ModelMessage::System {
+                    content: prompt.system,
+                },
+                ModelMessage::User {
+                    content: prompt.user,
+                },
+            ],
+            tools: Vec::new(),
+            max_output_tokens: Some(prompt.max_output_tokens),
+        };
+        let mut attempt = 1;
+        loop {
+            ensure_running(cancellation)?;
+            let stream = self
+                .model
+                .stream(request.clone(), cancellation.child_token())
+                .await;
+            let stream = match stream {
+                Ok(stream) => stream,
+                Err(error)
+                    if is_retryable_model_error(&error)
+                        && attempt <= self.config.max_model_retries =>
+                {
+                    attempt += 1;
+                    cancellation
+                        .run_until_cancelled(tokio::time::sleep(self.config.model_retry_delay))
+                        .await
+                        .ok_or_else(|| Report::new(AgentError::Cancelled))?;
+                    continue;
+                }
+                Err(error) => return Err(model_error(error)),
+            };
+            let mut ignored_events = Vec::new();
+            match collect_response(stream, cancellation, &mut ignored_events, None).await {
+                Ok(response)
+                    if response.finish_reason != FinishReason::ToolCalls
+                        && response.message.tool_calls.is_empty() =>
+                {
+                    return Ok(response);
+                }
+                Ok(_) => {
+                    return invalid_stream(
+                        "compaction model requested a tool despite receiving no tools",
+                    );
+                }
+                Err(ResponseCollectionError::Model(error))
+                    if is_retryable_model_error(&error)
+                        && attempt <= self.config.max_model_retries =>
+                {
+                    attempt += 1;
+                    cancellation
+                        .run_until_cancelled(tokio::time::sleep(self.config.model_retry_delay))
+                        .await
+                        .ok_or_else(|| Report::new(AgentError::Cancelled))?;
+                }
+                Err(ResponseCollectionError::Model(error)) => return Err(model_error(error)),
+                Err(ResponseCollectionError::Agent(error)) => return Err(error),
+            }
+        }
     }
 }
 
@@ -354,6 +694,12 @@ pub struct AgentConfig {
     pub project_instruction_files: Vec<PathBuf>,
     /// Additional host-controlled system guidance.
     pub additional_instructions: Vec<String>,
+    /// Model context-window size used for automatic compaction.
+    pub context_window: Option<u64>,
+    /// Maximum output supported by the selected model.
+    pub max_output_tokens: Option<u64>,
+    /// Context compaction policy.
+    pub compaction: CompactionConfig,
 }
 
 impl Default for AgentConfig {
@@ -364,6 +710,9 @@ impl Default for AgentConfig {
             model_retry_delay: DEFAULT_MODEL_RETRY_DELAY,
             project_instruction_files: vec![PathBuf::from("AGENTS.md")],
             additional_instructions: Vec::new(),
+            context_window: None,
+            max_output_tokens: None,
+            compaction: CompactionConfig::default(),
         }
     }
 }
@@ -377,8 +726,8 @@ pub const DEFAULT_MODEL_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Completed run retained for persistence and harness projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentRun {
-    /// Final provider-neutral conversation context.
-    pub messages: Vec<ModelMessage>,
+    /// Complete append-only native session.
+    pub session: AgentSession,
     /// Ordered observable run events.
     pub events: Vec<AgentEvent>,
 }
@@ -403,6 +752,36 @@ pub enum AgentEvent {
         attempt: usize,
         /// Configured delay before the next attempt in milliseconds.
         delay_ms: u64,
+    },
+    /// The provider reported token usage for a primary model response.
+    ModelUsage {
+        /// Provider-neutral token counters.
+        usage: ModelUsage,
+    },
+    /// Context compaction started.
+    ContextCompactionStarted {
+        /// Trigger for this compaction.
+        reason: CompactionReason,
+    },
+    /// Context compaction completed and was appended to the session.
+    ContextCompactionCompleted {
+        /// Trigger for this compaction.
+        reason: CompactionReason,
+        /// Structured checkpoint used in later requests.
+        summary: String,
+        /// Context size before compaction.
+        tokens_before: u64,
+        /// Estimated effective context size after compaction.
+        estimated_tokens_after: u64,
+        /// Usage of model calls that generated the checkpoint.
+        usage: ModelUsage,
+    },
+    /// Context compaction failed without changing effective context.
+    ContextCompactionFailed {
+        /// Trigger for this compaction.
+        reason: CompactionReason,
+        /// Secret-safe failure description.
+        message: String,
     },
     /// Model reasoning arrived.
     ReasoningDelta {
@@ -472,6 +851,150 @@ enum ResponseCollectionError {
     Model(Report<crate::ModelError>),
 }
 
+struct ResponseAccumulator {
+    reasoning: String,
+    content: String,
+    calls: Vec<(String, PendingToolCall)>,
+    call_indexes: HashMap<String, usize>,
+    finish_reason: Option<FinishReason>,
+    usage: Option<ModelUsage>,
+}
+
+impl ResponseAccumulator {
+    fn new() -> Self {
+        Self {
+            reasoning: String::new(),
+            content: String::new(),
+            calls: Vec::new(),
+            call_indexes: HashMap::new(),
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    fn accept(
+        &mut self,
+        event: ModelStreamEvent,
+        events: &mut Vec<AgentEvent>,
+        event_handler: Option<&AgentEventHandler>,
+    ) -> Result<(), ResponseCollectionError> {
+        match event {
+            ModelStreamEvent::ReasoningDelta { delta } => {
+                self.ensure_open("received reasoning after the terminal event")?;
+                self.reasoning.push_str(&delta);
+                record_event(events, event_handler, AgentEvent::ReasoningDelta { delta });
+            }
+            ModelStreamEvent::TextDelta { delta } => {
+                self.ensure_open("received text after the terminal event")?;
+                self.content.push_str(&delta);
+                record_event(events, event_handler, AgentEvent::TextDelta { delta });
+            }
+            ModelStreamEvent::ToolCallStarted { id, name } => {
+                self.start_tool_call(id.clone(), name.clone())?;
+                record_event(
+                    events,
+                    event_handler,
+                    AgentEvent::ToolCallStarted { id, name },
+                );
+            }
+            ModelStreamEvent::ToolCallArgumentsDelta { id, delta } => {
+                self.append_tool_arguments(&id, &delta)?;
+            }
+            ModelStreamEvent::ToolCallCompleted { id } => {
+                self.complete_tool_call(&id)?;
+                record_event(events, event_handler, AgentEvent::ToolCallCompleted { id });
+            }
+            ModelStreamEvent::Usage { usage } => {
+                if self.usage.replace(usage).is_some() {
+                    return collection_invalid_stream(
+                        "received more than one usage report for a response",
+                    );
+                }
+            }
+            ModelStreamEvent::Completed { finish_reason } => {
+                if self.finish_reason.replace(finish_reason).is_some() {
+                    return collection_invalid_stream(
+                        "received more than one terminal event for a response",
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<CollectedResponse, ResponseCollectionError> {
+        let finish_reason = self.finish_reason.ok_or_else(|| {
+            ResponseCollectionError::Agent(invalid_stream_report(
+                "stream ended without a terminal event",
+            ))
+        })?;
+        validate_collected_response(&self.content, &self.calls)?;
+        Ok(build_collected_response(
+            self.reasoning,
+            self.content,
+            self.calls,
+            finish_reason,
+            self.usage,
+        ))
+    }
+
+    fn start_tool_call(&mut self, id: String, name: String) -> Result<(), ResponseCollectionError> {
+        self.ensure_open("received a tool call after the terminal event")?;
+        if self.call_indexes.contains_key(&id) {
+            return collection_invalid_stream("a tool call identifier was started more than once");
+        }
+        self.call_indexes.insert(id.clone(), self.calls.len());
+        self.calls.push((
+            id,
+            PendingToolCall {
+                name,
+                arguments: String::new(),
+                completed: false,
+            },
+        ));
+        Ok(())
+    }
+
+    fn append_tool_arguments(
+        &mut self,
+        id: &str,
+        delta: &str,
+    ) -> Result<(), ResponseCollectionError> {
+        self.ensure_open("received tool arguments after the terminal event")?;
+        let index = self.call_indexes.get(id).copied().ok_or_else(|| {
+            ResponseCollectionError::Agent(invalid_stream_report(
+                "arguments arrived before tool-call start",
+            ))
+        })?;
+        let call = &mut self.calls[index].1;
+        if call.completed {
+            return collection_invalid_stream("arguments arrived after tool-call completion");
+        }
+        call.arguments.push_str(delta);
+        Ok(())
+    }
+
+    fn complete_tool_call(&mut self, id: &str) -> Result<(), ResponseCollectionError> {
+        self.ensure_open("completed a tool call after the terminal event")?;
+        let index = self.call_indexes.get(id).copied().ok_or_else(|| {
+            ResponseCollectionError::Agent(invalid_stream_report("an unknown tool call completed"))
+        })?;
+        let call = &mut self.calls[index].1;
+        if call.completed {
+            return collection_invalid_stream("a tool call completed more than once");
+        }
+        call.completed = true;
+        Ok(())
+    }
+
+    fn ensure_open(&self, reason: &'static str) -> Result<(), ResponseCollectionError> {
+        if self.finish_reason.is_some() {
+            return collection_invalid_stream(reason);
+        }
+        Ok(())
+    }
+}
+
 /// Collects one provider stream while enforcing tool-call lifecycle ordering.
 async fn collect_response(
     mut stream: crate::ModelEventStream,
@@ -480,11 +1003,7 @@ async fn collect_response(
     event_handler: Option<&AgentEventHandler>,
 ) -> Result<CollectedResponse, ResponseCollectionError> {
     ensure_running(cancellation).map_err(ResponseCollectionError::Agent)?;
-    let mut reasoning = String::new();
-    let mut content = String::new();
-    let mut calls = Vec::new();
-    let mut call_indexes = HashMap::new();
-    let mut finish_reason = None;
+    let mut response = ResponseAccumulator::new();
 
     loop {
         let event = cancellation
@@ -495,86 +1014,15 @@ async fn collect_response(
             break;
         };
         ensure_running(cancellation).map_err(ResponseCollectionError::Agent)?;
-        if finish_reason.is_some() {
-            return collection_invalid_stream("received an event after the terminal event");
-        }
-        match event.map_err(ResponseCollectionError::Model)? {
-            ModelStreamEvent::ReasoningDelta { delta } => {
-                reasoning.push_str(&delta);
-                record_event(events, event_handler, AgentEvent::ReasoningDelta { delta });
-            }
-            ModelStreamEvent::TextDelta { delta } => {
-                content.push_str(&delta);
-                record_event(events, event_handler, AgentEvent::TextDelta { delta });
-            }
-            ModelStreamEvent::ToolCallStarted { id, name } => {
-                if call_indexes.contains_key(&id) {
-                    return collection_invalid_stream(
-                        "a tool call identifier was started more than once",
-                    );
-                }
-                call_indexes.insert(id.clone(), calls.len());
-                calls.push((
-                    id.clone(),
-                    PendingToolCall {
-                        name: name.clone(),
-                        arguments: String::new(),
-                        completed: false,
-                    },
-                ));
-                record_event(
-                    events,
-                    event_handler,
-                    AgentEvent::ToolCallStarted { id, name },
-                );
-            }
-            ModelStreamEvent::ToolCallArgumentsDelta { id, delta } => {
-                let index = call_indexes.get(&id).copied().ok_or_else(|| {
-                    ResponseCollectionError::Agent(invalid_stream_report(
-                        "arguments arrived before tool-call start",
-                    ))
-                })?;
-                let call = &mut calls[index].1;
-                if call.completed {
-                    return collection_invalid_stream(
-                        "arguments arrived after tool-call completion",
-                    );
-                }
-                call.arguments.push_str(&delta);
-            }
-            ModelStreamEvent::ToolCallCompleted { id } => {
-                let index = call_indexes.get(&id).copied().ok_or_else(|| {
-                    ResponseCollectionError::Agent(invalid_stream_report(
-                        "an unknown tool call completed",
-                    ))
-                })?;
-                let call = &mut calls[index].1;
-                if call.completed {
-                    return collection_invalid_stream("a tool call completed more than once");
-                }
-                call.completed = true;
-                record_event(events, event_handler, AgentEvent::ToolCallCompleted { id });
-            }
-            ModelStreamEvent::Completed {
-                finish_reason: reason,
-            } => finish_reason = Some(reason),
-        }
+        response.accept(
+            event.map_err(ResponseCollectionError::Model)?,
+            events,
+            event_handler,
+        )?;
     }
 
     ensure_running(cancellation).map_err(ResponseCollectionError::Agent)?;
-    let finish_reason = finish_reason.ok_or_else(|| {
-        ResponseCollectionError::Agent(invalid_stream_report(
-            "stream ended without a terminal event",
-        ))
-    })?;
-    validate_collected_response(&content, &calls)?;
-
-    Ok(build_collected_response(
-        reasoning,
-        content,
-        calls,
-        finish_reason,
-    ))
+    response.finish()
 }
 
 /// Assembles one validated provider response.
@@ -583,6 +1031,7 @@ fn build_collected_response(
     content: String,
     calls: Vec<(String, PendingToolCall)>,
     finish_reason: FinishReason,
+    usage: Option<ModelUsage>,
 ) -> CollectedResponse {
     CollectedResponse {
         message: AssistantMessage {
@@ -596,6 +1045,7 @@ fn build_collected_response(
                     arguments: call.arguments,
                 })
                 .collect(),
+            usage,
         },
         finish_reason,
     }
@@ -643,7 +1093,26 @@ fn model_error(error: Report<crate::ModelError>) -> Report<AgentError> {
     if matches!(error.error(), crate::ModelError::Cancelled) {
         return error.escalate(AgentError::Cancelled);
     }
+    if matches!(error.error(), crate::ModelError::ContextOverflow) {
+        return error.escalate(AgentError::ContextOverflow);
+    }
     error.escalate(AgentError::Model)
+}
+
+fn append_session_message(session: &mut AgentSession, message: ModelMessage) -> AgentResult<()> {
+    session
+        .append_message(message)
+        .map(|_| ())
+        .map_err(session_error)
+}
+
+fn effective_messages(session: &AgentSession) -> AgentResult<Vec<ModelMessage>> {
+    session.effective_messages().map_err(session_error)
+}
+
+fn session_error(error: Report<crate::SessionError>) -> Report<AgentError> {
+    let reason = error.error().to_string();
+    error.escalate(AgentError::InvalidSession { reason })
 }
 
 fn ensure_running(cancellation: &CancellationToken) -> AgentResult<()> {
@@ -666,4 +1135,154 @@ fn invalid_stream_report(reason: impl Into<String>) -> Report<AgentError> {
     Report::new(AgentError::InvalidModelStream {
         reason: reason.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use futures_util::future::BoxFuture;
+    use futures_util::stream;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::ModelError;
+    use crate::ModelEventStream;
+    use crate::ModelResult;
+
+    /// Verifies one provider overflow compacts append-only session state and
+    /// retries with the new checkpoint plus a safe verbatim suffix.
+    #[tokio::test]
+    async fn context_overflow_compacts_and_retries_once() {
+        let directory = tempdir().unwrap();
+        let files = Arc::new(FileWorkspace::open(directory.path()).await.unwrap());
+        let backend = Arc::new(QueuedBackend {
+            replies: Mutex::new(
+                vec![
+                    BackendReply::Overflow,
+                    BackendReply::Text("## Goal\nPreserve earlier work."),
+                    BackendReply::Text("## Original Request\nKeep recent work."),
+                    BackendReply::Text("Recovered answer."),
+                ]
+                .into(),
+            ),
+            requests: Mutex::new(Vec::new()),
+        });
+        let agent = Agent::new(
+            backend.clone(),
+            ToolRegistry::new(),
+            files,
+            AgentConfig {
+                max_model_retries: 0,
+                context_window: Some(100),
+                max_output_tokens: Some(10),
+                compaction: CompactionConfig {
+                    enabled: true,
+                    reserve_tokens: 10,
+                    keep_recent_tokens: 10,
+                },
+                ..AgentConfig::default()
+            },
+        );
+        let mut session = AgentSession::new();
+        append(
+            &mut session,
+            ModelMessage::System {
+                content: "system".into(),
+            },
+        );
+        append(
+            &mut session,
+            ModelMessage::User {
+                content: "old request ".repeat(20),
+            },
+        );
+        append(&mut session, assistant("old answer ".repeat(20)));
+        append(
+            &mut session,
+            ModelMessage::User {
+                content: "recent request".into(),
+            },
+        );
+        append(&mut session, assistant("recent answer"));
+
+        let run = agent
+            .continue_with_event_handler(
+                session,
+                "continue".into(),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextCompactionCompleted {
+                reason: CompactionReason::Overflow,
+                ..
+            }
+        )));
+        assert_eq!(run.session.messages().count(), 7);
+        let requests = backend.requests.lock().await;
+        assert_eq!(requests.len(), 4);
+        assert!(matches!(
+            requests[3].messages.as_slice(),
+            [
+                ModelMessage::System { .. },
+                ModelMessage::ContextSummary { .. },
+                ModelMessage::Assistant(_),
+                ModelMessage::User { content },
+            ] if content == "continue"
+        ));
+    }
+
+    fn append(session: &mut AgentSession, message: ModelMessage) {
+        session.append_message(message).unwrap();
+    }
+
+    fn assistant(content: impl Into<String>) -> ModelMessage {
+        ModelMessage::Assistant(AssistantMessage {
+            reasoning: String::new(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            usage: None,
+        })
+    }
+
+    struct QueuedBackend {
+        replies: Mutex<VecDeque<BackendReply>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelBackend for QueuedBackend {
+        fn stream(
+            &self,
+            request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> BoxFuture<'_, ModelResult<ModelEventStream>> {
+            async move {
+                self.requests.lock().await.push(request);
+                match self.replies.lock().await.pop_front().unwrap() {
+                    BackendReply::Overflow => Err(Report::new(ModelError::ContextOverflow)),
+                    BackendReply::Text(content) => Ok(stream::iter([
+                        Ok(ModelStreamEvent::TextDelta {
+                            delta: content.to_owned(),
+                        }),
+                        Ok(ModelStreamEvent::Completed {
+                            finish_reason: FinishReason::Stop,
+                        }),
+                    ])
+                    .boxed()),
+                }
+            }
+            .boxed()
+        }
+    }
+
+    enum BackendReply {
+        Overflow,
+        Text(&'static str),
+    }
 }

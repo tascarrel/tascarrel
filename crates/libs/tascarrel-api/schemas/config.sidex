@@ -53,6 +53,10 @@ record ResolveTasciModelOutput {
     base_url: string,
     /// Endpoint-native model identifier sent in completion requests.
     provider_model: string,
+    /// Maximum context size in tokens for the selected model, when known.
+    context_window?: u64,
+    /// Maximum generated output in tokens for the selected model, when known.
+    max_output_tokens?: u64,
     /// Authorization header name, when a non-secret template is configured.
     authorization_header?: string,
     /// Non-secret authorization header value, when configured.

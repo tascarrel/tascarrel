@@ -66,6 +66,12 @@ import * as __schema_workspaces from "./workspaces";
                                             * Endpoint-native model identifier sent in completion requests.
                                             */
                                                         "providerModel": __sidex_types.builtins.String, /**
+                                            * Maximum context size in tokens for the selected model, when known.
+                                            */
+                                                        "contextWindow"?: __sidex_types.builtins.U64, /**
+                                            * Maximum generated output in tokens for the selected model, when known.
+                                            */
+                                                        "maxOutputTokens"?: __sidex_types.builtins.U64, /**
                                             * Authorization header name, when a non-secret template is configured.
                                             */
                                                         "authorizationHeader"?: __sidex_types.builtins.String, /**

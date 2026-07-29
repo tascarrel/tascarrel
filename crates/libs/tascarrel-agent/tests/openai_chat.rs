@@ -7,6 +7,7 @@ use http_body_util::BodyExt as _;
 use http_body_util::Full;
 use hyper::Request;
 use hyper::Response;
+use hyper::StatusCode;
 use hyper::body::Incoming;
 use hyper::header::CONNECTION;
 use hyper::header::CONTENT_TYPE;
@@ -63,6 +64,7 @@ async fn openai_chat_transport_normalizes_tool_calls() {
                     input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#.to_owned(),
                     prompt: ToolPrompt::default(),
                 }],
+                max_output_tokens: None,
             },
             CancellationToken::new(),
         )
@@ -125,6 +127,7 @@ async fn interrupted_openai_stream_is_a_transport_failure() {
                     content: "Respond completely.".to_owned(),
                 }],
                 tools: Vec::new(),
+                max_output_tokens: None,
             },
             CancellationToken::new(),
         )
@@ -167,12 +170,14 @@ async fn openai_compatible_stream_accepts_nullable_fields_and_trailing_usage() {
                         reasoning: "prior reasoning".to_owned(),
                         content: "Prior answer.".to_owned(),
                         tool_calls: Vec::new(),
+                        usage: None,
                     }),
                     ModelMessage::User {
                         content: "Respond completely.".to_owned(),
                     },
                 ],
                 tools: Vec::new(),
+                max_output_tokens: None,
             },
             CancellationToken::new(),
         )
@@ -190,6 +195,14 @@ async fn openai_compatible_stream_accepts_nullable_fields_and_trailing_usage() {
             },
             ModelStreamEvent::Completed {
                 finish_reason: FinishReason::Stop,
+            },
+            ModelStreamEvent::Usage {
+                usage: tascarrel_agent::ModelUsage {
+                    input_tokens: 0,
+                    output_tokens: 1,
+                    cache_read_input_tokens: None,
+                    reasoning_output_tokens: None,
+                },
             },
         ]
     );
@@ -219,6 +232,7 @@ async fn done_marker_completes_a_stream_without_a_finish_reason() {
                     content: "Respond completely.".to_owned(),
                 }],
                 tools: Vec::new(),
+                max_output_tokens: None,
             },
             CancellationToken::new(),
         )
@@ -256,7 +270,48 @@ fn provider_url_rejects_embedded_credentials() {
     assert!(!error.error().to_string().contains("password"));
 }
 
+/// Exercises context-overflow classification without exposing the provider's
+/// response body in the public error.
+#[tokio::test]
+async fn context_length_http_error_is_classified_for_compaction_recovery() {
+    let body = r#"{"error":{"message":"maximum context length exceeded"}}"#;
+    let (base_url, observed_request, server) =
+        serve_once_with_status(StatusCode::BAD_REQUEST, body).await;
+    let backend = OpenAiChatBackend::new(&format!("{base_url}/v1"), "test-model", None).unwrap();
+    let result = backend
+        .stream(
+            ModelRequest {
+                messages: vec![ModelMessage::User {
+                    content: "oversized".to_owned(),
+                }],
+                tools: Vec::new(),
+                max_output_tokens: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("context overflow should reject the request");
+    };
+
+    assert!(matches!(error.error(), ModelError::ContextOverflow));
+    assert!(!error.error().to_string().contains("maximum context"));
+    observed_request.await.unwrap();
+    server.await.unwrap();
+}
+
 async fn serve_once(
+    response_body: &'static str,
+) -> (
+    String,
+    oneshot::Receiver<ObservedHttpRequest>,
+    tokio::task::JoinHandle<()>,
+) {
+    serve_once_with_status(StatusCode::OK, response_body).await
+}
+
+async fn serve_once_with_status(
+    status: StatusCode,
     response_body: &'static str,
 ) -> (
     String,
@@ -291,6 +346,7 @@ async fn serve_once(
                     .unwrap();
                 Ok::<_, Infallible>(
                     Response::builder()
+                        .status(status)
                         .header(CONTENT_TYPE, "text/event-stream")
                         .header(CONNECTION, "close")
                         .body(Full::new(Bytes::from_static(response_body.as_bytes())))

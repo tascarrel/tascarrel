@@ -9,7 +9,9 @@ use std::sync::MutexGuard;
 use futures_util::future::BoxFuture;
 use jiff::Timestamp;
 use tascarrel_agent::AgentEvent;
+use tascarrel_agent::CompactionReason;
 use tascarrel_agent::HttpAuthorization;
+use tascarrel_agent::ModelUsage;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
 use tascarrel_agent::TasciHarnessEvent;
@@ -24,8 +26,13 @@ use tascarrel_api::types::chats::ChatItemKind;
 use tascarrel_api::types::chats::ChatItemState;
 use tascarrel_api::types::chats::ChatModel;
 use tascarrel_api::types::chats::ChatModelSelection;
+use tascarrel_api::types::chats::ChatModelUsage;
 use tascarrel_api::types::chats::ChatPromptAttachment;
+use tascarrel_api::types::chats::ChatTokenUsage;
 use tascarrel_api::types::chats::ChatTurnState;
+use tascarrel_api::types::chats::ChatUsageCoverage;
+use tascarrel_api::types::chats::ChatUsageSnapshot;
+use tascarrel_api::types::chats::ChatUsageState;
 use tascarrel_api::types::chats::StructuredContent;
 use tascarrel_api::types::chats::TextContent;
 use tokio::io::AsyncBufReadExt as _;
@@ -132,6 +139,8 @@ impl Harness for TasciAdaptor {
                 reasoning_item: None,
                 assistant_item: None,
                 tool_items: HashMap::new(),
+                compaction_item: None,
+                turn_usage: ModelUsage::default(),
                 current_model: self.configuration.selection.clone(),
                 stopped: false,
             }));
@@ -277,6 +286,7 @@ impl HarnessControl for TasciControl {
                     write_command(&self.process, TasciHarnessCommand::Interrupt).await?;
                     Ok(HarnessCommandResult::Accepted)
                 }
+                HarnessCommand::CompactContext => self.compact_context().await,
                 HarnessCommand::Stop => {
                     {
                         let mut state = lock(&self.state);
@@ -288,18 +298,57 @@ impl HarnessControl for TasciControl {
                     write_command(&self.process, TasciHarnessCommand::Stop).await?;
                     Ok(HarnessCommandResult::Stopped)
                 }
-                HarnessCommand::CompactContext | HarnessCommand::ResolveUserInput { .. } => {
-                    Err(harness_error(
-                        HarnessErrorKind::UnsupportedOperation,
-                        "Tasci does not support this harness command",
-                    ))
-                }
+                HarnessCommand::ResolveUserInput { .. } => Err(harness_error(
+                    HarnessErrorKind::UnsupportedOperation,
+                    "Tasci does not support this harness command",
+                )),
             }
         })
     }
 }
 
 impl TasciControl {
+    async fn compact_context(&self) -> Result<HarnessCommandResult, HarnessError> {
+        let turn_id = {
+            let mut state = lock(&self.state);
+            if state.stopped {
+                return Err(harness_error(
+                    HarnessErrorKind::SessionNotFound,
+                    "the Tasci session has stopped",
+                ));
+            }
+            if state.active_turn.is_some() {
+                return Err(harness_error(
+                    HarnessErrorKind::UnsupportedOperation,
+                    "Tasci cannot compact context during an active turn",
+                ));
+            }
+            let turn_id = ChatTurnId::generate();
+            state.active_turn = Some(ActiveTasciTurn {
+                id: turn_id.clone(),
+                user_item_id: ChatItemId::generate(),
+                user_content: None,
+                changed_model: None,
+                presentation_started: false,
+            });
+            state.turn_usage = ModelUsage::default();
+            turn_id
+        };
+        if let Err(error) = write_command(&self.process, TasciHarnessCommand::Compact).await {
+            let mut state = lock(&self.state);
+            if state
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| turn.id == turn_id)
+            {
+                state.active_turn = None;
+            }
+            return Err(error);
+        }
+        start_turn_presentation(&self.state, &self.events);
+        Ok(HarnessCommandResult::Accepted)
+    }
+
     async fn send_prompt(
         &self,
         prompt: HarnessPrompt,
@@ -359,11 +408,12 @@ impl TasciControl {
             state.active_turn = Some(ActiveTasciTurn {
                 id: turn_id.clone(),
                 user_item_id: ChatItemId::generate(),
-                user_content,
+                user_content: Some(user_content),
                 changed_model: (requested_model != current_model).then(|| requested_model.clone()),
                 presentation_started: false,
             });
             state.current_model = requested_model;
+            state.turn_usage = ModelUsage::default();
             turn_id
         };
         if let Err(error) = write_command(
@@ -409,6 +459,8 @@ struct TasciSessionState {
     reasoning_item: Option<StreamingTextItem>,
     assistant_item: Option<StreamingTextItem>,
     tool_items: HashMap<String, ToolItem>,
+    compaction_item: Option<ChatItemId>,
+    turn_usage: ModelUsage,
     current_model: ChatModelSelection,
     stopped: bool,
 }
@@ -416,7 +468,7 @@ struct TasciSessionState {
 struct ActiveTasciTurn {
     id: ChatTurnId,
     user_item_id: ChatItemId,
-    user_content: ArcVec<ChatContent>,
+    user_content: Option<ArcVec<ChatContent>>,
     changed_model: Option<ChatModelSelection>,
     presentation_started: bool,
 }
@@ -523,6 +575,35 @@ fn project_agent_event(
         AgentEvent::ModelRequestStarted { step: 0 } => {
             start_turn_presentation(state, output);
         }
+        AgentEvent::ModelUsage { usage } => project_usage(state, output, &usage),
+        AgentEvent::ContextCompactionStarted { reason } => {
+            start_turn_presentation(state, output);
+            complete_streaming_text(state, output, StreamingTextKind::Reasoning);
+            complete_streaming_text(state, output, StreamingTextKind::Assistant);
+            start_compaction_item(state, output, reason);
+        }
+        AgentEvent::ContextCompactionCompleted {
+            reason,
+            summary: _,
+            tokens_before,
+            estimated_tokens_after,
+            usage,
+        } => {
+            if usage.total_tokens() > 0 {
+                project_usage(state, output, &usage);
+            }
+            finish_compaction_item(
+                state,
+                output,
+                reason,
+                tokens_before,
+                estimated_tokens_after,
+                None,
+            );
+        }
+        AgentEvent::ContextCompactionFailed { reason, message } => {
+            finish_compaction_item(state, output, reason, 0, 0, Some(message));
+        }
         AgentEvent::ReasoningDelta { delta } => {
             complete_streaming_text(state, output, StreamingTextKind::Assistant);
             append_streaming_text(state, output, delta, StreamingTextKind::Reasoning);
@@ -605,25 +686,175 @@ fn start_turn_presentation(
             ),
         );
     }
+    if let Some(user_content) = user_content {
+        emit_event(
+            output,
+            base_event(
+                Some(turn_id.clone()),
+                Some(user_item_id.clone()),
+                HarnessEventPayload::ItemStarted {
+                    kind: ChatItemKind::UserMessage,
+                },
+            ),
+        );
+        emit_event(
+            output,
+            base_event(
+                Some(turn_id),
+                Some(user_item_id),
+                HarnessEventPayload::ItemCompleted {
+                    kind: ChatItemKind::UserMessage,
+                    state: ChatItemState::Completed,
+                    content: user_content,
+                },
+            ),
+        );
+    }
+}
+
+fn project_usage(
+    state: &Arc<Mutex<TasciSessionState>>,
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    usage: &ModelUsage,
+) {
+    let (turn, model, tokens) = {
+        let mut state = lock(state);
+        state.turn_usage.input_tokens = state
+            .turn_usage
+            .input_tokens
+            .saturating_add(usage.input_tokens);
+        state.turn_usage.output_tokens = state
+            .turn_usage
+            .output_tokens
+            .saturating_add(usage.output_tokens);
+        state.turn_usage.cache_read_input_tokens = add_optional_usage(
+            state.turn_usage.cache_read_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+        state.turn_usage.reasoning_output_tokens = add_optional_usage(
+            state.turn_usage.reasoning_output_tokens,
+            usage.reasoning_output_tokens,
+        );
+        (
+            state.active_turn.as_ref().map(|turn| turn.id.clone()),
+            state.current_model.clone(),
+            state.turn_usage.clone(),
+        )
+    };
+    let Some(turn) = turn else {
+        return;
+    };
+    let tokens = ChatTokenUsage {
+        input_tokens: tokens.input_tokens,
+        output_tokens: tokens.output_tokens,
+        cache_read_input_tokens: tokens.cache_read_input_tokens,
+        cache_write_input_tokens: None,
+        cache_writes_by_ttl: ArcVec::new(),
+        reasoning_output_tokens: tokens.reasoning_output_tokens,
+    };
     emit_event(
         output,
         base_event(
-            Some(turn_id.clone()),
-            Some(user_item_id.clone()),
-            HarnessEventPayload::ItemStarted {
-                kind: ChatItemKind::UserMessage,
+            Some(turn),
+            None,
+            HarnessEventPayload::TurnUsageUpdated {
+                usage: ChatUsageSnapshot {
+                    coverage: ChatUsageCoverage::PrimaryAgent,
+                    tokens: tokens.clone(),
+                    models: vec![ChatModelUsage {
+                        model,
+                        tokens,
+                        pricing: None,
+                        provider_estimated_cost: None,
+                    }]
+                    .into(),
+                    provider_estimated_cost: None,
+                },
+                state: ChatUsageState::Provisional,
             },
         ),
     );
+}
+
+fn start_compaction_item(
+    state: &Arc<Mutex<TasciSessionState>>,
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    _reason: CompactionReason,
+) {
+    let (turn, item) = {
+        let mut state = lock(state);
+        let turn = state.active_turn.as_ref().map(|turn| turn.id.clone());
+        let item = state
+            .compaction_item
+            .get_or_insert_with(ChatItemId::generate)
+            .clone();
+        (turn, item)
+    };
     emit_event(
         output,
         base_event(
-            Some(turn_id),
-            Some(user_item_id),
+            turn,
+            Some(item),
+            HarnessEventPayload::ItemStarted {
+                kind: ChatItemKind::ContextCompaction,
+            },
+        ),
+    );
+}
+
+fn finish_compaction_item(
+    state: &Arc<Mutex<TasciSessionState>>,
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    reason: CompactionReason,
+    tokens_before: u64,
+    estimated_tokens_after: u64,
+    error: Option<String>,
+) {
+    let (turn, item) = {
+        let mut state = lock(state);
+        (
+            state.active_turn.as_ref().map(|turn| turn.id.clone()),
+            state.compaction_item.take(),
+        )
+    };
+    let Some(item) = item else {
+        return;
+    };
+    let state = if error.is_some() {
+        ChatItemState::Failed
+    } else {
+        ChatItemState::Completed
+    };
+    let content = vec![ChatContent::Structured(StructuredContent {
+        value: match serde_json::to_value(CompactionPresentation {
+            reason,
+            tokens_before,
+            estimated_tokens_after,
+            error,
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                emit(
+                    output,
+                    Err(harness_error(
+                        HarnessErrorKind::Internal,
+                        format!("failed to project Tasci compaction: {error}"),
+                    )),
+                );
+                return;
+            }
+        },
+    })]
+    .into();
+    emit_event(
+        output,
+        base_event(
+            turn,
+            Some(item),
             HarnessEventPayload::ItemCompleted {
-                kind: ChatItemKind::UserMessage,
-                state: ChatItemState::Completed,
-                content: user_content,
+                kind: ChatItemKind::ContextCompaction,
+                state,
+                content,
             },
         ),
     );
@@ -851,6 +1082,7 @@ fn finish_turn(
         let mut state = lock(state);
         let turn = state.active_turn.take().map(|turn| turn.id);
         state.tool_items.clear();
+        state.compaction_item = None;
         turn
     };
     let turn_state = if error.is_some() {
@@ -1015,6 +1247,22 @@ struct ToolPresentation {
     result: String,
 }
 
+#[derive(serde::Serialize)]
+struct CompactionPresentation {
+    reason: CompactionReason,
+    tokens_before: u64,
+    estimated_tokens_after: u64,
+    error: Option<String>,
+}
+
+fn add_optional_usage(first: Option<u64>, second: Option<u64>) -> Option<u64> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.saturating_add(second)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntimeConfiguration {
     fn from(output: tascarrel_api::types::config::ResolveTasciModelOutput) -> Self {
         let authorization = output
@@ -1029,6 +1277,8 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
             harness: TasciHarnessConfiguration {
                 base_url: output.base_url.to_string(),
                 model: output.provider_model.to_string(),
+                context_window: output.context_window,
+                max_output_tokens: output.max_output_tokens,
                 authorization,
                 working_directory: "/workspace".to_owned(),
             },
@@ -1053,16 +1303,20 @@ mod tests {
             active_turn: Some(ActiveTasciTurn {
                 id: turn_id.clone(),
                 user_item_id: user_item_id.clone(),
-                user_content: vec![ChatContent::Text(TextContent {
-                    value: "Change models and keep this visible.".into(),
-                })]
-                .into(),
+                user_content: Some(
+                    vec![ChatContent::Text(TextContent {
+                        value: "Change models and keep this visible.".into(),
+                    })]
+                    .into(),
+                ),
                 changed_model: Some(selected_model.clone()),
                 presentation_started: false,
             }),
             reasoning_item: None,
             assistant_item: None,
             tool_items: HashMap::new(),
+            compaction_item: None,
+            turn_usage: ModelUsage::default(),
             current_model: previous_model,
             stopped: false,
         }));
@@ -1120,13 +1374,15 @@ mod tests {
             active_turn: Some(ActiveTasciTurn {
                 id: ChatTurnId::generate(),
                 user_item_id: ChatItemId::generate(),
-                user_content: ArcVec::new(),
+                user_content: Some(ArcVec::new()),
                 changed_model: None,
                 presentation_started: true,
             }),
             reasoning_item: None,
             assistant_item: None,
             tool_items: HashMap::new(),
+            compaction_item: None,
+            turn_usage: ModelUsage::default(),
             current_model: selection("local-model"),
             stopped: false,
         }));

@@ -30,6 +30,7 @@ use crate::ModelMessage;
 use crate::ModelRequest;
 use crate::ModelResult;
 use crate::ModelStreamEvent;
+use crate::ModelUsage;
 
 /// `OpenAI` Chat Completions backend with normalized streaming tool calls.
 pub struct OpenAiChatBackend {
@@ -114,10 +115,14 @@ impl OpenAiChatBackend {
             .await
             .map_err(|source| transport_error(format!("request failed: {source}")))?;
         if !response.status().is_success() {
-            return Err(request_error(format!(
-                "provider returned HTTP {}",
-                response.status()
-            )));
+            let status = response.status();
+            let body = response.text().await.map_err(|source| {
+                transport_error(format!("failed to read provider error: {source}"))
+            })?;
+            if is_context_overflow(status.as_u16(), &body) {
+                return Err(Report::new(ModelError::ContextOverflow));
+            }
+            return Err(request_error(format!("provider returned HTTP {status}")));
         }
         Ok(normalize_stream(response))
     }
@@ -187,7 +192,11 @@ fn build_chat_request(model: &str, request: ModelRequest) -> ModelResult<ChatReq
         model: model.to_owned(),
         messages,
         tools,
+        max_tokens: request.max_output_tokens,
         stream: true,
+        stream_options: ChatStreamOptions {
+            include_usage: true,
+        },
     })
 }
 
@@ -199,6 +208,7 @@ fn normalize_stream(response: reqwest::Response) -> ModelEventStream {
         pending: VecDeque::new(),
         tool_calls: BTreeMap::new(),
         terminal: false,
+        usage_emitted: false,
         finished: false,
     };
     stream::unfold(state, |mut state| async move {
@@ -242,7 +252,15 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
     stream: bool,
+    stream_options: ChatStreamOptions,
+}
+
+#[derive(Serialize)]
+struct ChatStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -272,6 +290,12 @@ impl From<ModelMessage> for ChatMessage {
         match message {
             ModelMessage::System { content } => Self::System { content },
             ModelMessage::User { content } => Self::User { content },
+            ModelMessage::ContextSummary { content } => Self::User {
+                content: format!(
+                    "<context-summary>\n{content}\n</context-summary>\n\n\
+                     Continue from this checkpoint and the verbatim messages that follow it."
+                ),
+            },
             ModelMessage::Assistant(message) => {
                 let reasoning_content =
                     (!message.reasoning.is_empty()).then_some(message.reasoning);
@@ -342,6 +366,7 @@ struct DecoderState {
     pending: VecDeque<ModelResult<ModelStreamEvent>>,
     tool_calls: BTreeMap<usize, ProviderToolCall>,
     terminal: bool,
+    usage_emitted: bool,
     finished: bool,
 }
 
@@ -364,7 +389,21 @@ impl DecoderState {
         let chunk: ChatCompletionChunk = serde_json::from_str(data)
             .map_err(|source| protocol_error(format!("invalid response chunk: {source}")))?;
         if let Some(error) = chunk.error {
+            if is_context_overflow_message(&error.message) {
+                return Err(Report::new(ModelError::ContextOverflow));
+            }
             return Err(request_error(error.message));
+        }
+        if let Some(usage) = chunk.usage {
+            if self.usage_emitted {
+                return Err(protocol_error(
+                    "provider emitted more than one usage report",
+                ));
+            }
+            self.usage_emitted = true;
+            self.pending.push_back(Ok(ModelStreamEvent::Usage {
+                usage: usage.into(),
+            }));
         }
         if self.terminal {
             let contains_model_data = chunk.choices.iter().any(|choice| {
@@ -517,11 +556,47 @@ struct ChatCompletionChunk {
     #[serde(default)]
     choices: Vec<ChatChoice>,
     error: Option<ChatError>,
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Deserialize)]
 struct ChatError {
     message: String,
+}
+
+#[derive(Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    prompt_tokens_details: Option<ChatPromptTokenDetails>,
+    completion_tokens_details: Option<ChatCompletionTokenDetails>,
+}
+
+impl From<ChatUsage> for ModelUsage {
+    fn from(usage: ChatUsage) -> Self {
+        Self {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            cache_read_input_tokens: usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            reasoning_output_tokens: usage
+                .completion_tokens_details
+                .and_then(|details| details.reasoning_tokens),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatPromptTokenDetails {
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionTokenDetails {
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -610,4 +685,24 @@ fn request_error(message: impl Into<String>) -> Report<ModelError> {
     Report::new(ModelError::Request {
         message: message.into(),
     })
+}
+
+fn is_context_overflow(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 413 | 422) && is_context_overflow_message(body)
+}
+
+fn is_context_overflow_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "context length",
+        "context_length",
+        "context window",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "prompt is too long",
+        "request too large",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
 }

@@ -16,6 +16,7 @@
 #![deny(unsafe_code)]
 
 mod agent;
+mod compaction;
 mod error;
 mod file_workspace;
 mod harness_protocol;
@@ -23,6 +24,7 @@ mod model;
 mod process_runtime;
 mod prompt;
 mod provider;
+mod session;
 mod tool;
 mod tools;
 
@@ -33,6 +35,8 @@ pub use agent::AgentEventHandler;
 pub use agent::AgentRun;
 pub use agent::DEFAULT_MODEL_RETRIES;
 pub use agent::DEFAULT_MODEL_RETRY_DELAY;
+pub use compaction::CompactionConfig;
+pub use compaction::CompactionReason;
 pub use error::AgentError;
 pub use error::AgentResult;
 pub use error::ModelError;
@@ -50,6 +54,7 @@ pub use model::ModelEventStream;
 pub use model::ModelMessage;
 pub use model::ModelRequest;
 pub use model::ModelStreamEvent;
+pub use model::ModelUsage;
 pub use model::ToolCall;
 pub use process_runtime::DEFAULT_PROCESS_OBSERVATION_BYTES;
 pub use process_runtime::DEFAULT_PROCESS_TERMINATION_GRACE;
@@ -61,6 +66,13 @@ pub use process_runtime::ProcessSnapshot;
 pub use process_runtime::ProcessStatus;
 pub use provider::HttpAuthorization;
 pub use provider::OpenAiChatBackend;
+pub use session::AgentSession;
+pub use session::CompactionRecord;
+pub use session::SessionEntry;
+pub use session::SessionEntryId;
+pub use session::SessionEntryValue;
+pub use session::SessionError;
+pub use session::SessionResult;
 pub use tool::FileChange;
 pub use tool::FileChangeOperation;
 pub use tool::Tool;

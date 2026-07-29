@@ -9,6 +9,18 @@ use thiserror::Error;
 /// Failure while running an agent.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// The provider rejected the effective context as too large.
+    #[error("model context window was exceeded")]
+    ContextOverflow,
+    /// A compaction could not be prepared from the current context.
+    #[error("the current session has no context that can be compacted")]
+    NothingToCompact,
+    /// Session data violates native log invariants.
+    #[error("agent session is invalid: {reason}")]
+    InvalidSession {
+        /// Safe description of the violated invariant.
+        reason: String,
+    },
     /// The configured model produced an invalid event sequence.
     #[error("model produced an invalid event sequence: {reason}")]
     InvalidModelStream {
@@ -47,6 +59,9 @@ pub enum AgentError {
 /// Failure while communicating with a model provider.
 #[derive(Debug, Error)]
 pub enum ModelError {
+    /// The provider rejected a request that exceeded its context window.
+    #[error("model provider rejected a request that exceeded the context window")]
+    ContextOverflow,
     /// The provider transport failed before a complete response arrived.
     #[error("model provider transport failed: {message}")]
     Transport {

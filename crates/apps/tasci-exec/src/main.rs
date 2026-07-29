@@ -16,6 +16,7 @@ use tascarrel_agent::AgentConfig;
 use tascarrel_agent::AgentEvent;
 use tascarrel_agent::AgentEventHandler;
 use tascarrel_agent::AgentRun;
+use tascarrel_agent::AgentSession;
 use tascarrel_agent::BashTool;
 use tascarrel_agent::EditTool;
 use tascarrel_agent::FileWorkspace;
@@ -72,6 +73,8 @@ async fn run_once(prompt: String) -> TasciExecResult<()> {
     let configuration = TasciHarnessConfiguration {
         base_url: LOCAL_API_BASE_URL.to_owned(),
         model: LOCAL_MODEL.to_owned(),
+        context_window: None,
+        max_output_tokens: None,
         authorization: None,
         working_directory: workspace.to_string_lossy().into_owned(),
     };
@@ -130,7 +133,7 @@ async fn run_harness() -> TasciExecResult<()> {
     let mut agent = Arc::new(build_agent(&configuration, &runtime)?);
     tracing::info!(model = %configuration.model, "Tasci harness started");
     write_harness_event(&mut output, TasciHarnessEvent::Started).await?;
-    let mut history = Vec::new();
+    let mut session = AgentSession::new();
 
     loop {
         match read_harness_command(&mut input).await? {
@@ -150,10 +153,21 @@ async fn run_harness() -> TasciExecResult<()> {
                     tracing::info!(model = %configuration.model, "Tasci harness model changed");
                 }
                 let turn =
-                    run_harness_turn(Arc::clone(&agent), history, prompt, &mut input, &mut output)
+                    run_harness_turn(Arc::clone(&agent), session, prompt, &mut input, &mut output)
                         .await?;
-                history = turn.history;
+                session = turn.session;
                 if turn.stop {
+                    tracing::info!("Tasci harness stopped");
+                    write_harness_event(&mut output, TasciHarnessEvent::Stopped).await?;
+                    return Ok(());
+                }
+            }
+            TasciHarnessCommand::Compact => {
+                let compaction =
+                    run_harness_compaction(Arc::clone(&agent), session, &mut input, &mut output)
+                        .await?;
+                session = compaction.session;
+                if compaction.stop {
                     tracing::info!("Tasci harness stopped");
                     write_harness_event(&mut output, TasciHarnessEvent::Stopped).await?;
                     return Ok(());
@@ -185,20 +199,20 @@ async fn run_harness() -> TasciExecResult<()> {
 }
 
 struct HarnessTurn {
-    history: Vec<tascarrel_agent::ModelMessage>,
+    session: AgentSession,
     stop: bool,
 }
 
 async fn run_harness_turn(
     agent: Arc<Agent>,
-    history: Vec<tascarrel_agent::ModelMessage>,
+    session: AgentSession,
     prompt: String,
     input: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     output: &mut tokio::io::Stdout,
 ) -> TasciExecResult<HarnessTurn> {
     tracing::info!("Tasci turn started");
     let cancellation = CancellationToken::new();
-    let fallback_history = history.clone();
+    let fallback_session = session.clone();
     let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
     let event_handler: AgentEventHandler = Arc::new(move |event| {
         if events.send(event.clone()).is_err() {
@@ -206,7 +220,7 @@ async fn run_harness_turn(
         }
     });
     let run =
-        agent.continue_with_event_handler(history, prompt, cancellation.clone(), event_handler);
+        agent.continue_with_event_handler(session, prompt, cancellation.clone(), event_handler);
     tokio::pin!(run);
     let mut stop = false;
     let result = loop {
@@ -224,7 +238,9 @@ async fn run_harness_turn(
                         stop = true;
                         cancellation.cancel();
                     }
-                    TasciHarnessCommand::Prompt { .. } | TasciHarnessCommand::Start { .. } => {
+                    TasciHarnessCommand::Prompt { .. }
+                    | TasciHarnessCommand::Compact
+                    | TasciHarnessCommand::Start { .. } => {
                         return Err(TasciExecError::ProtocolInput {
                             message: "a Tasci turn accepts only interrupt or stop commands".to_owned(),
                         }.report());
@@ -237,7 +253,7 @@ async fn run_harness_turn(
         write_harness_event(output, TasciHarnessEvent::Agent { value: event }).await?;
     }
     match result {
-        Ok(AgentRun { messages, .. }) => {
+        Ok(AgentRun { session, .. }) => {
             tracing::info!("Tasci turn completed");
             write_harness_event(
                 output,
@@ -247,10 +263,7 @@ async fn run_harness_turn(
                 },
             )
             .await?;
-            Ok(HarnessTurn {
-                history: messages,
-                stop,
-            })
+            Ok(HarnessTurn { session, stop })
         }
         Err(_error) if cancellation.is_cancelled() => {
             tracing::info!("Tasci turn cancelled");
@@ -263,12 +276,12 @@ async fn run_harness_turn(
             )
             .await?;
             Ok(HarnessTurn {
-                history: fallback_history,
+                session: fallback_session,
                 stop,
             })
         }
         Err(error) => {
-            let message = error.to_string();
+            let message = error.error().to_string();
             tracing::warn!(%error, "Tasci turn failed");
             write_harness_event(
                 output,
@@ -279,7 +292,101 @@ async fn run_harness_turn(
             )
             .await?;
             Ok(HarnessTurn {
-                history: fallback_history,
+                session: fallback_session,
+                stop,
+            })
+        }
+    }
+}
+
+async fn run_harness_compaction(
+    agent: Arc<Agent>,
+    session: AgentSession,
+    input: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    output: &mut tokio::io::Stdout,
+) -> TasciExecResult<HarnessTurn> {
+    tracing::info!("Tasci context compaction started");
+    let cancellation = CancellationToken::new();
+    let fallback_session = session.clone();
+    let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let event_handler: AgentEventHandler = Arc::new(move |event| {
+        if events.send(event.clone()).is_err() {
+            tracing::debug!("Tasci compaction event receiver closed before event delivery");
+        }
+    });
+    let run = agent.compact_with_event_handler(session, cancellation.clone(), event_handler);
+    tokio::pin!(run);
+    let mut stop = false;
+    let result = loop {
+        tokio::select! {
+            result = &mut run => break result,
+            event = event_receiver.recv() => {
+                if let Some(event) = event {
+                    write_harness_event(output, TasciHarnessEvent::Agent { value: event }).await?;
+                }
+            }
+            command = read_harness_command(input) => {
+                match command? {
+                    TasciHarnessCommand::Interrupt => cancellation.cancel(),
+                    TasciHarnessCommand::Stop => {
+                        stop = true;
+                        cancellation.cancel();
+                    }
+                    TasciHarnessCommand::Prompt { .. }
+                    | TasciHarnessCommand::Compact
+                    | TasciHarnessCommand::Start { .. } => {
+                        return Err(TasciExecError::ProtocolInput {
+                            message: "Tasci context compaction accepts only interrupt or stop commands".to_owned(),
+                        }.report());
+                    }
+                }
+            }
+        }
+    };
+    while let Ok(event) = event_receiver.try_recv() {
+        write_harness_event(output, TasciHarnessEvent::Agent { value: event }).await?;
+    }
+    match result {
+        Ok(AgentRun { session, .. }) => {
+            tracing::info!("Tasci context compaction completed");
+            write_harness_event(
+                output,
+                TasciHarnessEvent::TurnFinished {
+                    error: None,
+                    cancelled: false,
+                },
+            )
+            .await?;
+            Ok(HarnessTurn { session, stop })
+        }
+        Err(_error) if cancellation.is_cancelled() => {
+            tracing::info!("Tasci context compaction cancelled");
+            write_harness_event(
+                output,
+                TasciHarnessEvent::TurnFinished {
+                    error: None,
+                    cancelled: true,
+                },
+            )
+            .await?;
+            Ok(HarnessTurn {
+                session: fallback_session,
+                stop,
+            })
+        }
+        Err(error) => {
+            let message = error.error().to_string();
+            tracing::warn!(%error, "Tasci context compaction failed");
+            write_harness_event(
+                output,
+                TasciHarnessEvent::TurnFinished {
+                    error: Some(message),
+                    cancelled: false,
+                },
+            )
+            .await?;
+            Ok(HarnessTurn {
+                session: fallback_session,
                 stop,
             })
         }
@@ -365,7 +472,11 @@ fn build_agent(
         model,
         runtime.tools.clone(),
         Arc::clone(&runtime.files),
-        AgentConfig::default(),
+        AgentConfig {
+            context_window: configuration.context_window,
+            max_output_tokens: configuration.max_output_tokens,
+            ..AgentConfig::default()
+        },
     ))
 }
 
@@ -420,6 +531,28 @@ impl EventPrinter {
                     step + 1
                 ));
             }
+            AgentEvent::ContextCompactionStarted { reason } => {
+                self.ensure_newline();
+                self.write(format_args!("[context compaction {reason:?}]\n"));
+            }
+            AgentEvent::ContextCompactionCompleted {
+                tokens_before,
+                estimated_tokens_after,
+                ..
+            } => {
+                self.ensure_newline();
+                self.write(format_args!(
+                    "[context compacted: {tokens_before} -> about {estimated_tokens_after} tokens]\n"
+                ));
+            }
+            AgentEvent::ContextCompactionFailed {
+                reason, message, ..
+            } => {
+                self.ensure_newline();
+                self.write(format_args!(
+                    "[context compaction {reason:?} failed: {message}]\n"
+                ));
+            }
             AgentEvent::TextDelta { delta } => {
                 self.write(format_args!("{delta}"));
                 self.line_open = !delta.ends_with('\n');
@@ -444,7 +577,8 @@ impl EventPrinter {
                 self.write_artifacts(artifacts);
             }
             AgentEvent::Completed { .. } => self.ensure_newline(),
-            AgentEvent::ReasoningDelta { .. }
+            AgentEvent::ModelUsage { .. }
+            | AgentEvent::ReasoningDelta { .. }
             | AgentEvent::ToolCallStarted { .. }
             | AgentEvent::ToolCallCompleted { .. } => {}
         }

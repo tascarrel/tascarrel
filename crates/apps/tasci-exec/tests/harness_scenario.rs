@@ -68,6 +68,8 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
             configuration: TasciHarnessConfiguration {
                 base_url: format!("{base_url}/v1"),
                 model: "scenario-model".to_owned(),
+                context_window: None,
+                max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
             },
@@ -96,6 +98,8 @@ async fn harness_scenario_switches_models_and_retains_context_across_turns() {
             configuration: Some(TasciHarnessConfiguration {
                 base_url: format!("{base_url}/v1"),
                 model: "scenario-model-two".to_owned(),
+                context_window: None,
+                max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
             }),
@@ -169,6 +173,8 @@ async fn harness_scenario_reports_an_empty_model_response() {
             configuration: TasciHarnessConfiguration {
                 base_url: format!("{base_url}/v1"),
                 model: "empty-model".to_owned(),
+                context_window: None,
+                max_output_tokens: None,
                 authorization: None,
                 working_directory: workspace.path().to_string_lossy().into_owned(),
             },
@@ -206,6 +212,160 @@ async fn harness_scenario_reports_an_empty_model_response() {
     assert!(logs.contains("Tasci turn failed"));
     assert!(logs.contains("no text or tool calls"));
     server.await.unwrap();
+}
+
+/// Exercises manual compaction, split-turn summaries, and subsequent context
+/// reconstruction through the complete harness protocol.
+#[tokio::test]
+async fn harness_scenario_compacts_context_and_continues_from_the_checkpoint() {
+    let (base_url, requests, server) = serve_owned_model_scenario(compaction_responses()).await;
+    let workspace = tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tasci-exec"))
+        .arg("--harness")
+        .current_dir(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Start {
+            configuration: TasciHarnessConfiguration {
+                base_url: format!("{base_url}/v1"),
+                model: "compaction-model".to_owned(),
+                context_window: None,
+                max_output_tokens: Some(2_000),
+                authorization: None,
+                working_directory: workspace.path().to_string_lossy().into_owned(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Started);
+
+    for index in 1..=9 {
+        send_command(
+            &mut input,
+            TasciHarnessCommand::Prompt {
+                prompt: format!("Question {index}."),
+                configuration: None,
+            },
+        )
+        .await;
+        read_turn(&mut output).await;
+    }
+
+    send_command(&mut input, TasciHarnessCommand::Compact).await;
+    let mut completed_compaction = None;
+    loop {
+        match read_event(&mut output).await {
+            TasciHarnessEvent::Agent {
+                value:
+                    AgentEvent::ContextCompactionCompleted {
+                        tokens_before,
+                        estimated_tokens_after,
+                        ..
+                    },
+            } => completed_compaction = Some((tokens_before, estimated_tokens_after)),
+            TasciHarnessEvent::Agent { .. } => {}
+            TasciHarnessEvent::TurnFinished {
+                error: None,
+                cancelled: false,
+            } => break,
+            event => panic!("unexpected compaction event: {event:?}"),
+        }
+    }
+    let (tokens_before, tokens_after) = completed_compaction.unwrap();
+    assert!(tokens_after < tokens_before);
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Prompt {
+            prompt: "Continue now.".to_owned(),
+            configuration: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        read_turn(&mut output).await,
+        vec!["Continued after compaction.".to_owned()]
+    );
+    send_command(&mut input, TasciHarnessCommand::Stop).await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Stopped);
+    assert!(child.wait().await.unwrap().success());
+
+    assert_compaction_requests(requests);
+    server.await.unwrap();
+}
+
+fn compaction_responses() -> Vec<String> {
+    let mut responses = vec!["old implementation detail ".repeat(600); 9];
+    responses.push(
+        "## Goal\nContinue the task.\n\n## Constraints & Preferences\n- (none)\n\n\
+         ## Progress\n### Done\n- [x] Reviewed old work.\n\n### In Progress\n- [ ] Continue.\n\n\
+         ### Blocked\n- (none)\n\n## Key Decisions\n- **Keep context**: Preserve the plan.\n\n\
+         ## Next Steps\n1. Continue.\n\n## Critical Context\n- checkpoint marker"
+            .to_owned(),
+    );
+    responses.push(
+        "## Original Request\nContinue the old turn.\n\n## Early Progress\n- Started it.\n\n\
+         ## Context for Suffix\n- Retained work follows."
+            .to_owned(),
+    );
+    responses.push("Continued after compaction.".to_owned());
+    responses
+}
+
+fn assert_compaction_requests(mut requests: mpsc::UnboundedReceiver<ObservedChatRequest>) {
+    let mut observed = Vec::new();
+    while let Ok(request) = requests.try_recv() {
+        observed.push(request);
+    }
+    assert_eq!(observed.len(), 12);
+    let history_summary = &observed[9];
+    assert!(
+        history_summary.messages[0]
+            .content
+            .contains("context summarization assistant")
+    );
+    assert!(
+        history_summary.messages[1]
+            .content
+            .contains("<conversation>")
+    );
+    let continuation = &observed[11];
+    assert_eq!(continuation.messages[0].role, "system");
+    assert!(
+        continuation.messages[1]
+            .content
+            .contains("<context-summary>")
+    );
+    assert!(
+        continuation.messages[1]
+            .content
+            .contains("checkpoint marker")
+    );
+    assert!(
+        continuation
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("Question 1."))
+    );
+    assert!(
+        continuation
+            .messages
+            .iter()
+            .any(|message| message.content == "Question 9.")
+    );
+    assert_eq!(
+        continuation.messages.last().unwrap().content,
+        "Continue now."
+    );
 }
 
 async fn send_command(input: &mut tokio::process::ChildStdin, command: TasciHarnessCommand) {
@@ -256,6 +416,16 @@ async fn serve_model_scenario<const N: usize>(
     mpsc::UnboundedReceiver<ObservedChatRequest>,
     tokio::task::JoinHandle<()>,
 ) {
+    serve_owned_model_scenario(responses.into_iter().map(str::to_owned).collect()).await
+}
+
+async fn serve_owned_model_scenario(
+    responses: Vec<String>,
+) -> (
+    String,
+    mpsc::UnboundedReceiver<ObservedChatRequest>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (request_sender, request_receiver) = mpsc::unbounded_channel();
@@ -265,6 +435,7 @@ async fn serve_model_scenario<const N: usize>(
             let request_sender = request_sender.clone();
             let service = service_fn(move |request: Request<Incoming>| {
                 let request_sender = request_sender.clone();
+                let response_text = response_text.clone();
                 async move {
                     let body = request.into_body().collect().await.unwrap().to_bytes();
                     request_sender
@@ -272,7 +443,7 @@ async fn serve_model_scenario<const N: usize>(
                         .unwrap();
                     let response_body = format!(
                         "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n",
-                        serde_json::to_string(response_text).unwrap()
+                        serde_json::to_string(&response_text).unwrap()
                     );
                     Ok::<_, Infallible>(
                         Response::builder()

@@ -13,6 +13,10 @@ pub struct TasciHarnessConfiguration {
     pub base_url: String,
     /// Provider-native model identifier.
     pub model: String,
+    /// Maximum model context in tokens, when configured.
+    pub context_window: Option<u64>,
+    /// Maximum generated output in tokens, when configured.
+    pub max_output_tokens: Option<u64>,
     /// Non-secret authorization header template, when required.
     ///
     /// Host-side HTTP secret injection may replace a placeholder in the value.
@@ -40,6 +44,9 @@ pub enum TasciHarnessCommand {
     },
     /// Cooperatively cancels the active turn.
     Interrupt,
+    /// Summarizes older context while retaining the complete native session
+    /// log.
+    Compact,
     /// Cancels active work and exits the process.
     Stop,
 }
