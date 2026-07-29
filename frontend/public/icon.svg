@@ -4,7 +4,6 @@
   viewBox="0 0 512 512"
   xmlns="http://www.w3.org/2000/svg"
 >
-  <rect width="512" height="512" fill="#000" />
   <g transform="translate(96 70) scale(8.42)">
     <path
       d="M19.007 0 38.015 10.981v21.961L19.007 43.923 0 32.942V10.981L19.007 0Z"
