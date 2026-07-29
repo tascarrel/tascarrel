@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use tascarrel_git::CaptureId;
 use tascarrel_git::GitBinary;
@@ -198,6 +199,22 @@ async fn refresh_preserves_the_upstream_default_branch() {
         fs::read_to_string(checkout.join("README.md")).unwrap(),
         "initial\n"
     );
+}
+
+/// Verifies a disconnected client cannot leave upload-pack waiting forever.
+#[tokio::test]
+async fn upload_pack_relay_finishes_after_client_disconnect() {
+    let fixture = Fixture::new().await;
+    let service = fixture.store.upload_pack().unwrap();
+    let (client, server) = tokio::io::duplex(1024 * 1024);
+    let relay = tokio::spawn(service.relay(server));
+    drop(client);
+
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("upload-pack relay did not finish after client disconnect")
+        .expect("upload-pack relay task failed")
+        .expect_err("disconnecting a Git client should fail the relay");
 }
 
 /// Verifies an incremental capture can be compared, published, and retried

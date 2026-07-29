@@ -181,29 +181,37 @@ impl GitService {
             to_git?;
             from_git
         };
-        let (relay, diagnostic, status) = tokio::join!(
-            relay,
-            read_bounded(stderr, self.diagnostic_bytes),
-            self.child.wait(),
-        );
-        relay.map_err(|source| {
-            Report::new(GitError::Io {
-                action: "relay the Git smart protocol",
-                source,
-            })
-        })?;
-        let diagnostic = diagnostic.map_err(|source| {
-            Report::new(GitError::Io {
-                action: "read Git service stderr",
-                source,
-            })
-        })?;
-        let status = status.map_err(|source| {
-            Report::new(GitError::Io {
-                action: "wait for the Git service",
-                source,
-            })
-        })?;
+        // A disconnected client can leave Git waiting for another protocol
+        // request. Return on the relay error so `kill_on_drop` terminates the
+        // child instead of retaining the caller's repository lock forever.
+        let ((), diagnostic, status) = tokio::try_join!(
+            async {
+                relay.await.map_err(|source| {
+                    Report::new(GitError::Io {
+                        action: "relay the Git smart protocol",
+                        source,
+                    })
+                })
+            },
+            async {
+                read_bounded(stderr, self.diagnostic_bytes)
+                    .await
+                    .map_err(|source| {
+                        Report::new(GitError::Io {
+                            action: "read Git service stderr",
+                            source,
+                        })
+                    })
+            },
+            async {
+                self.child.wait().await.map_err(|source| {
+                    Report::new(GitError::Io {
+                        action: "wait for the Git service",
+                        source,
+                    })
+                })
+            },
+        )?;
         service_status(status, self.action, &diagnostic.bytes, diagnostic.truncated)?;
         drop(stream_read);
         drop(stream_write);
