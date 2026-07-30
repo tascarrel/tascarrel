@@ -16,6 +16,7 @@ use tascarrel_api::types::network;
 use tascarrel_api::types::protocol as wire;
 use tascarrel_api::types::repositories;
 use tascarrel_api::types::secrets;
+use tascarrel_api::types::shares;
 use tascarrel_api::types::workspaces;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_protocol::control_plane;

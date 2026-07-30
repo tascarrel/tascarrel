@@ -140,6 +140,14 @@
           description = "Tasci coding-agent harness";
         };
 
+      sharefsSmokePackageFor =
+        system:
+        guestWorkspacePackageFor system {
+          cargoPackage = "tascarrel-sharefs";
+          binaryName = "sharefs-smoke";
+          description = "Kernel-level ShareFS integration probe";
+        };
+
       cliPackageFor =
         system:
         workspacePackageFor system {
@@ -420,6 +428,7 @@
           guest-module = (guestPkgsFor system).callPackage ./nix/tests/guest-module.nix {
             guestModule = self.nixosModules.tascarrel-guest;
             portName = self.lib.virtioPortName;
+            sharefsSmoke = sharefsSmokePackageFor system;
           };
 
           home-manager-module = pkgs.callPackage ./nix/tests/home-manager-module.nix {

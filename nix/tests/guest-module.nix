@@ -1,7 +1,9 @@
 {
+  lib,
   pkgs,
   guestModule,
   portName,
+  sharefsSmoke,
 }:
 
 let
@@ -106,6 +108,18 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.start()
     machine.wait_for_unit("basic.target")
+    machine.succeed("""
+      set -euo pipefail
+      lower=/run/tascarrel/sharefs-smoke-lower
+      state=/var/lib/tascarrel/sharefs-smoke-state
+      mountpoint=/run/tascarrel/sharefs-smoke-mount
+      mkdir -p "$lower" "$mountpoint"
+      btrfs subvolume create "$state"
+      timeout --signal=KILL 20s ${lib.getExe' sharefsSmoke "sharefs-smoke"} "$lower" "$state" "$mountpoint" ${lib.getExe' pkgs.btrfs-progs "btrfs"}
+      ! mountpoint -q "$mountpoint"
+      test "$(cat "$lower/document")" = base
+      test "$(cat "$lower/host-later")" = host
+    """)
     machine.succeed("""
       set -euo pipefail
       share_root=/run/tascarrel/bindfs-idmap-test

@@ -34,6 +34,7 @@ const NETWORK_PUBLIC_DIRECTORY: &str = "public";
 const NIX_STORE_DIRECTORY: &str = "nix-store";
 const SCRATCH_DIRECTORY: &str = "scratch";
 const IMAGE_BUILDS_DIRECTORY: &str = "image-builds";
+const SHARE_OVERLAYS_DIRECTORY: &str = "share-overlays";
 
 /// Host-published, content-addressed workspace inputs.
 #[derive(Clone, Debug)]
@@ -159,6 +160,20 @@ pub struct ScratchStorage {
     image_builds: PathBuf,
 }
 
+/// Persistent per-pod copy-on-write host-share state.
+#[derive(Clone, Debug)]
+pub struct ShareOverlayStorage {
+    root: PathBuf,
+}
+
+impl ShareOverlayStorage {
+    /// Returns the directory containing per-pod `ShareFS` upper subvolumes.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 impl ScratchStorage {
     /// Returns the same-filesystem image-build scratch root.
     #[must_use]
@@ -179,6 +194,7 @@ pub(crate) struct StorageLayout {
     network: NetworkStorage,
     nix_store: NixStoreStorage,
     scratch: ScratchStorage,
+    share_overlays: ShareOverlayStorage,
 }
 
 impl StorageLayout {
@@ -221,6 +237,9 @@ impl StorageLayout {
         let scratch = ScratchStorage {
             image_builds: ensure_directory(&scratch_root.join(IMAGE_BUILDS_DIRECTORY), 0o700)?,
         };
+        let share_overlays = ShareOverlayStorage {
+            root: ensure_directory(&root.join(SHARE_OVERLAYS_DIRECTORY), 0o700)?,
+        };
         let nix_store_path = root.join(NIX_STORE_DIRECTORY);
 
         Ok(Self {
@@ -235,6 +254,7 @@ impl StorageLayout {
                 root: nix_store_path,
             },
             scratch,
+            share_overlays,
         })
     }
 
@@ -272,6 +292,10 @@ impl StorageLayout {
 
     pub(crate) fn scratch(&self) -> &ScratchStorage {
         &self.scratch
+    }
+
+    pub(crate) fn share_overlays(&self) -> &ShareOverlayStorage {
+        &self.share_overlays
     }
 }
 
@@ -450,6 +474,7 @@ mod tests {
         assert!(layout.chats.root().is_dir());
         assert!(layout.network.public().is_dir());
         assert!(layout.scratch.image_builds().is_dir());
+        assert!(layout.share_overlays.root().is_dir());
         assert_eq!(
             fs::metadata(&layout.database).unwrap().permissions().mode() & 0o777,
             0o700

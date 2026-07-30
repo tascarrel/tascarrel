@@ -63,8 +63,28 @@ pub struct WorkspaceHostShare {
     pub name: String,
     /// Opaque virtiofs or virtio-9p mount tag assigned by the host.
     pub mount_tag: String,
-    /// Whether the guest and its pods may modify the export.
-    pub writable: bool,
+    /// Pod access mode retained from the host configuration.
+    pub mode: WorkspaceHostShareMode,
+}
+
+/// Access policy for one host-pinned share.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceHostShareMode {
+    /// Pods receive an ownership-normalized read-only view.
+    ReadOnly,
+    /// Pods write directly through to the host directory.
+    ReadWrite,
+    /// Each pod receives an isolated `ShareFS` copy-on-write view.
+    Overlay,
+}
+
+impl WorkspaceHostShareMode {
+    /// Returns whether the VM transport itself may mutate the host directory.
+    #[must_use]
+    pub const fn transport_is_writable(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
 }
 
 /// Invalid or oversized workspace host-share response.
@@ -120,12 +140,12 @@ mod tests {
                 WorkspaceHostShare {
                     name: "source".to_owned(),
                     mount_tag: "tascarrel-share-0".to_owned(),
-                    writable: false,
+                    mode: WorkspaceHostShareMode::ReadOnly,
                 },
                 WorkspaceHostShare {
                     name: "build_cache".to_owned(),
                     mount_tag: "tascarrel-share-1".to_owned(),
-                    writable: true,
+                    mode: WorkspaceHostShareMode::ReadWrite,
                 },
             ],
         }
@@ -150,7 +170,7 @@ mod tests {
                     WorkspaceHostShare {
                         name: "source".to_owned(),
                         mount_tag: "tascarrel-share-0".to_owned(),
-                        writable: false,
+                        mode: WorkspaceHostShareMode::ReadOnly,
                     },
                     WorkspaceHostShare {
                         name: if duplicate_tag { "cache" } else { "source" }.to_owned(),
@@ -160,7 +180,7 @@ mod tests {
                             "tascarrel-share-1"
                         }
                         .to_owned(),
-                        writable: false,
+                        mode: WorkspaceHostShareMode::Overlay,
                     },
                 ],
             };

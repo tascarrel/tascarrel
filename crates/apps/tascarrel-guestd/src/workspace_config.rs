@@ -795,13 +795,17 @@ mod tests {
     #[test]
     fn accepts_named_host_shares() {
         let configured = WorkspaceConfig::decode(
-            "[shares.source]\npath = \"~/src\"\n\n[shares.output]\npath = \"/srv/output\"\nwritable = true\n",
+            "[shares.source]\npath = \"~/src\"\nmode = \"Overlay\"\n\n[shares.output]\npath = \"/srv/output\"\nmode = \"ReadWrite\"\n",
         )
         .unwrap();
         configured.validate().unwrap();
         assert_eq!(
             configured.host_shares,
             BTreeSet::from(["output".to_owned(), "source".to_owned()])
+        );
+        assert!(
+            WorkspaceConfig::decode("[shares.source]\npath = \"~/src\"\n").is_err(),
+            "the breaking mode field must be explicit"
         );
     }
 

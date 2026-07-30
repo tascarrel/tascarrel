@@ -7,4 +7,5 @@ mod host_operations;
 mod network;
 mod repositories;
 mod secrets;
+mod share_overlays;
 mod workspaces;

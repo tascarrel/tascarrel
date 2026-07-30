@@ -33,7 +33,7 @@ pub use data_plane::*;
 pub const MAGIC: [u8; 4] = *b"TSC\0";
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 
 /// Number of bytes in a frame header.
 pub const HEADER_LEN: usize = 12;

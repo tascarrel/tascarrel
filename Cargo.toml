@@ -21,6 +21,7 @@ croner = "3.0.1"
 clap = "4.5"
 eventsource-stream = "0.2.3"
 flate2 = "1.1"
+fuser = { version = "0.18", default-features = false }
 futures-core = "0.3"
 futures-util = "0.3"
 globset = { version = "0.4.19", default-features = false }
@@ -42,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
 ] }
 rmcp = { version = "3.0.0", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = "1"
@@ -69,6 +71,7 @@ tascarrel-api = { path = "crates/libs/tascarrel-api" }
 tascarrel-git = { path = "crates/libs/tascarrel-git" }
 tascarrel-mux = { path = "crates/libs/tascarrel-mux" }
 tascarrel-protocol = { path = "crates/libs/tascarrel-protocol" }
+tascarrel-sharefs = { path = "crates/libs/tascarrel-sharefs" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

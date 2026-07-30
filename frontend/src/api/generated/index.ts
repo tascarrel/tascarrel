@@ -16,5 +16,6 @@ export * as processes from "./processes";
 export * as protocol from "./protocol";
 export * as repositories from "./repositories";
 export * as secrets from "./secrets";
+export * as shares from "./shares";
 export * as store from "./store";
 export * as workspaces from "./workspaces";

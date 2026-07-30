@@ -96,6 +96,7 @@ use tascarrel_protocol::Framed;
 use tascarrel_protocol::GuestControlIdentity;
 use tascarrel_protocol::HostOperationInputRequest;
 use tascarrel_protocol::HostOperationInputResponse;
+use tascarrel_protocol::MAX_SHARE_OVERLAY_FRAME_LEN;
 use tascarrel_protocol::MAX_WORKSPACE_ENVIRONMENT_FRAME_LEN;
 use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
 use tascarrel_protocol::MUX_CA_HOST_ENDPOINT;
@@ -105,6 +106,7 @@ use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
 use tascarrel_protocol::MUX_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_POD_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_PUBLISH_GUEST_ENDPOINT;
+use tascarrel_protocol::MUX_SHARE_OVERLAY_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_FILE_READ_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
@@ -115,9 +117,15 @@ use tascarrel_protocol::PodId;
 use tascarrel_protocol::PublishedPortConnect;
 use tascarrel_protocol::PublishedPortConnectResponse;
 use tascarrel_protocol::RemoteError;
+use tascarrel_protocol::ShareOverlayCompletion;
+use tascarrel_protocol::ShareOverlayDecision;
+use tascarrel_protocol::ShareOverlayOperation;
+use tascarrel_protocol::ShareOverlayPrepareResponse;
+use tascarrel_protocol::ShareOverlayRequest;
 use tascarrel_protocol::WorkspaceEnvironmentResponse;
 use tascarrel_protocol::WorkspaceFileReadRequest;
 use tascarrel_protocol::WorkspaceFileReadResponse;
+use tascarrel_protocol::WorkspaceHostShareMode;
 use tascarrel_protocol::WorkspaceHostSharesResponse;
 use tascarrel_protocol::workspace_snapshot;
 use thiserror::Error;
@@ -929,12 +937,13 @@ async fn main() -> Result<()> {
         host_share_manifest
             .shares
             .iter()
+            .filter(|share| share.mode != WorkspaceHostShareMode::Overlay)
             .map(|share| {
                 PodShare::host(
                     &share.mount_tag,
                     &share.name,
                     Path::new(host_shares::HOST_SHARES_DIRECTORY).join(&share.name),
-                    share.writable,
+                    share.mode.transport_is_writable(),
                 )
                 .with_context(|| format!("failed to configure host share {:?}", share.name))
             })
@@ -1051,6 +1060,32 @@ async fn main() -> Result<()> {
     runtime_config.nix_gc_root_dir = storage.nix_store().pod_gc_roots();
     runtime_config.nix_gc_root_trash_dir = storage.nix_store().gc_root_trash();
     runtime_config.workspace_ca = ca_path.clone().map(WorkspaceCaConfig::new);
+    runtime_config.share_overlays = tascarrel_guest::ShareOverlayRuntimeConfig {
+        storage_root: storage.share_overlays().root().to_owned(),
+        runtime_root: args.runtime_dir.join("share-overlays"),
+        btrfs: args.btrfs.clone(),
+        shares: host_share_manifest
+            .shares
+            .iter()
+            .filter(|share| share.mode == WorkspaceHostShareMode::Overlay)
+            .map(|share| {
+                let lower = host_share_mounts
+                    .overlay_lower(&share.name)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "overlay host share {:?} has no mounted raw lower",
+                            share.name
+                        )
+                    })?
+                    .to_owned();
+                Ok(tascarrel_guest::ShareOverlay {
+                    name: share.name.clone(),
+                    mount_tag: share.mount_tag.clone(),
+                    lower,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
     runtime_config.policy = PodPolicy::default()
         .with_docker_daemon(workspace.features.docker)
         .with_podman(workspace.features.podman)
@@ -1875,6 +1910,20 @@ fn accept_mux_request(
         }
         return;
     }
+    if request.endpoint() == MUX_SHARE_OVERLAY_GUEST_ENDPOINT {
+        match request.accept() {
+            Ok(channel) => {
+                let pods = control.pods.clone();
+                connections.spawn(async move {
+                    if let Err(error) = serve_share_overlay_approval(channel, &pods).await {
+                        warn!(%error, "logical ShareFS approval ended with an error");
+                    }
+                });
+            }
+            Err(error) => warn!(%error, "could not accept ShareFS approval request"),
+        }
+        return;
+    }
     if request.endpoint() == MUX_CONTROL_PLANE_ENDPOINT {
         accept_guest_control_plane_request(request, &control.control_plane, connections);
         return;
@@ -1882,6 +1931,106 @@ fn accept_mux_request(
     if let Err(error) = request.reject(b"unknown endpoint") {
         warn!(%error, "could not reject an unknown logical endpoint");
     }
+}
+
+/// Serves one exact overlay inspection or apply handshake.
+#[tracing::instrument(level = "debug", skip_all, err)]
+async fn serve_share_overlay_approval(
+    channel: Channel,
+    pods: &tascarrel_guest::PodService,
+) -> std::result::Result<(), Report<ShareOverlayApprovalError>> {
+    let mut framed = Framed::with_max_frame_len(channel, MAX_SHARE_OVERLAY_FRAME_LEN)
+        .map_err(|error| share_overlay_failed("failed to configure approval framing", error))?;
+    let request = framed
+        .read::<ShareOverlayRequest>()
+        .await
+        .map_err(|error| share_overlay_failed("failed to read an approval request", error))?
+        .ok_or_else(|| share_overlay_failure("host closed the approval request"))?;
+    let prepared = match pods
+        .prepare_share_overlay(&request.pod_id, &request.share)
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            framed
+                .write(&ShareOverlayPrepareResponse::Error {
+                    error: RemoteError::new(ErrorCode::ExecutionFailed, error.to_string()),
+                })
+                .await
+                .map_err(|error| {
+                    share_overlay_failed("failed to write a preparation failure", error)
+                })?;
+            return Ok(());
+        }
+    };
+    let snapshot = prepared
+        .snapshot()
+        .map_err(|error| share_overlay_failed("failed to read the prepared snapshot", error))?
+        .clone();
+    match request.operation {
+        ShareOverlayOperation::Inspect => {
+            prepared.retain().await;
+            framed
+                .write(&ShareOverlayPrepareResponse::Snapshot { snapshot })
+                .await
+                .map_err(|error| {
+                    share_overlay_failed("failed to write an inspection snapshot", error)
+                })?;
+        }
+        ShareOverlayOperation::Apply { revision } if revision != snapshot.revision => {
+            prepared.retain().await;
+            framed
+                .write(&ShareOverlayPrepareResponse::RevisionChanged { snapshot })
+                .await
+                .map_err(|error| {
+                    share_overlay_failed("failed to write a changed revision", error)
+                })?;
+        }
+        ShareOverlayOperation::Apply { .. } => {
+            framed
+                .write(&ShareOverlayPrepareResponse::Snapshot { snapshot })
+                .await
+                .map_err(|error| {
+                    share_overlay_failed("failed to write an approved snapshot", error)
+                })?;
+            let decision = framed
+                .read::<ShareOverlayDecision>()
+                .await
+                .map_err(|error| share_overlay_failed("failed to read the host decision", error))?
+                .ok_or_else(|| share_overlay_failure("host closed the approval before deciding"))?;
+            let completion = match decision {
+                ShareOverlayDecision::Applied => match prepared.commit().await {
+                    Ok(()) => ShareOverlayCompletion::Complete,
+                    Err(error) => ShareOverlayCompletion::Error {
+                        error: RemoteError::new(ErrorCode::ExecutionFailed, error.to_string()),
+                    },
+                },
+                ShareOverlayDecision::Retain => {
+                    prepared.retain().await;
+                    ShareOverlayCompletion::Complete
+                }
+            };
+            framed.write(&completion).await.map_err(|error| {
+                share_overlay_failed("failed to write the approval completion", error)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+#[error("ShareFS approval request failed: {0}")]
+struct ShareOverlayApprovalError(&'static str);
+
+fn share_overlay_failure(action: &'static str) -> Report<ShareOverlayApprovalError> {
+    ShareOverlayApprovalError(action).report()
+}
+
+fn share_overlay_failed(
+    action: &'static str,
+    source: impl std::fmt::Display,
+) -> Report<ShareOverlayApprovalError> {
+    share_overlay_failure(action).message(source.to_string())
 }
 
 /// Resolves one host-requested pod port and changes the framed mux channel to

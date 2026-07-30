@@ -1,10 +1,11 @@
 //! Guest mounting for host directories pinned to one managed workspace VM.
 //!
 //! Raw virtiofs or virtio-9p exports stay below the private guest runtime.
-//! Bindfs supplies a stable ownership-normalized view at
-//! `/mnt/shares/<name>` that can be idmapped into every pod. This is required
-//! even for virtiofs: each pod has a distinct outer identity range, while host
-//! files retain their host ownership and modes.
+//! Overlay shares use that raw export as the live lower for `ShareFS`. Bindfs
+//! supplies other modes with a stable ownership-normalized view at
+//! `/mnt/shares/<name>` that can be idmapped into every pod. The bridge is
+//! required even for virtiofs because each pod has a distinct outer identity
+//! range while host files retain their host ownership and modes.
 
 use std::ffi::OsString;
 use std::fs;
@@ -21,6 +22,7 @@ use anyhow::anyhow;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_protocol::WorkspaceHostShare;
+use tascarrel_protocol::WorkspaceHostShareMode;
 use tascarrel_protocol::WorkspaceHostSharesResponse;
 use thiserror::Error;
 use tracing::debug;
@@ -82,15 +84,29 @@ impl HostShareMounts {
     pub(crate) fn unmount(&mut self) -> std::result::Result<(), Report<HostShareMountError>> {
         let mut first_error = None;
         for mounted in self.mounts.drain(..).rev() {
-            for path in [&mounted.exposed, &mounted.raw] {
-                if let Err(error) = unmount_if_mounted(&self.umount_program, path)
-                    && first_error.is_none()
-                {
-                    first_error = Some(error);
+            for path in mounted.exposed.iter().chain(std::iter::once(&mounted.raw)) {
+                if let Err(error) = unmount_if_mounted(&self.umount_program, path) {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    } else {
+                        warn!(
+                            path = %path.display(),
+                            %error,
+                            "additional host-share unmount failed"
+                        );
+                    }
                 }
             }
         }
         first_error.map_or(Ok(()), |error| Err(unmount_error(&error)))
+    }
+
+    /// Returns the raw read-only lower mounted for one overlay share.
+    pub(crate) fn overlay_lower(&self, name: &str) -> Option<&Path> {
+        self.mounts
+            .iter()
+            .find(|mounted| mounted.name == name && mounted.mode == WorkspaceHostShareMode::Overlay)
+            .map(|mounted| mounted.raw.as_path())
     }
 
     fn mount_one(
@@ -104,7 +120,6 @@ impl HostShareMounts {
         let raw = raw_root.join(&share.name);
         unmount_if_mounted(&self.umount_program, &exposed)?;
         unmount_if_mounted(&self.umount_program, &raw)?;
-        ensure_directory(&exposed, 0o755)?;
         ensure_directory(&raw, 0o755)?;
 
         let transport = match run(mount_program, &virtiofs_arguments(share, &raw)) {
@@ -124,6 +139,23 @@ impl HostShareMounts {
                 "virtio-9p"
             }
         };
+        if share.mode == WorkspaceHostShareMode::Overlay {
+            debug!(
+                share = %share.name,
+                path = %raw.display(),
+                transport,
+                "mounted raw lower for overlay host share"
+            );
+            self.mounts.push(MountedHostShare {
+                name: share.name.clone(),
+                exposed: None,
+                raw,
+                mode: share.mode,
+            });
+            return Ok(());
+        }
+
+        ensure_directory(&exposed, 0o755)?;
         if let Err(error) = run(bindfs_program, &bindfs_arguments(share, &raw, &exposed)) {
             let cleanup = unmount_if_mounted(&self.umount_program, &raw);
             return match cleanup {
@@ -142,11 +174,16 @@ impl HostShareMounts {
         debug!(
             share = %share.name,
             path = %exposed.display(),
-            writable = share.writable,
+            mode = ?share.mode,
             transport,
             "mounted ownership-normalized host share"
         );
-        self.mounts.push(MountedHostShare { exposed, raw });
+        self.mounts.push(MountedHostShare {
+            name: share.name.clone(),
+            exposed: Some(exposed),
+            raw,
+            mode: share.mode,
+        });
         Ok(())
     }
 
@@ -182,8 +219,10 @@ pub(crate) const HOST_SHARES_DIRECTORY: &str = "/mnt/shares";
 
 #[derive(Debug)]
 struct MountedHostShare {
-    exposed: PathBuf,
+    name: String,
+    exposed: Option<PathBuf>,
     raw: PathBuf,
+    mode: WorkspaceHostShareMode,
 }
 
 fn mount_error(error: &anyhow::Error) -> Report<HostShareMountError> {
@@ -229,7 +268,7 @@ fn bindfs_arguments(share: &WorkspaceHostShare, source: &Path, target: &Path) ->
     let mut arguments = vec![
         OsString::from("--force-user=0"),
         OsString::from("--force-group=0"),
-        OsString::from(if share.writable {
+        OsString::from(if share.mode.transport_is_writable() {
             "--perms=a+rwX"
         } else {
             "--perms=a+rX"
@@ -240,7 +279,7 @@ fn bindfs_arguments(share: &WorkspaceHostShare, source: &Path, target: &Path) ->
         OsString::from("--chgrp-ignore"),
         OsString::from("--chmod-ignore"),
         OsString::from("-o"),
-        OsString::from(if share.writable {
+        OsString::from(if share.mode.transport_is_writable() {
             "nodev,nosuid"
         } else {
             "ro,nodev,nosuid"
@@ -252,7 +291,7 @@ fn bindfs_arguments(share: &WorkspaceHostShare, source: &Path, target: &Path) ->
 }
 
 fn mount_options(share: &WorkspaceHostShare, base: &str) -> OsString {
-    if share.writable {
+    if share.mode.transport_is_writable() {
         base.into()
     } else {
         format!("ro,{base}").into()
@@ -375,19 +414,25 @@ fn bounded_output(output: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn share(writable: bool) -> WorkspaceHostShare {
+    fn share(mode: WorkspaceHostShareMode) -> WorkspaceHostShare {
         WorkspaceHostShare {
             name: "source".to_owned(),
             mount_tag: "tascarrel-share-0".to_owned(),
-            writable,
+            mode,
         }
     }
 
     /// Verifies read-only policy reaches both shared-directory transports.
     #[test]
     fn read_only_is_the_transport_default() {
-        let virtiofs = virtiofs_arguments(&share(false), Path::new("/mnt/shares/source"));
-        let virtio9p = virtio9p_arguments(&share(false), Path::new("/run/raw/source"));
+        let virtiofs = virtiofs_arguments(
+            &share(WorkspaceHostShareMode::ReadOnly),
+            Path::new("/mnt/shares/source"),
+        );
+        let virtio9p = virtio9p_arguments(
+            &share(WorkspaceHostShareMode::ReadOnly),
+            Path::new("/run/raw/source"),
+        );
         assert!(virtiofs.contains(&OsString::from("ro,nodev,nosuid")));
         assert!(virtio9p.contains(&OsString::from(
             "ro,trans=virtio,version=9p2000.L,access=any,nodev,nosuid"
@@ -399,7 +444,7 @@ mod tests {
     #[test]
     fn bindfs_bridge_normalizes_transport_ownership() {
         let arguments = bindfs_arguments(
-            &share(false),
+            &share(WorkspaceHostShareMode::ReadOnly),
             Path::new("/run/raw/source"),
             Path::new("/mnt/shares/source"),
         );
@@ -416,7 +461,7 @@ mod tests {
     /// Verifies writable shares omit every read-only transport flag.
     #[test]
     fn writable_policy_reaches_every_mount_layer() {
-        let share = share(true);
+        let share = share(WorkspaceHostShareMode::ReadWrite);
         assert!(
             !virtiofs_arguments(&share, Path::new("/mnt/shares/source"))
                 .iter()

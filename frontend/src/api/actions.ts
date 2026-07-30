@@ -33,6 +33,8 @@ export type HostActions = {
   "hostOperations_Request": { input: types.host_operations.RequestHostOperationAction; output: types.host_operations.RequestHostOperationOutput };
   "hostOperations_Resolve": { input: types.host_operations.ResolveHostOperationAction; output: types.host_operations.ResolveHostOperationOutput };
   "hostOperations_Cancel": { input: types.host_operations.CancelHostOperationAction; output: types.host_operations.CancelHostOperationOutput };
+  "shares_Inspect": { input: types.shares.InspectShareOverlayAction; output: types.shares.InspectShareOverlayOutput };
+  "shares_Apply": { input: types.shares.ApplyShareOverlayAction; output: types.shares.ApplyShareOverlayOutput };
   "workspaces_Create": { input: types.workspaces.CreateWorkspaceAction; output: types.workspaces.CreateWorkspaceOutput };
   "workspaces_Start": { input: types.workspaces.StartWorkspaceAction; output: types.workspaces.StartWorkspaceOutput };
   "workspaces_Stop": { input: types.workspaces.StopWorkspaceAction; output: types.workspaces.StopWorkspaceOutput };

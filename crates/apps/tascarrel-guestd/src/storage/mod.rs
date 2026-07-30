@@ -84,6 +84,11 @@
 //! │   ├── current? -> generations/<generation>
 //! │   └── generations/
 //! │       └── <generation>/
+//! ├── share-overlays/
+//! │   └── <pod-id>/
+//! │       └── <share-name>/
+//! │           ├── active/
+//! │           └── .approval-<uuid>/?
 //! ├── chat/
 //! │   ├── harnesses/
 //! │   │   ├── codex/
@@ -173,6 +178,10 @@
 //! it while its image and input context still match. Executable links and Unix
 //! sockets are not persisted with repository generations.
 //!
+//! The `share-overlays` namespace contains one durable Btrfs upper subvolume
+//! per pod and configured overlay share. Short-lived approval snapshots exist
+//! only while guestd transfers and commits an exact frozen revision.
+//!
 //! The `chat` namespace contains harness installations, provider-owned
 //! credential and session state, uploaded prompt attachments,
 //! attachment-to-chat indexes, and cached model pricing. Harness installations
@@ -226,6 +235,9 @@
 //! ├── local-binaries/?
 //! ├── runc/
 //! │   └── <pod-id>/...
+//! ├── share-overlays/
+//! │   └── <pod-id>/
+//! │       └── <share-name>/
 //! ├── repos/
 //! │   ├── state/                 # bind mount of persistent repositories/
 //! │   ├── current -> state/current
@@ -304,6 +316,7 @@ pub use layout::NetworkStorage;
 pub use layout::NixStoreStorage;
 pub use layout::RepositoryStorage;
 pub use layout::ScratchStorage;
+pub use layout::ShareOverlayStorage;
 use layout::StorageLayout;
 use reportify::ErrorExt as _;
 use reportify::Report;
@@ -409,6 +422,12 @@ impl GuestStorage {
     #[must_use]
     pub fn scratch(&self) -> &ScratchStorage {
         self.layout.scratch()
+    }
+
+    /// Returns persistent per-pod host-share overlay state.
+    #[must_use]
+    pub fn share_overlays(&self) -> &ShareOverlayStorage {
+        self.layout.share_overlays()
     }
 }
 

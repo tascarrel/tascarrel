@@ -45,6 +45,7 @@ tascarrel-agent.workspace = true
 tascarrel-git.workspace = true
 tascarrel-protocol = { path = "../../libs/tascarrel-protocol" }
 tascarrel-mux = { path = "../../libs/tascarrel-mux" }
+tascarrel-sharefs.workspace = true
 tascarrel-store = { path = "../../libs/tascarrel-store" }
 zstd = "0.13"
 

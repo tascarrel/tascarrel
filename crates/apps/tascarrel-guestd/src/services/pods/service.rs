@@ -49,6 +49,7 @@ use super::runc::PodExecution;
 use super::runc::PreparedReadiness;
 use super::runc::Runc;
 use super::runc::RuncConfig;
+use super::share_overlays::PreparedShareOverlay;
 use super::state::PersistentPodState;
 use super::state::PodRecord;
 use super::state::PodStateError;
@@ -154,6 +155,37 @@ impl PodService {
         lock(&self.inner.control_connections)
             .take()
             .ok_or_else(|| invalid("pod control connection stream was already taken"))
+    }
+
+    /// Freezes one exact overlay-share revision under the pod lifecycle lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract error for an unknown pod or an internal error when
+    /// its durable `ShareFS` state cannot be snapshotted.
+    #[tracing::instrument(level = "debug", skip(self), fields(pod_id, share), err)]
+    pub async fn prepare_share_overlay(
+        &self,
+        pod_id: &str,
+        share: &str,
+    ) -> Result<PreparedPodShareOverlay, Report<PodServiceError>> {
+        let api_id = pod_id
+            .parse::<api::PodId>()
+            .map_err(|error| invalid(format!("invalid pod identifier: {error}")))?;
+        let operation = self.pod_operation(&api_id).lock_owned().await;
+        self.public_record(&api_id)?;
+        let runtime_id = runtime_id(&api_id)?;
+        let runc = Arc::clone(&self.inner.runc);
+        let share = share.to_owned();
+        let prepared = blocking("prepare ShareFS approval snapshot", move || {
+            runc.prepare_share_overlay(&runtime_id, &share)
+                .map_err(|error| internal(format!("prepare ShareFS approval snapshot: {error}")))
+        })
+        .await?;
+        Ok(PreparedPodShareOverlay {
+            prepared: Some(prepared),
+            _operation: operation,
+        })
     }
 
     /// Creates a pod asynchronously and returns its observable identifier.
@@ -569,6 +601,12 @@ impl PodService {
             .await?;
         lock(&self.inner.running).remove(&input.pod_id);
         self.withdraw_nix_roots(&input.pod_id).await?;
+        let runc = Arc::clone(&self.inner.runc);
+        let overlay_runtime_id = runtime_id(&input.pod_id)?;
+        blocking("destroy pod ShareFS overlays", move || {
+            runc.destroy_share_overlays(&overlay_runtime_id)
+        })
+        .await?;
         let storage = Arc::clone(&self.inner.storage);
         let runtime_id = runtime_id(&input.pod_id)?;
         blocking("destroy pod storage", move || {
@@ -643,6 +681,12 @@ impl PodService {
             .await?;
         lock(&self.inner.running).remove(pod.id());
         self.withdraw_nix_roots(pod.id()).await?;
+        let runc = Arc::clone(&self.inner.runc);
+        let overlay_runtime_id = runtime_id(pod.id())?;
+        blocking("destroy ephemeral ShareFS overlays", move || {
+            runc.destroy_share_overlays(&overlay_runtime_id)
+        })
+        .await?;
         let storage = Arc::clone(&self.inner.storage);
         let runtime_id = runtime_id(pod.id())?;
         blocking("destroy ephemeral pod storage", move || {
@@ -1601,6 +1645,65 @@ impl PodService {
         if let Some(startup) = lock(&self.inner.startups).remove(pod_id) {
             startup.notify_waiters();
         }
+    }
+}
+
+/// Exact `ShareFS` revision retained under a pod lifecycle lock.
+pub struct PreparedPodShareOverlay {
+    prepared: Option<PreparedShareOverlay>,
+    _operation: OwnedMutexGuard<()>,
+}
+
+impl PreparedPodShareOverlay {
+    /// Returns the exact encoded upper snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error after this approval has already completed.
+    pub fn snapshot(
+        &self,
+    ) -> Result<&tascarrel_protocol::ShareOverlaySnapshot, Report<PodServiceError>> {
+        self.prepared
+            .as_ref()
+            .map(PreparedShareOverlay::snapshot)
+            .ok_or_else(|| internal("ShareFS approval was already completed"))
+    }
+
+    /// Clears an upper after hostd successfully applied the exact revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the durable upper cannot be reset.
+    pub async fn commit(mut self) -> Result<(), Report<PodServiceError>> {
+        let prepared = self
+            .prepared
+            .take()
+            .ok_or_else(|| internal("ShareFS approval was already completed"))?;
+        blocking("commit ShareFS approval", move || {
+            prepared
+                .commit()
+                .map_err(|error| internal(format!("commit ShareFS approval: {error}")))
+        })
+        .await
+    }
+
+    /// Retains the complete upper after inspection or a host conflict.
+    pub async fn retain(mut self) {
+        let Some(prepared) = self.prepared.take() else {
+            return;
+        };
+        if let Err(error) = task::spawn_blocking(move || prepared.retain()).await {
+            warn!(%error, "ShareFS approval cleanup task failed");
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedPodShareOverlay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedPodShareOverlay")
+            .field("prepared", &self.prepared)
+            .finish_non_exhaustive()
     }
 }
 

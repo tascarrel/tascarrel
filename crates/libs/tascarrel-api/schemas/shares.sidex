@@ -1,0 +1,108 @@
+//! Explicit inspection and approval API for per-pod overlay host shares.
+
+import pods::PodId
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Inspects the exact changes retained for one pod and overlay share.
+record InspectShareOverlayAction {
+    /// Workspace whose VM owns the pod.
+    workspace: WorkspaceName,
+    /// Pod whose isolated upper state is inspected.
+    pod_id: PodId,
+    /// Configured overlay share name.
+    share: string,
+}
+
+/// Exact current revision and display-safe change summary.
+record InspectShareOverlayOutput {
+    /// Revision which must be supplied to the apply action.
+    revision: ShareOverlayRevision,
+    /// Changes sorted by raw Unix path bytes.
+    changes: [ShareOverlayChange],
+}
+
+/// Applies one exact reviewed overlay revision to its host directory.
+record ApplyShareOverlayAction {
+    /// Workspace whose VM owns the pod.
+    workspace: WorkspaceName,
+    /// Pod whose isolated upper state is approved.
+    pod_id: PodId,
+    /// Configured overlay share name.
+    share: string,
+    /// Exact revision returned by inspection.
+    revision: ShareOverlayRevision,
+}
+
+/// Result of validating and applying an approved revision.
+record ApplyShareOverlayOutput {
+    /// Terminal result; conflicts and revision changes retain the complete upper.
+    result: ShareOverlayApplyResult,
+}
+
+// Subscriptions
+
+// Domain Types
+
+/// SHA-256 identity of one canonical upper change set.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper ShareOverlayRevision: string
+
+/// Display-safe summary of one changed path.
+record ShareOverlayChange {
+    /// Lossy Unix path display; the exact raw path remains bound to the revision.
+    path: string,
+    /// Captured lower entry type, or absence for an addition.
+    base_kind?: ShareOverlayEntryKind,
+    /// Proposed entry type, or absence for a deletion.
+    proposed_kind?: ShareOverlayEntryKind,
+    /// Proposed regular-file byte length when applicable.
+    proposed_size?: u64,
+}
+
+/// Result of applying one reviewed revision.
+#[json(tag = "status")]
+variant ShareOverlayApplyResult {
+    /// Every change was applied and the guest upper was cleared.
+    Applied,
+    /// The upper changed after inspection and must be reviewed again.
+    RevisionChanged: ShareOverlayRevisionChanged,
+    /// Current host entries conflict with captured lower versions.
+    Conflicts: ShareOverlayConflictList,
+}
+
+/// Current revision returned after a stale approval attempt.
+record ShareOverlayRevisionChanged {
+    /// New revision to inspect.
+    revision: ShareOverlayRevision,
+    /// Current display-safe change summary.
+    changes: [ShareOverlayChange],
+}
+
+/// Complete conflicts found before host mutation began.
+record ShareOverlayConflictList {
+    /// Conflicts sorted by raw Unix path bytes.
+    conflicts: [ShareOverlayConflict],
+}
+
+/// One current host path which no longer matches its captured lower version.
+record ShareOverlayConflict {
+    /// Lossy Unix path display.
+    path: string,
+    /// Human-readable reason for explicit resolution.
+    reason: string,
+    /// Unified text diff from the current host file to the proposed file when
+    /// both sides are bounded UTF-8 text.
+    text_diff?: string,
+}
+
+/// Entry types supported by overlay shares.
+variant ShareOverlayEntryKind {
+    /// Regular file.
+    File,
+    /// Directory.
+    Directory,
+    /// Symbolic link.
+    Symlink,
+}

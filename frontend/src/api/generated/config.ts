@@ -20,6 +20,7 @@ import * as __schema_processes from "./processes";
 import * as __schema_protocol from "./protocol";
 import * as __schema_repositories from "./repositories";
 import * as __schema_secrets from "./secrets";
+import * as __schema_shares from "./shares";
 import * as __schema_store from "./store";
 import * as __schema_workspaces from "./workspaces";
 /**
@@ -448,10 +449,13 @@ import * as __schema_workspaces from "./workspaces";
                                             * Absolute host path or a path below the current user's home using `~/`.
                                             */
                                                         "path": __sidex_types.builtins.String, /**
-                                            * Whether the workspace may modify the directory.
-                                            * Omitted values default to read-only access.
+                                            * Pod access mode.
                                             */
-                                                        "writable"?: __sidex_types.builtins.Bool };
+                                                        "mode": WorkspaceHostShareMode };
+/**
+ * Access policy for one host directory exposed to workspace pods.
+ */
+ export type WorkspaceHostShareMode = ("ReadOnly" | "ReadWrite" | "Overlay");
 /**
  * Workspace-wide chat behavior independent of a coding harness.
  */

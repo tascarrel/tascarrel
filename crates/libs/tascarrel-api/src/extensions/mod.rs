@@ -8,6 +8,7 @@ mod host_operations;
 mod network;
 mod processes;
 mod repositories;
+mod shares;
 mod workspaces;
 
 pub use chats::ChatCostCenterIdParseError;

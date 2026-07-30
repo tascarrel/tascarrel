@@ -28,6 +28,7 @@ use reportify::ErrorExt as _;
 use reportify::Report;
 use tascarrel_api::parse_memory_mib;
 use tascarrel_api::parse_size_bytes;
+use tascarrel_api::types::config as config_api;
 use tascarrel_api::types::guest::GuestInstanceId;
 use tascarrel_api::types::store as store_api;
 use tascarrel_api::types::workspaces as api;
@@ -307,6 +308,10 @@ enum WorkspaceCommand {
         host_control: HostControlService,
         response: oneshot::Sender<Result<ControlPlanePeer, RemoteError>>,
     },
+    OverlayShare {
+        name: String,
+        response: oneshot::Sender<Result<WorkspaceOverlayShare, RemoteError>>,
+    },
     AttachUsb {
         device_id: String,
         response: oneshot::Sender<Result<(), RemoteError>>,
@@ -318,6 +323,15 @@ enum WorkspaceCommand {
     Stop {
         response: oneshot::Sender<Result<(), RemoteError>>,
     },
+}
+
+/// Active mux and host-pinned path for one overlay share.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceOverlayShare {
+    /// Reusable mux connected to the exact VM which received the share.
+    pub(crate) mux: MuxHandle,
+    /// Open descriptor for the exact host directory received by that VM.
+    pub(crate) host_root: Arc<File>,
 }
 
 #[derive(Clone)]
@@ -840,6 +854,49 @@ impl WorkspaceService {
                 Err(RemoteError::new(
                     ErrorCode::ExecutionFailed,
                     "workspace worker stopped before connecting its control plane",
+                ))
+            });
+        }
+        Err(RemoteError::new(
+            ErrorCode::ExecutionFailed,
+            "workspace worker could not be restarted",
+        ))
+    }
+
+    /// Returns the active VM connection and pinned path for one overlay share.
+    ///
+    /// A stopped workspace is started so the returned path and guest endpoint
+    /// necessarily describe the same VM incarnation.
+    pub(crate) async fn overlay_share(
+        &self,
+        workspace: WorkspaceName,
+        name: String,
+    ) -> Result<WorkspaceOverlayShare, RemoteError> {
+        if *self.inner.shutdown.borrow() {
+            return Err(RemoteError::new(
+                ErrorCode::Busy,
+                "host daemon is shutting down",
+            ));
+        }
+        self.validate_workspace_source(&workspace)?;
+        for _ in 0..2 {
+            let sender = self.worker_sender(&workspace).await?;
+            let (response, result) = oneshot::channel();
+            if sender
+                .send(WorkspaceCommand::OverlayShare {
+                    name: name.clone(),
+                    response,
+                })
+                .await
+                .is_err()
+            {
+                self.remove_closed_worker(&workspace, &sender).await;
+                continue;
+            }
+            return result.await.unwrap_or_else(|_| {
+                Err(RemoteError::new(
+                    ErrorCode::ExecutionFailed,
+                    "workspace worker stopped before resolving its overlay share",
                 ))
             });
         }
@@ -2036,6 +2093,9 @@ fn reject_command(command: WorkspaceCommand, error: RemoteError) {
         WorkspaceCommand::ControlPlane { response, .. } => {
             let _ = response.send(Err(error));
         }
+        WorkspaceCommand::OverlayShare { response, .. } => {
+            let _ = response.send(Err(error));
+        }
         WorkspaceCommand::AttachUsb { response, .. }
         | WorkspaceCommand::DetachUsb { response, .. }
         | WorkspaceCommand::Stop { response } => {
@@ -2101,6 +2161,7 @@ struct ActiveWorkspace {
     vm_log_task: Option<JoinHandle<()>>,
     usb: Option<WorkspaceUsbForwards>,
     usb_config_path: Option<PathBuf>,
+    host_shares: Vec<ResolvedWorkspaceHostShare>,
     _locks: Vec<File>,
 }
 
@@ -2114,6 +2175,25 @@ enum ActiveStop {
 }
 
 impl ActiveWorkspace {
+    fn overlay_share(&self, name: &str) -> Result<WorkspaceOverlayShare, RemoteError> {
+        self.host_shares
+            .iter()
+            .find(|share| {
+                share.name == name
+                    && share.mode == tascarrel_protocol::WorkspaceHostShareMode::Overlay
+            })
+            .map(|share| WorkspaceOverlayShare {
+                mux: self.mux.clone(),
+                host_root: Arc::clone(&share.host_root),
+            })
+            .ok_or_else(|| {
+                RemoteError::new(
+                    ErrorCode::NotFound,
+                    format!("host share {name:?} is not configured in overlay mode"),
+                )
+            })
+    }
+
     async fn answer(&mut self, command: WorkspaceCommand) {
         match command {
             WorkspaceCommand::Connect { response } => {
@@ -2147,6 +2227,9 @@ impl ActiveWorkspace {
                         )));
                     }
                 }
+            }
+            WorkspaceCommand::OverlayShare { name, response } => {
+                let _ = response.send(self.overlay_share(&name));
             }
             WorkspaceCommand::AttachUsb {
                 device_id,
@@ -2499,12 +2582,13 @@ async fn finish_workspace_start(
     request_senders: &WorkspaceRequestSenders,
     usb_devices: &UsbDeviceRegistry,
 ) -> Result<ActiveWorkspace, StartupError> {
-    let (stream, mut vm, mut vm_log_task, host_shares) = match source {
+    let (stream, mut vm, mut vm_log_task, host_shares, resolved_host_shares) = match source {
         UnixStreamSource::Vm(spawned) => {
             let SpawnedVm {
                 mut vm,
                 log_task,
                 host_shares,
+                resolved_host_shares,
             } = *spawned;
             let stream = match vm.take_control_stream() {
                 Ok(stream) => stream,
@@ -2522,11 +2606,21 @@ async fn finish_workspace_start(
                     .await);
                 }
             };
-            (stream, Some(vm), Some(log_task), host_shares)
+            (
+                stream,
+                Some(vm),
+                Some(log_task),
+                host_shares,
+                resolved_host_shares,
+            )
         }
-        UnixStreamSource::External(stream) => {
-            (stream, None, None, WorkspaceHostSharesResponse::default())
-        }
+        UnixStreamSource::External(stream) => (
+            stream,
+            None,
+            None,
+            WorkspaceHostSharesResponse::default(),
+            Vec::new(),
+        ),
     };
     let usb = vm
         .is_some()
@@ -2764,6 +2858,7 @@ async fn finish_workspace_start(
         vm_log_task,
         usb,
         usb_config_path,
+        host_shares: resolved_host_shares,
         _locks: locks,
     })
 }
@@ -2843,14 +2938,16 @@ struct SpawnedVm {
     vm: Vm,
     log_task: JoinHandle<()>,
     host_shares: WorkspaceHostSharesResponse,
+    resolved_host_shares: Vec<ResolvedWorkspaceHostShare>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct ResolvedWorkspaceHostShare {
     name: String,
     host_path: PathBuf,
+    host_root: Arc<File>,
     mount_tag: String,
-    writable: bool,
+    mode: tascarrel_protocol::WorkspaceHostShareMode,
 }
 
 #[derive(Debug, Error)]
@@ -2888,10 +2985,11 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
             .map(|share| WorkspaceHostShare {
                 name: share.name.clone(),
                 mount_tag: share.mount_tag.clone(),
-                writable: share.writable,
+                mode: share.mode,
             })
             .collect(),
     };
+    let resolved_host_shares = spec.host_shares.clone();
     host_shares
         .validate()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -2927,7 +3025,7 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
             ));
         }
         for share in spec.host_shares {
-            let directory = if share.writable {
+            let directory = if share.mode.transport_is_writable() {
                 SharedDirectory::read_write(share.host_path, share.mount_tag)
             } else {
                 SharedDirectory::read_only(share.host_path, share.mount_tag)
@@ -2954,11 +3052,19 @@ async fn spawn_vm(config: &ManagedWorkspaceConfig, spec: VmStartSpec) -> Result<
     let log_task =
         start_vm_log_writer(&state_directory, &guest_instance_id, serial_output, vm_log)?;
     match spawn.await {
-        Ok(vm) => Ok(SpawnedVm {
-            vm,
-            log_task,
-            host_shares,
-        }),
+        Ok(vm) => {
+            if let Err(error) = verify_host_share_pins(&resolved_host_shares) {
+                shutdown_vm(vm).await;
+                finish_vm_log_writer(log_task).await;
+                return Err(error);
+            }
+            Ok(SpawnedVm {
+                vm,
+                log_task,
+                host_shares,
+                resolved_host_shares,
+            })
+        }
         Err(error) => {
             finish_vm_log_writer(log_task).await;
             Err(anyhow::Error::msg(error.to_string())).context("failed to start QEMU")
@@ -3124,6 +3230,22 @@ fn load_workspace_vm_resources_with_fallback(
     }
 }
 
+fn workspace_host_share_mode(
+    mode: &config_api::WorkspaceHostShareMode,
+) -> tascarrel_protocol::WorkspaceHostShareMode {
+    match mode {
+        config_api::WorkspaceHostShareMode::ReadOnly => {
+            tascarrel_protocol::WorkspaceHostShareMode::ReadOnly
+        }
+        config_api::WorkspaceHostShareMode::ReadWrite => {
+            tascarrel_protocol::WorkspaceHostShareMode::ReadWrite
+        }
+        config_api::WorkspaceHostShareMode::Overlay => {
+            tascarrel_protocol::WorkspaceHostShareMode::Overlay
+        }
+    }
+}
+
 /// Resolves and validates the host directories attached to a managed VM.
 ///
 /// # Errors
@@ -3209,6 +3331,7 @@ fn load_workspace_host_shares(
                 host_path.display()
             )));
         }
+        let host_root = pin_workspace_host_share(&name, &host_path)?;
         if protected_roots
             .iter()
             .any(|root| host_path.starts_with(root) || root.starts_with(&host_path))
@@ -3224,14 +3347,66 @@ fn load_workspace_host_shares(
                 host_path.display()
             )));
         }
+        let mode = workspace_host_share_mode(&share.mode);
         resolved.push(ResolvedWorkspaceHostShare {
             name: name.to_string(),
             host_path,
+            host_root,
             mount_tag: format!("{HOST_SHARE_MOUNT_TAG_PREFIX}{index}"),
-            writable: share.writable.unwrap_or(false),
+            mode,
         });
     }
     Ok(resolved)
+}
+
+fn pin_workspace_host_share(
+    name: &str,
+    path: &Path,
+) -> std::result::Result<Arc<File>, Report<WorkspaceHostShareConfigError>> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map(Arc::new)
+    .map_err(|error| {
+        invalid_workspace_host_share(format!(
+            "failed to pin host share {name:?} directory {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn verify_host_share_pins(shares: &[ResolvedWorkspaceHostShare]) -> Result<()> {
+    for share in shares {
+        let current = std::fs::symlink_metadata(&share.host_path).with_context(|| {
+            format!(
+                "failed to recheck host share {:?} after VM launch",
+                share.name
+            )
+        })?;
+        let pinned = share.host_root.metadata().with_context(|| {
+            format!(
+                "failed to inspect pinned host share {:?} after VM launch",
+                share.name
+            )
+        })?;
+        if current.file_type().is_symlink()
+            || !current.is_dir()
+            || current.dev() != pinned.dev()
+            || current.ino() != pinned.ino()
+        {
+            bail!(
+                "host share {:?} changed while its workspace VM was starting",
+                share.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn invalid_workspace_host_share(
@@ -3562,10 +3737,9 @@ mod tests {
         );
     }
 
-    /// Verifies host shares expand the user home, sort deterministically, and
-    /// default to read-only access.
+    /// Verifies host shares expand the user home and preserve explicit modes.
     #[test]
-    fn workspace_host_shares_resolve_and_default_to_read_only() {
+    fn workspace_host_shares_resolve_modes() {
         let directory = tempdir().unwrap();
         let home = directory.path().join("home");
         let source = home.join("source");
@@ -3580,7 +3754,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "[shares.source]\npath = \"~/source\"\n\n[shares.output]\npath = {:?}\nwritable = true\n",
+                "[shares.source]\npath = \"~/source\"\nmode = \"Overlay\"\n\n[shares.output]\npath = {:?}\nmode = \"ReadWrite\"\n",
                 output.display().to_string()
             ),
         )
@@ -3596,19 +3770,29 @@ mod tests {
                     share.name.as_str(),
                     share.host_path.as_path(),
                     share.mount_tag.as_str(),
-                    share.writable,
+                    share.mode,
                 ))
                 .collect::<Vec<_>>(),
             [
-                ("output", output.as_path(), "tascarrel-share-0", true,),
-                ("source", source.as_path(), "tascarrel-share-1", false,),
+                (
+                    "output",
+                    output.as_path(),
+                    "tascarrel-share-0",
+                    tascarrel_protocol::WorkspaceHostShareMode::ReadWrite,
+                ),
+                (
+                    "source",
+                    source.as_path(),
+                    "tascarrel-share-1",
+                    tascarrel_protocol::WorkspaceHostShareMode::Overlay,
+                ),
             ]
         );
 
         std::fs::write(
             &config,
             format!(
-                "[shares.output]\npath = {:?}\n",
+                "[shares.output]\npath = {:?}\nmode = \"ReadOnly\"\n",
                 output.display().to_string()
             ),
         )
@@ -3619,9 +3803,47 @@ mod tests {
                 .len(),
             1
         );
-        std::fs::write(&config, "[shares.source]\npath = \"~/source\"\n").unwrap();
+        std::fs::write(
+            &config,
+            "[shares.source]\npath = \"~/source\"\nmode = \"Overlay\"\n",
+        )
+        .unwrap();
         assert!(
             load_workspace_host_shares(&config, None, [&workspaces, &state, &runtime]).is_err()
+        );
+    }
+
+    /// Verifies approval remains bound to the directory opened for the VM even
+    /// when its configured path is replaced.
+    #[test]
+    fn workspace_overlay_share_detects_path_replacement() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let source = home.join("source");
+        let moved = home.join("moved");
+        let workspaces = directory.path().join("workspaces");
+        let state = directory.path().join("state");
+        let runtime = directory.path().join("runtime");
+        for path in [&source, &workspaces, &state, &runtime] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let config = directory.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[shares.source]\npath = \"~/source\"\nmode = \"Overlay\"\n",
+        )
+        .unwrap();
+        let shares =
+            load_workspace_host_shares(&config, Some(&home), [&workspaces, &state, &runtime])
+                .unwrap();
+
+        std::fs::rename(&source, &moved).unwrap();
+        std::fs::create_dir(&source).unwrap();
+
+        assert!(verify_host_share_pins(&shares).is_err());
+        assert_eq!(
+            shares[0].host_root.metadata().unwrap().ino(),
+            std::fs::metadata(moved).unwrap().ino()
         );
     }
 
@@ -3642,7 +3864,7 @@ mod tests {
             std::fs::write(
                 &config,
                 format!(
-                    "[shares.unsafe]\npath = {:?}\n",
+                    "[shares.unsafe]\npath = {:?}\nmode = \"Overlay\"\n",
                     target.display().to_string()
                 ),
             )
@@ -3671,7 +3893,7 @@ mod tests {
         let config = directory.path().join("config.toml");
         std::fs::write(
             &config,
-            "[shares.one]\npath = \"~/source\"\n\n[shares.two]\npath = \"~/alias\"\n",
+            "[shares.one]\npath = \"~/source\"\nmode = \"Overlay\"\n\n[shares.two]\npath = \"~/alias\"\nmode = \"ReadOnly\"\n",
         )
         .unwrap();
         assert!(

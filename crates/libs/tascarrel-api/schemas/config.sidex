@@ -360,9 +360,19 @@ record WorkspaceConfig {
 record WorkspaceHostShareConfig {
     /// Absolute host path or a path below the current user's home using `~/`.
     path: string,
-    /// Whether the workspace may modify the directory.
-    /// Omitted values default to read-only access.
-    writable?: bool,
+    /// Pod access mode.
+    mode: WorkspaceHostShareMode,
+}
+
+/// Access policy for one host directory exposed to workspace pods.
+#[json(tagged = externally)]
+variant WorkspaceHostShareMode {
+    /// Pods receive an ownership-normalized read-only view.
+    ReadOnly,
+    /// Pods write directly through to the host directory.
+    ReadWrite,
+    /// Each pod receives an isolated copy-on-write view.
+    Overlay,
 }
 
 /// Workspace-wide chat behavior independent of a coding harness.

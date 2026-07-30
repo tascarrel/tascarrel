@@ -22,6 +22,7 @@ pub use service::ExternalWorkspaceConfig;
 pub use service::ManagedWorkspaceConfig;
 pub use service::WorkspaceListSubscription;
 pub use service::WorkspaceMode;
+pub(crate) use service::WorkspaceOverlayShare;
 pub use service::WorkspaceService;
 pub use service::WorkspaceServiceConfig;
 pub use service::WorkspaceServiceError;

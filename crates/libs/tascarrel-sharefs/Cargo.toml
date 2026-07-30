@@ -1,0 +1,25 @@
+[package]
+name = "tascarrel-sharefs"
+description = "Copy-on-write host-share filesystem mechanics for Tascarrel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fuser.workspace = true
+libc.workspace = true
+reportify.workspace = true
+rusqlite.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

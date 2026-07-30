@@ -25,6 +25,9 @@ use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
 
+use super::share_overlays::PreparedShareOverlay;
+use super::share_overlays::ShareOverlayRuntime;
+use super::share_overlays::ShareOverlayRuntimeConfig;
 use crate::runtime::pod::ContainerStatus;
 use crate::runtime::pod::CreatedPod;
 use crate::runtime::pod::ImageConfig;
@@ -87,6 +90,8 @@ pub struct RuncConfig {
     pub workspace_ca: Option<WorkspaceCaConfig>,
     /// Additional immutable workspace shares.
     pub shares: Vec<PodShare>,
+    /// Per-pod copy-on-write host-share runtime.
+    pub share_overlays: ShareOverlayRuntimeConfig,
 }
 
 impl RuncConfig {
@@ -118,6 +123,7 @@ impl RuncConfig {
             pod_nix_gc_root_dir: "/nix/var/nix/gcroots/tascarrel/pods".into(),
             workspace_ca: None,
             shares: Vec::new(),
+            share_overlays: ShareOverlayRuntimeConfig::default(),
         }
     }
 }
@@ -247,15 +253,18 @@ impl Drop for PreparedReadiness {
 pub(crate) struct Runc {
     config: RuncConfig,
     devices: RwLock<Vec<PodDevice>>,
+    share_overlays: ShareOverlayRuntime,
 }
 
 impl Runc {
     /// Creates the concrete runc integration.
     pub(crate) fn new(config: RuncConfig) -> Result<Self, Report<RuntimeError>> {
         Self::runtime_from(&config, 0, &[])?;
+        let share_overlays = ShareOverlayRuntime::open(config.share_overlays.clone())?;
         Ok(Self {
             config,
             devices: RwLock::new(Vec::new()),
+            share_overlays,
         })
     }
 
@@ -271,38 +280,51 @@ impl Runc {
         slot: u32,
     ) -> Result<PreparedPod, Report<RuntimeError>> {
         let devices = device_snapshot(&self.devices)?;
-        let runtime = Self::runtime_from(&self.config, slot, &devices)?;
+        let identity = identity_for_slot(slot)?;
         let image = effective_image_config(storage.image_config(), &self.config.environment)?;
-        if let Some(workspace_ca) = &self.config.workspace_ca {
-            install_workspace_ca(storage.root(), workspace_ca)?;
-        }
-        let created = runtime
-            .create_from_mounts_and_config(
-                storage.id(),
-                &crate::runtime::pod::PodMounts::try_from(storage).report()?,
-                &image,
-            )
-            .report()?;
-        let finalized = (|| {
-            let identity = identity_for_slot(slot)?;
-            let readiness = prepared_readiness(&created, identity)?;
-            Ok(PreparedPod {
+        let (uid, gid) = mapped_pod_identity(identity, image.user().uid(), image.user().gid())?;
+        let overlay_shares = self.share_overlays.mount(storage.id(), uid, gid)?;
+        let prepared = (|| {
+            let runtime =
+                Self::runtime_from_with_shares(&self.config, slot, &devices, &overlay_shares)?;
+            if let Some(workspace_ca) = &self.config.workspace_ca {
+                install_workspace_ca(storage.root(), workspace_ca)?;
+            }
+            let created = runtime
+                .create_from_mounts_and_config(
+                    storage.id(),
+                    &crate::runtime::pod::PodMounts::try_from(storage).report()?,
+                    &image,
+                )
+                .report()?;
+            let finalized = prepared_readiness(&created, identity).map(|readiness| PreparedPod {
                 pid: created.network_namespace().pid(),
                 readiness,
-            })
+            });
+            match finalized {
+                Ok(prepared) => Ok(prepared),
+                Err(cause) => match runtime.destroy(storage.id()) {
+                    Ok(()) => Err(cause),
+                    Err(rollback) => Err(RuntimeError::RollbackFailed {
+                        operation: "finalize prepared pod",
+                        cause: cause.to_string(),
+                        rollback: rollback.to_string(),
+                    }
+                    .report()),
+                },
+            }
         })();
-        match finalized {
-            Ok(prepared) => Ok(prepared),
-            Err(cause) => match runtime.destroy(storage.id()) {
-                Ok(()) => Err(cause),
-                Err(rollback) => Err(RuntimeError::RollbackFailed {
-                    operation: "finalize prepared pod",
-                    cause: cause.to_string(),
-                    rollback: rollback.to_string(),
-                }
-                .report()),
-            },
+        if let Err(cause) = &prepared
+            && let Err(rollback) = self.share_overlays.unmount(storage.id())
+        {
+            return Err(RuntimeError::RollbackFailed {
+                operation: "prepare pod ShareFS overlays",
+                cause: cause.to_string(),
+                rollback: rollback.to_string(),
+            }
+            .report());
         }
+        prepared
     }
 
     /// Starts a prepared pod.
@@ -338,9 +360,28 @@ impl Runc {
     pub(crate) fn stop(&self, pod: &RuntimePodId, slot: u32) -> Result<(), Report<RuntimeError>> {
         let runtime = Self::runtime_from(&self.config, slot, &[])?;
         if self.config.runtime_root.join(pod.as_str()).exists() {
-            return runtime.destroy(pod).report();
+            runtime.destroy(pod).report()?;
+        } else {
+            delete_runc_state(&self.config, pod)?;
         }
-        delete_runc_state(&self.config, pod)
+        self.share_overlays.unmount(pod)
+    }
+
+    /// Removes durable `ShareFS` upper state after pod teardown.
+    pub(crate) fn destroy_share_overlays(
+        &self,
+        pod: &RuntimePodId,
+    ) -> Result<(), Report<RuntimeError>> {
+        self.share_overlays.destroy(pod)
+    }
+
+    /// Freezes and snapshots one pod's overlay share for host approval.
+    pub(crate) fn prepare_share_overlay(
+        &self,
+        pod: &RuntimePodId,
+        share: &str,
+    ) -> Result<PreparedShareOverlay, Report<RuntimeError>> {
+        self.share_overlays.prepare_approval(pod, share)
     }
 
     /// Returns process execution coordinates without checking container state.
@@ -370,14 +411,7 @@ impl Runc {
             PathBuf::from,
         );
         let identity = identity_for_slot(slot)?;
-        let uid = identity
-            .checked_add(image.user().uid())
-            .ok_or_else(|| RuntimeError::InvalidConfig("mapped pod UID overflowed".to_owned()))
-            .report()?;
-        let gid = identity
-            .checked_add(image.user().gid())
-            .ok_or_else(|| RuntimeError::InvalidConfig("mapped pod GID overflowed".to_owned()))
-            .report()?;
+        let (uid, gid) = mapped_pod_identity(identity, image.user().uid(), image.user().gid())?;
         Ok(PodExecution {
             user: image.user().name().to_owned(),
             uid,
@@ -453,6 +487,15 @@ impl Runc {
         slot: u32,
         devices: &[PodDevice],
     ) -> Result<PodRuntime, Report<RuntimeError>> {
+        Self::runtime_from_with_shares(config, slot, devices, &[])
+    }
+
+    fn runtime_from_with_shares(
+        config: &RuncConfig,
+        slot: u32,
+        devices: &[PodDevice],
+        extra_shares: &[PodShare],
+    ) -> Result<PodRuntime, Report<RuntimeError>> {
         let identity = identity_for_slot(slot)?;
         let runtime = RuntimeConfig::new(
             &config.runtime_root,
@@ -483,7 +526,16 @@ impl Runc {
                 config.pod_nix_gc_root_dir.clone(),
             )
             .report()?;
-        let runtime = runtime.with_shares(config.shares.clone()).report()?;
+        let runtime = runtime
+            .with_shares(
+                config
+                    .shares
+                    .iter()
+                    .chain(extra_shares)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+            .report()?;
         let runtime = runtime
             .with_devices(devices.iter().cloned())
             .report()?
@@ -523,6 +575,23 @@ fn identity_for_slot(slot: u32) -> Result<u32, Report<RuntimeError>> {
         .filter(|base| base.checked_add(POD_ID_MAP_SIZE - 1).is_some())
         .ok_or_else(|| RuntimeError::InvalidConfig("pod identity slots are exhausted".to_owned()))
         .report()
+}
+
+/// Maps one image user into its pod's outer identity range.
+fn mapped_pod_identity(
+    identity: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<(u32, u32), Report<RuntimeError>> {
+    let uid = identity
+        .checked_add(uid)
+        .ok_or_else(|| RuntimeError::InvalidConfig("mapped pod UID overflowed".to_owned()))
+        .report()?;
+    let gid = identity
+        .checked_add(gid)
+        .ok_or_else(|| RuntimeError::InvalidConfig("mapped pod GID overflowed".to_owned()))
+        .report()?;
+    Ok((uid, gid))
 }
 
 /// Merges workspace environment values into immutable image defaults.

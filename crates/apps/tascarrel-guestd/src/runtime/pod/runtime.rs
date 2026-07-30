@@ -459,6 +459,36 @@ impl PodShare {
         Ok(share)
     }
 
+    /// Creates a runtime-mounted, writable overlay host share.
+    ///
+    /// The per-pod FUSE filesystem already reports the pod's outer identity,
+    /// so the runtime carries it into the pod with an ordinary bind mount.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe internal name, source, or destination.
+    pub fn host_overlay(
+        mount_tag: impl Into<String>,
+        name: &str,
+        source: impl Into<PathBuf>,
+    ) -> Result<Self, RuntimeError> {
+        if !tascarrel_protocol::valid_workspace_share_name(name) {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "invalid host-share name {name:?}"
+            )));
+        }
+        let share = Self {
+            name: mount_tag.into(),
+            source: source.into(),
+            path: format!("/mnt/{name}"),
+            read_only: false,
+            runtime_origin: true,
+            recursive_bind: false,
+        };
+        share.validate()?;
+        Ok(share)
+    }
+
     /// Creates the runtime-owned, read-only workspace HTTPS CA mount.
     ///
     /// # Errors
@@ -4543,6 +4573,22 @@ mod tests {
         assert_eq!(share.source, Path::new("/mnt/shares/source"));
         assert!(share.read_only);
         assert!(!share.runtime_origin);
+        assert!(!share.recursive_bind);
+    }
+
+    /// Verifies a per-pod FUSE share remains writable and bypasses a second
+    /// idmap because `ShareFS` already reports the pod's outer identity.
+    #[test]
+    fn overlay_host_shares_use_the_runtime_bind_path() {
+        let share = PodShare::host_overlay(
+            "overlay-tascarrel-share-0",
+            "source",
+            "/run/tascarrel/share-overlays/pod/source",
+        )
+        .unwrap();
+        assert_eq!(share.path, "/mnt/source");
+        assert!(!share.read_only);
+        assert!(share.runtime_origin);
         assert!(!share.recursive_bind);
     }
 

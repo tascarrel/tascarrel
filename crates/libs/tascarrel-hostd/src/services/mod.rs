@@ -9,7 +9,8 @@
 //! [`network::NetworkService`] owns host HTTP routes and TCP forwards.
 //! [`repositories::RepositoryService`] exposes configured repositories and
 //! workspace Git cache statistics. [`secrets::SecretsService`] resolves and
-//! mutates host-owned secret providers.
+//! resolves and mutates host-owned secret providers. Share overlay approvals
+//! inspect and apply guest-proposed filesystem changes.
 //! [`workspaces::WorkspaceService`] owns workspace lifecycle state, resumable
 //! inventory, and VM-instance logs.
 
@@ -20,4 +21,5 @@ pub mod host_operations;
 pub mod network;
 pub mod repositories;
 pub mod secrets;
+pub(crate) mod share_overlays;
 pub mod workspaces;

@@ -65,6 +65,22 @@ QEMU unless a directory is explicitly declared as a host share. Each VM uses a
 virtio memory balloon with free-page reporting so QEMU can return unused guest
 pages to the host.
 
+Each `[shares.<name>]` entry requires a `path` and `mode`:
+
+```toml
+[shares.source]
+path = "~/projects/example"
+mode = "Overlay"
+```
+
+`ReadOnly` exposes a shared read-only view to pods, `ReadWrite` writes directly
+through to the host, and `Overlay` gives every pod an independent
+copy-on-write ShareFS view. Overlay transports remain read-only at the VM
+boundary. Inspection returns an exact revision; applying that revision is an
+explicit host action. Host changes are checked with captured timestamps first
+and content hashes on a metadata mismatch. Conflicts retain the complete upper
+for explicit resolution.
+
 The host supervisor publishes exactly one private typed control-plane socket at
 `$TASCARREL_HOME/state/runtime/control.sock`. The `tascarrelctl` administrative
 client uses it for host-owned workspace lifecycle actions; guest-owned UI
@@ -129,6 +145,27 @@ Pods use the reserved DNS address `192.0.2.53`; TCP and UDP port 53 are both
 captured regardless of the resolver address selected by the workload. Hostd
 uses the host resolver from `/etc/resolv.conf`, or `tascarrel
 --dns-resolver`. External IPv6 TCP/UDP egress is not yet implemented.
+
+## Overlay Share Integration Test
+
+The ignored `share_overlay_local` Rust integration test exercises overlay
+shares through a complete local development instance. It launches hostd with a
+managed KVM guest, creates and restarts a pod, mutates a real FUSE mount,
+introduces a concurrent host edit, inspects and applies the exact revision, and
+verifies upper-state cleanup. Run it with paths to built development artifacts:
+
+```console
+TASCARREL_E2E_GUEST_PAYLOAD=/path/to/guest-payload \
+TASCARREL_E2E_GUEST=/path/to/guest-package \
+TASCARREL_E2E_PODD=/path/to/podd-package \
+TASCARREL_E2E_PODCTL=/path/to/podctl-package \
+TASCARREL_E2E_TASCI=/path/to/tasci-package \
+TASCARREL_E2E_BUSYBOX=/path/to/busybox \
+TASCARREL_E2E_QEMU=/path/to/qemu-system-x86_64 \
+nix develop --command cargo test -p tascarrel-cli \
+  --test share_overlay_local \
+  -- --ignored --exact managed_vm_overlay_share_round_trip
+```
 
 ## Modules and Checks
 

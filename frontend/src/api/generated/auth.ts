@@ -20,6 +20,7 @@ import * as __schema_processes from "./processes";
 import * as __schema_protocol from "./protocol";
 import * as __schema_repositories from "./repositories";
 import * as __schema_secrets from "./secrets";
+import * as __schema_shares from "./shares";
 import * as __schema_store from "./store";
 import * as __schema_workspaces from "./workspaces";
 /**

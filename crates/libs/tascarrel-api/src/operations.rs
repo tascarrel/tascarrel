@@ -182,6 +182,8 @@ macro_rules! with_hostd_operations {
             ("hostOperations_Request", host_operations::RequestHostOperationAction, host_operations::RequestHostOperationOutput),
             ("hostOperations_Resolve", host_operations::ResolveHostOperationAction, host_operations::ResolveHostOperationOutput),
             ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
+            ("shares_Inspect", shares::InspectShareOverlayAction, shares::InspectShareOverlayOutput),
+            ("shares_Apply", shares::ApplyShareOverlayAction, shares::ApplyShareOverlayOutput),
             ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
             ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
             ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -253,6 +255,8 @@ macro_rules! with_all_actions {
                 ("hostOperations_Request", host_operations::RequestHostOperationAction, host_operations::RequestHostOperationOutput),
                 ("hostOperations_Resolve", host_operations::ResolveHostOperationAction, host_operations::ResolveHostOperationOutput),
                 ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
+                ("shares_Inspect", shares::InspectShareOverlayAction, shares::InspectShareOverlayOutput),
+                ("shares_Apply", shares::ApplyShareOverlayAction, shares::ApplyShareOverlayOutput),
                 ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
                 ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
                 ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -383,6 +387,7 @@ mod action_impls {
     use crate::types::processes;
     use crate::types::repositories;
     use crate::types::secrets;
+    use crate::types::shares;
     use crate::types::workspaces;
 
     macro_rules! implement {
@@ -470,6 +475,7 @@ mod host_operation_impls {
     use crate::types::network;
     use crate::types::repositories;
     use crate::types::secrets;
+    use crate::types::shares;
     use crate::types::workspaces;
 
     macro_rules! implement_actions {
