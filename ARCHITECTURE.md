@@ -243,6 +243,14 @@ shell fragment, environment name, or argument outside that trusted definition.
 Hostd captures the selected definition and values in a durable immutable
 operation before asking a host client for approval.
 
+Pods may subscribe to a secret-free catalog of the commands registered for
+their authenticated workspace. The catalog and new operation requests use the
+same watched configuration snapshots. A valid `config.toml` edit therefore
+changes command discovery and subsequent requests without restarting hostd or
+the workspace VM. An invalid edit leaves the preceding valid catalog active
+and publishes its configuration error. Operations created before an edit
+remain immutable.
+
 Declared repository inputs are transferred on a dedicated data-plane channel.
 For a working-tree capture, `podctl` constructs a synthetic Git commit using a
 temporary index. Staged changes, unstaged changes, and non-ignored untracked

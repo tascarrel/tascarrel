@@ -27,12 +27,15 @@ Code editing, terminals, arbitrary file browsing, network configuration, image m
 advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless
 they directly help a user create a pod or unblock ongoing work.
 
-Chat operation names in `src/api/actions.ts` are maintained manually while the backend operation
-registry is developed in parallel. Sidex types can be refreshed with:
+The API types under `src/api/generated` and the operation registry in
+`src/api/actions.ts` are generated from the Sidex schemas and Rust operation
+registry. Regenerate both outputs with:
 
 ```sh
 nix develop --command pnpm run generate:types
 ```
+
+Do not edit either generated output by hand.
 
 Check and build the package with:
 

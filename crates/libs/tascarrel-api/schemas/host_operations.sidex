@@ -53,6 +53,18 @@ record CancelHostOperationOutput {}
 
 // Subscriptions
 
+/// Subscribes to trusted host commands registered for one workspace.
+record HostCommandListChangedSubscription {
+    /// Workspace whose registered commands to receive.
+    workspace: WorkspaceName,
+}
+
+/// Complete registered host-command catalog emitted when its contents change.
+record HostCommandListChangedEvent {
+    /// Current caller-visible command catalog.
+    value: HostCommandList,
+}
+
 /// Subscribes to durable host operations visible to the caller.
 record HostOperationListChangedSubscription {
     /// Restricts results to one workspace when supplied.
@@ -109,6 +121,56 @@ opaque HostOperationId
 /// SHA-256 revision derived from one complete host-operation list.
 #[rust(derive(Eq, Hash, Ord, PartialOrd))]
 wrapper HostOperationRevision: string
+
+/// Caller-visible trusted host commands currently registered for one workspace.
+record HostCommandList {
+    /// Commands ordered by name.
+    commands: [HostCommand],
+    /// Most recent `config.toml` error while the preceding valid catalog remains active.
+    configuration_error?: string,
+}
+
+/// One trusted host command available to an authenticated workspace pod.
+record HostCommand {
+    /// Workspace-local command name supplied to `podctl host operations run`.
+    name: string,
+    /// Human-readable purpose shown to callers and approvers.
+    description?: string,
+    /// Trusted executable selected by the workspace configuration.
+    program: string,
+    /// Trusted argument templates selected by the workspace configuration.
+    arguments: [string],
+    /// Trusted working-directory template, when configured.
+    working_directory?: string,
+    /// Validated caller-supplied parameters keyed by placeholder name.
+    parameters: [string: HostCommandParameter],
+    /// Repository captures keyed by placeholder name.
+    inputs: [string: HostCommandInput],
+    /// Host environment variable names exposed to the command without their values.
+    environment_names: [string],
+    /// Maximum execution time in seconds, or no command-specific timeout when absent.
+    timeout_seconds?: u64,
+}
+
+/// Caller-visible validation for one host-command string parameter.
+record HostCommandParameter {
+    /// Whether the caller must supply a value.
+    required: bool,
+    /// Value selected when the caller omits this parameter.
+    default?: string,
+    /// Complete set of accepted values, when constrained to a finite choice.
+    allowed_values?: [string],
+    /// Rust regular expression which the complete value must match.
+    pattern?: string,
+}
+
+/// Caller-visible repository capture required by one host command.
+record HostCommandInput {
+    /// Configured repository path below `/workspace`.
+    repository: string,
+    /// Repository state captured when the command is requested.
+    capture: HostOperationCapture,
+}
 
 /// Complete host-operation inventory.
 record HostOperationList {

@@ -1,5 +1,6 @@
 //! Durable approval-gated commands executed directly by the host daemon.
 
+mod catalog;
 mod plan;
 mod storage;
 
@@ -43,6 +44,7 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+pub use self::catalog::HostCommandSubscription;
 use self::plan::expand_argument;
 use self::plan::expand_working_directory;
 use self::plan::pending_input_list;
@@ -53,6 +55,7 @@ use self::plan::resolve_inputs;
 use self::plan::resolve_parameters;
 use self::plan::validate_command;
 use self::storage::OperationStorage;
+
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(3);
 
@@ -1777,6 +1780,109 @@ mod tests {
             fs::read_to_string(input.join("tree/deployment.txt")).unwrap(),
             "pinned working state\n"
         );
+    }
+
+    /// Verifies command discovery and request admission use hot-reloaded
+    /// workspace definitions without exposing environment values.
+    #[tokio::test]
+    async fn registered_commands_and_requests_follow_config_changes() {
+        let temporary = tempdir().unwrap();
+        let workspace_root = temporary.path().join("workspaces/demo");
+        fs::create_dir_all(workspace_root.join("image")).unwrap();
+        let config_path = workspace_root.join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[host-commands.before]
+description = "Initial command"
+program = "/bin/true"
+arguments = ["${parameters.target}"]
+timeout-seconds = 30
+
+[host-commands.before.parameters.target]
+default = "staging"
+allowed-values = ["staging", "production"]
+
+[host-commands.before.environment]
+inherit = ["SSH_AUTH_SOCK"]
+
+[host-commands.before.environment.values]
+DEPLOY_MODE = "initial"
+"#,
+        )
+        .unwrap();
+        let config = ConfigService::open(ConfigServiceConfig::new(
+            temporary.path().join("workspaces"),
+        ))
+        .unwrap();
+        let service = HostOperationService::open(HostOperationServiceConfig::new(
+            temporary.path().join("state/host-operations"),
+            Path::new("/usr/bin/git"),
+        ))
+        .unwrap();
+        let workspace = WorkspaceName::new("demo");
+        let pod_id = PodId::generate();
+        let actor = Actor::Pod(PodAddress {
+            workspace: workspace.clone(),
+            pod_id,
+        });
+        let mut commands = service
+            .subscribe_commands(
+                api::HostCommandListChangedSubscription {
+                    workspace: workspace.clone(),
+                },
+                &config,
+            )
+            .await
+            .unwrap();
+
+        let initial = commands.recv().await.unwrap().value;
+        assert_eq!(initial.commands.len(), 1);
+        let before = &initial.commands[0];
+        assert_eq!(before.name.as_ref(), "before");
+        assert!(!before.parameters.get("target").unwrap().required);
+        assert_eq!(
+            before
+                .environment_names
+                .iter()
+                .map(AsRef::<str>::as_ref)
+                .collect::<Vec<_>>(),
+            ["DEPLOY_MODE", "SSH_AUTH_SOCK"]
+        );
+
+        fs::write(
+            &config_path,
+            r#"
+[host-commands.after]
+description = "Reloaded command"
+program = "/bin/true"
+"#,
+        )
+        .unwrap();
+        let reloaded = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(reloaded.commands.len(), 1);
+        assert_eq!(reloaded.commands[0].name.as_ref(), "after");
+        assert!(reloaded.configuration_error.is_none());
+
+        let requested =
+            request_test_operation(&service, &config, &workspace, &actor, "after").await;
+        assert_eq!(
+            service.get(&requested).await.unwrap().command.as_ref(),
+            "after"
+        );
+
+        fs::write(&config_path, "[host-commands.after\n").unwrap();
+        let invalid = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(invalid.commands[0].name.as_ref(), "after");
+        assert!(invalid.configuration_error.is_some());
     }
 
     /// Verifies execution, output retention, failure, cancellation, and replay.

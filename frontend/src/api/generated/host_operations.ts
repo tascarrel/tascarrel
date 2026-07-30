@@ -70,6 +70,20 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type CancelHostOperationOutput = Record<string, never>;
 /**
+ * Subscribes to trusted host commands registered for one workspace.
+ */
+ export type HostCommandListChangedSubscription = { /**
+                                            * Workspace whose registered commands to receive.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName };
+/**
+ * Complete registered host-command catalog emitted when its contents change.
+ */
+ export type HostCommandListChangedEvent = { /**
+                                            * Current caller-visible command catalog.
+                                            */
+                                                        "value": HostCommandList };
+/**
  * Subscribes to durable host operations visible to the caller.
  */
  export type HostOperationListChangedSubscription = { /**
@@ -134,6 +148,73 @@ import * as __schema_workspaces from "./workspaces";
  * SHA-256 revision derived from one complete host-operation list.
  */
  export type HostOperationRevision = __sidex_types.Nominal<__sidex_types.builtins.String, "::tascarrel_api::host_operations::HostOperationRevision">;
+/**
+ * Caller-visible trusted host commands currently registered for one workspace.
+ */
+ export type HostCommandList = { /**
+                                            * Commands ordered by name.
+                                            */
+                                                        "commands": __sidex_types.builtins.Sequence<HostCommand>, /**
+                                            * Most recent `config.toml` error while the preceding valid catalog remains active.
+                                            */
+                                                        "configurationError"?: __sidex_types.builtins.String };
+/**
+ * One trusted host command available to an authenticated workspace pod.
+ */
+ export type HostCommand = { /**
+                                            * Workspace-local command name supplied to `podctl host operations run`.
+                                            */
+                                                        "name": __sidex_types.builtins.String, /**
+                                            * Human-readable purpose shown to callers and approvers.
+                                            */
+                                                        "description"?: __sidex_types.builtins.String, /**
+                                            * Trusted executable selected by the workspace configuration.
+                                            */
+                                                        "program": __sidex_types.builtins.String, /**
+                                            * Trusted argument templates selected by the workspace configuration.
+                                            */
+                                                        "arguments": __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Trusted working-directory template, when configured.
+                                            */
+                                                        "workingDirectory"?: __sidex_types.builtins.String, /**
+                                            * Validated caller-supplied parameters keyed by placeholder name.
+                                            */
+                                                        "parameters": __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, HostCommandParameter>, /**
+                                            * Repository captures keyed by placeholder name.
+                                            */
+                                                        "inputs": __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, HostCommandInput>, /**
+                                            * Host environment variable names exposed to the command without their values.
+                                            */
+                                                        "environmentNames": __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Maximum execution time in seconds, or no command-specific timeout when absent.
+                                            */
+                                                        "timeoutSeconds"?: __sidex_types.builtins.U64 };
+/**
+ * Caller-visible validation for one host-command string parameter.
+ */
+ export type HostCommandParameter = { /**
+                                            * Whether the caller must supply a value.
+                                            */
+                                                        "required": __sidex_types.builtins.Bool, /**
+                                            * Value selected when the caller omits this parameter.
+                                            */
+                                                        "default"?: __sidex_types.builtins.String, /**
+                                            * Complete set of accepted values, when constrained to a finite choice.
+                                            */
+                                                        "allowedValues"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Rust regular expression which the complete value must match.
+                                            */
+                                                        "pattern"?: __sidex_types.builtins.String };
+/**
+ * Caller-visible repository capture required by one host command.
+ */
+ export type HostCommandInput = { /**
+                                            * Configured repository path below `/workspace`.
+                                            */
+                                                        "repository": __sidex_types.builtins.String, /**
+                                            * Repository state captured when the command is requested.
+                                            */
+                                                        "capture": HostOperationCapture };
 /**
  * Complete host-operation inventory.
  */

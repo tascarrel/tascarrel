@@ -11,6 +11,7 @@ use crate::control_plane::operation_error_details;
 use crate::control_plane::operations::EventSource;
 use crate::control_plane::operations::ExecuteAction;
 use crate::control_plane::operations::OpenSubscription;
+use crate::services::host_operations::HostCommandSubscription;
 use crate::services::host_operations::HostOperationAuditSubscription;
 use crate::services::host_operations::HostOperationOutputSubscription;
 use crate::services::host_operations::HostOperationServiceError;
@@ -114,6 +115,52 @@ impl ExecuteAction for api::CancelHostOperationAction {
             .host_operations()
             .cancel(self, actor)
             .await
+            .map_err(host_operation_error)
+    }
+}
+
+#[async_trait]
+impl OpenSubscription for api::HostCommandListChangedSubscription {
+    async fn check_permissions(
+        &self,
+        context: &SubscriptionCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        let caller = &context.require_routing_context()?.caller;
+        if caller.is_host_or_client()
+            || matches!(
+                caller,
+                wire::Actor::Pod(address) if address.workspace == self.workspace
+            )
+        {
+            Ok(())
+        } else {
+            Err(wire::OperationError::forbidden())
+        }
+    }
+
+    type Source = HostCommandSubscription;
+
+    async fn open(
+        self,
+        context: SubscriptionCtx<'_>,
+    ) -> Result<Self::Source, Report<wire::OperationError>> {
+        context
+            .state()
+            .host_operations()
+            .subscribe_commands(self, context.state().config())
+            .await
+            .map_err(host_operation_error)
+    }
+}
+
+#[async_trait]
+impl EventSource for HostCommandSubscription {
+    type Event = api::HostCommandListChangedEvent;
+
+    async fn recv(&mut self) -> Result<Option<Self::Event>, Report<wire::OperationError>> {
+        HostCommandSubscription::recv(self)
+            .await
+            .map(Some)
             .map_err(host_operation_error)
     }
 }

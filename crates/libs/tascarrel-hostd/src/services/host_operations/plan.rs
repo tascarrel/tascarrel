@@ -171,25 +171,10 @@ pub(crate) fn resolve_inputs(
         .into_iter()
         .flat_map(|inputs| inputs.iter())
         .map(|(name, input)| {
-            let capture = match input
-                .capture
-                .unwrap_or(config::WorkspaceHostCommandCapture::WorkingTree)
-            {
-                config::WorkspaceHostCommandCapture::WorkingTree => {
-                    api::HostOperationCapture::WorkingTree
-                }
-                config::WorkspaceHostCommandCapture::CleanHead => {
-                    api::HostOperationCapture::CleanHead
-                }
-                config::WorkspaceHostCommandCapture::Commit => api::HostOperationCapture::Commit,
-                config::WorkspaceHostCommandCapture::PublishedRef => {
-                    api::HostOperationCapture::PublishedRef
-                }
-            };
             Ok(api::HostOperationInput {
                 name: name.clone(),
                 repository: input.repository.clone(),
-                capture,
+                capture: resolve_capture(input.capture),
                 revision: None,
                 base_revision: None,
                 materialized_path: None,
@@ -200,6 +185,20 @@ pub(crate) fn resolve_inputs(
     inputs.sort_by(|left, right| left.name.cmp(&right.name));
     let pending = inputs.iter().map(|input| input.name.to_string()).collect();
     Ok((inputs, pending))
+}
+
+/// Converts the configured repository capture policy to its operation form.
+pub(crate) fn resolve_capture(
+    capture: Option<config::WorkspaceHostCommandCapture>,
+) -> api::HostOperationCapture {
+    match capture.unwrap_or(config::WorkspaceHostCommandCapture::WorkingTree) {
+        config::WorkspaceHostCommandCapture::WorkingTree => api::HostOperationCapture::WorkingTree,
+        config::WorkspaceHostCommandCapture::CleanHead => api::HostOperationCapture::CleanHead,
+        config::WorkspaceHostCommandCapture::Commit => api::HostOperationCapture::Commit,
+        config::WorkspaceHostCommandCapture::PublishedRef => {
+            api::HostOperationCapture::PublishedRef
+        }
+    }
 }
 
 pub(crate) fn pending_input_list(stored: &StoredOperation) -> Vec<api::HostOperationPendingInput> {

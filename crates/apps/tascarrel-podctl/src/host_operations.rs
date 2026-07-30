@@ -23,6 +23,16 @@ use crate::client::PodClient;
 use crate::error::PodctlError;
 use crate::error::PodctlResult;
 
+/// Returns the current caller-visible host-command catalog.
+pub(crate) async fn commands(client: &PodClient) -> PodctlResult<api::HostCommandList> {
+    client
+        .first_host_event(api::HostCommandListChangedSubscription {
+            workspace: client.identity().workspace.clone(),
+        })
+        .await
+        .map(|event| event.value)
+}
+
 /// Requests a command, transfers its immutable inputs, and follows it to
 /// completion.
 #[tracing::instrument(level = "debug", skip_all, fields(command = %command), err)]

@@ -77,7 +77,7 @@ enum Command {
         #[command(subcommand)]
         command: HttpCommand,
     },
-    /// Request and inspect approval-gated commands executed by hostd.
+    /// Control host-owned features available to this pod.
     Host {
         #[command(subcommand)]
         command: HostCommand,
@@ -130,6 +130,17 @@ enum ProcessCommand {
 
 #[derive(Debug, Subcommand)]
 enum HostCommand {
+    /// Request and inspect durable approval-gated host operations.
+    Operations {
+        #[command(subcommand)]
+        command: HostOperationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HostOperationCommand {
+    /// List trusted commands registered for this workspace.
+    Commands,
     /// Create an immutable request, transfer inputs, and follow output to
     /// completion.
     Run {
@@ -289,17 +300,22 @@ async fn run_cli() -> PodctlResult<()> {
         Command::Chats { command } => run_chat_command(&client, command).await?,
         Command::Ports { command } => run_port_command(&client, command).await?,
         Command::Http { command } => run_http_command(&client, command).await?,
-        Command::Host { command } => match command {
-            HostCommand::Run {
+        Command::Host {
+            command: HostCommand::Operations { command },
+        } => match command {
+            HostOperationCommand::Commands => {
+                print_json(&host_operations::commands(&client).await?)?;
+            }
+            HostOperationCommand::Run {
                 command,
                 parameters,
             } => {
                 host_operations::run(&client, command, parameters).await?;
             }
-            HostCommand::List => {
+            HostOperationCommand::List => {
                 print_json(&host_operations::list(&client).await?)?;
             }
-            HostCommand::Cancel { operation_id } => {
+            HostOperationCommand::Cancel { operation_id } => {
                 host_operations::cancel(&client, operation_id).await?;
             }
         },
