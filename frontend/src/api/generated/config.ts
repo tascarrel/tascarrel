@@ -722,6 +722,11 @@ import * as __schema_workspaces from "./workspaces";
                                             * HTTP host pattern whose matching requests receive the secret.
                                             */
                                                         "host": __sidex_types.builtins.String, /**
+                                            * One to 64 absolute HTTP path glob patterns admitted by this rule, or
+                                            * every path when absent. Query strings do not participate in matching.
+                                            * A single `*` does not cross `/`, while `**` does.
+                                            */
+                                                        "paths"?: __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
                                             * HTTP methods that may be sent to matching hosts.
                                             * Requests using other methods are rejected by the host proxy.
                                             */

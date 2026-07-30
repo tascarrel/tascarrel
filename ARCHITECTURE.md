@@ -387,8 +387,10 @@ On configured HTTPS ports, `hostd` admits connections using the normalized TLS
 SNI and resolves that server name itself before relaying TLS unchanged. It
 terminates TLS only when an HTTPS secret-injection rule matches the SNI. In that
 case, every forwarded HTTP host must match the SNI. Each secret-injection rule
-also lists the HTTP methods it admits. When a host matches one or more rules,
-`hostd` rejects the request unless at least one matching rule admits its method.
+also lists the HTTP methods it admits and may limit admission with a non-empty
+list of path glob patterns. When a host matches one or more rules, `hostd`
+rejects the request unless at least one matching rule admits both its path and
+method. Query strings do not participate in path matching.
 
 The host daemon retains bounded, in-memory activity streams for attributed DNS
 requests, mediated HTTP requests, and TCP flow lifecycles. HTTP request records
@@ -415,8 +417,8 @@ secret becomes visible to a workspace only through an explicit operation:
   pod processes.
 - HTTP secret injection is performed by the host proxy for matching requests,
   after the request has left the pod; each rule restricts the admitted HTTP
-  methods, and the value is not placed in the pod's environment or filesystem
-  by Tascarrel.
+  methods and may restrict request paths with glob patterns, and the value is
+  not placed in the pod's environment or filesystem by Tascarrel.
 - Host-facing secret management actions may reveal or mutate values for an
   authorized client.
 

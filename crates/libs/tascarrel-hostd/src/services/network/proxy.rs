@@ -431,10 +431,12 @@ impl HttpProxy {
             return Err(proxy_error("HTTP Host does not match TLS SNI"));
         }
         let method = request.method().clone();
+        let path = request.uri().path().to_owned();
         audit.secrets_injected = self
             .inject_secrets(
                 request.headers_mut(),
                 &host,
+                &path,
                 &method,
                 workspace_name,
                 secrets,
@@ -520,20 +522,26 @@ impl HttpProxy {
         &self,
         headers: &mut hyper::HeaderMap,
         host: &str,
+        path: &str,
         method: &Method,
         workspace_name: &WorkspaceName,
         secrets: &SecretsService,
     ) -> ProxyResult<bool> {
         if self.policy.injects_secret_for_host(host)
-            && !self.policy.allows_secret_injection_method(host, method)
+            && !self
+                .policy
+                .allows_secret_injection_request(host, path, method)
         {
             return Err(proxy_error(format!(
-                "HTTP method {method} is denied for secret-injection host {host:?}"
+                "HTTP request {method} {path:?} is denied for secret-injection host {host:?}"
             )));
         }
         let mut secrets_injected = false;
         for rule in &self.policy.secret_injection {
-            if !NetworkPolicy::rule_matches(&rule.host, host) || !rule.methods.contains(method) {
+            if !NetworkPolicy::rule_matches(&rule.host, host)
+                || !rule.matches_path(path)
+                || !rule.methods.contains(method)
+            {
                 continue;
             }
             let secret = secrets
@@ -1099,10 +1107,10 @@ mod tests {
             .unwrap();
     }
 
-    /// Exercises HTTPS secret injection for an admitted method and host-side
-    /// denial for a method outside the rule.
+    /// Exercises HTTPS secret injection for one admitted request and host-side
+    /// denial for requests outside the configured method or path.
     #[tokio::test]
-    async fn https_proxy_enforces_secret_injection_methods() {
+    async fn https_proxy_enforces_secret_injection_request_scope() {
         install_crypto_provider();
         let directory = tempfile::tempdir().unwrap();
         let workspaces = directory.path().join("workspaces");
@@ -1122,6 +1130,7 @@ mod tests {
             "[secrets.providers.project]\nkind = 'sops'\n\
              [network]\nallow-local = true\n\
              [[network.secret-injection]]\nhost = 'localhost'\n\
+             paths = ['/v1/models', '/v1/responses/*']\n\
              methods = ['GET']\n\
              header = 'authorization'\nsecret = 'project.API_TOKEN'\n",
         )
@@ -1137,31 +1146,36 @@ mod tests {
         let upstream_port = upstream.local_addr().unwrap().port();
         let upstream_authority = Arc::clone(&authority);
         let upstream_task = tokio::spawn(async move {
-            let (stream, _) = upstream.accept().await.unwrap();
-            let tls = TlsAcceptor::from(upstream_authority.server_config("localhost").unwrap())
-                .accept(stream)
-                .await
-                .unwrap();
-            server_http1::Builder::new()
-                .serve_connection(
-                    TokioIo::new(tls),
-                    service_fn(|request: Request<Incoming>| async move {
-                        let authorization = request
-                            .headers()
-                            .get(AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or_default()
-                            .to_owned();
-                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(authorization))))
-                    }),
-                )
-                .await
-                .unwrap();
+            for _ in 0..2 {
+                let (stream, _) = upstream.accept().await.unwrap();
+                let tls = TlsAcceptor::from(upstream_authority.server_config("localhost").unwrap())
+                    .accept(stream)
+                    .await
+                    .unwrap();
+                server_http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(tls),
+                        service_fn(|request: Request<Incoming>| async move {
+                            let authorization = request
+                                .headers()
+                                .get(AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned();
+                            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(
+                                authorization,
+                            ))))
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            }
         });
 
         let proxy = HttpProxy::new(policy, Some(Arc::clone(&authority)), Duration::from_secs(5));
         let (request_stream, mut request_activity) = test_request_stream();
-        let (admitted_recorder, admitted_flow_id) = test_request_recorder(&request_stream);
+        let (exact_admitted_recorder, exact_admitted_flow_id) =
+            test_request_recorder(&request_stream);
         let (status, body) = send_intercepted_https_request(
             proxy.clone(),
             &authority,
@@ -1171,7 +1185,25 @@ mod tests {
             InterceptedTestRequest {
                 method: Method::GET,
                 uri: "/v1/models?token=query-secret",
-                recorder: admitted_recorder,
+                recorder: exact_admitted_recorder,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "Bearer super-secret");
+
+        let (glob_admitted_recorder, glob_admitted_flow_id) =
+            test_request_recorder(&request_stream);
+        let (status, body) = send_intercepted_https_request(
+            proxy.clone(),
+            &authority,
+            upstream_port,
+            workspace_name.clone(),
+            secrets.clone(),
+            InterceptedTestRequest {
+                method: Method::GET,
+                uri: "/v1/responses/42?token=query-secret",
+                recorder: glob_admitted_recorder,
             },
         )
         .await;
@@ -1182,7 +1214,27 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let (denied_recorder, denied_flow_id) = test_request_recorder(&request_stream);
+        let (method_denied_recorder, method_denied_flow_id) =
+            test_request_recorder(&request_stream);
+        let (status, body) = send_intercepted_https_request(
+            proxy.clone(),
+            &authority,
+            upstream_port,
+            workspace_name.clone(),
+            secrets.clone(),
+            InterceptedTestRequest {
+                method: Method::POST,
+                uri: "/v1/models?token=query-secret",
+                recorder: method_denied_recorder,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.starts_with(
+            b"Tascarrel network denied: HTTP proxy failed: HTTP request POST \"/v1/models\" is denied",
+        ));
+
+        let (path_denied_recorder, path_denied_flow_id) = test_request_recorder(&request_stream);
         let (status, body) = send_intercepted_https_request(
             proxy,
             &authority,
@@ -1190,22 +1242,28 @@ mod tests {
             workspace_name,
             secrets,
             InterceptedTestRequest {
-                method: Method::POST,
-                uri: "/v1/responses?token=query-secret",
-                recorder: denied_recorder,
+                method: Method::GET,
+                uri: "/v1/responses/team/42?token=query-secret",
+                recorder: path_denied_recorder,
             },
         )
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body.starts_with(
-            b"Tascarrel network denied: HTTP proxy failed: HTTP method POST is denied",
+            b"Tascarrel network denied: HTTP proxy failed: HTTP request GET \"/v1/responses/team/42\" is denied",
         ));
 
         let batch = timeout(Duration::from_secs(5), request_activity.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_request_activity(&batch.entries, &admitted_flow_id, &denied_flow_id);
+        assert_request_activity(
+            &batch.entries,
+            &exact_admitted_flow_id,
+            &glob_admitted_flow_id,
+            &method_denied_flow_id,
+            &path_denied_flow_id,
+        );
     }
 
     /// Sends one request through an intercepting HTTPS proxy and returns its
@@ -1307,22 +1365,34 @@ mod tests {
     /// Verifies admitted and denied request summaries omit sensitive values.
     fn assert_request_activity(
         requests: &[api::MediatedHttpRequest],
-        admitted_flow_id: &api::TcpFlowId,
-        denied_flow_id: &api::TcpFlowId,
+        exact_admitted_flow_id: &api::TcpFlowId,
+        glob_admitted_flow_id: &api::TcpFlowId,
+        method_denied_flow_id: &api::TcpFlowId,
+        path_denied_flow_id: &api::TcpFlowId,
     ) {
-        assert_eq!(requests.len(), 2);
-        let admitted = &requests[0];
-        assert_eq!(&admitted.tcp_flow_id, admitted_flow_id);
-        assert_eq!(admitted.host.as_deref(), Some("localhost"));
-        assert_eq!(admitted.method, "GET");
-        assert_eq!(admitted.path, "/v1/models");
-        assert!(!admitted.path_truncated);
-        assert!(admitted.secrets_injected);
-        let denied = &requests[1];
-        assert_eq!(&denied.tcp_flow_id, denied_flow_id);
-        assert_eq!(denied.method, "POST");
-        assert_eq!(denied.path, "/v1/responses");
-        assert!(!denied.secrets_injected);
+        assert_eq!(requests.len(), 4);
+        let exact_admitted = &requests[0];
+        assert_eq!(&exact_admitted.tcp_flow_id, exact_admitted_flow_id);
+        assert_eq!(exact_admitted.host.as_deref(), Some("localhost"));
+        assert_eq!(exact_admitted.method, "GET");
+        assert_eq!(exact_admitted.path, "/v1/models");
+        assert!(!exact_admitted.path_truncated);
+        assert!(exact_admitted.secrets_injected);
+        let glob_admitted = &requests[1];
+        assert_eq!(&glob_admitted.tcp_flow_id, glob_admitted_flow_id);
+        assert_eq!(glob_admitted.method, "GET");
+        assert_eq!(glob_admitted.path, "/v1/responses/42");
+        assert!(glob_admitted.secrets_injected);
+        let method_denied = &requests[2];
+        assert_eq!(&method_denied.tcp_flow_id, method_denied_flow_id);
+        assert_eq!(method_denied.method, "POST");
+        assert_eq!(method_denied.path, "/v1/models");
+        assert!(!method_denied.secrets_injected);
+        let path_denied = &requests[3];
+        assert_eq!(&path_denied.tcp_flow_id, path_denied_flow_id);
+        assert_eq!(path_denied.method, "GET");
+        assert_eq!(path_denied.path, "/v1/responses/team/42");
+        assert!(!path_denied.secrets_injected);
         let retained = format!("{requests:?}");
         assert!(!retained.contains("query-secret"));
         assert!(!retained.contains("super-secret"));

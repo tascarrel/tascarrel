@@ -624,6 +624,10 @@ variant WorkspaceHostPort {
 record WorkspaceSecretInjectionConfig {
     /// HTTP host pattern whose matching requests receive the secret.
     host: string,
+    /// One to 64 absolute HTTP path glob patterns admitted by this rule, or
+    /// every path when absent. Query strings do not participate in matching.
+    /// A single `*` does not cross `/`, while `**` does.
+    paths?: [string],
     /// HTTP methods that may be sent to matching hosts.
     /// Requests using other methods are rejected by the host proxy.
     methods: [string],

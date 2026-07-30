@@ -489,6 +489,10 @@ fn workspace_network_from_api(
             .iter()
             .map(|secret| WorkspaceSecretInjection {
                 host: secret.host.to_string(),
+                paths: secret
+                    .paths
+                    .as_ref()
+                    .map(|paths| paths.iter().map(ToString::to_string).collect()),
                 methods: secret.methods.iter().map(ToString::to_string).collect(),
                 header: secret.header.as_ref().map(ToString::to_string),
                 placeholder: secret.placeholder.as_ref().map(ToString::to_string),
@@ -546,6 +550,7 @@ pub struct WorkspaceHostPort {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSecretInjection {
     pub host: String,
+    pub paths: Option<Vec<String>>,
     pub methods: Vec<String>,
     pub header: Option<String>,
     pub placeholder: Option<String>,
@@ -987,8 +992,8 @@ mod tests {
         }
     }
 
-    /// Verifies the guest accepts shared network policy containing
-    /// provider-qualified secret references.
+    /// Verifies the guest accepts path-scoped, provider-qualified secret
+    /// references in shared network policy.
     #[test]
     fn shared_network_section_is_accepted_by_the_guest_parser() {
         let directory = tempdir().unwrap();
@@ -1000,6 +1005,7 @@ mod tests {
              host-ports = [3000, \"5432:15432\"]\n\
              [secrets.providers.project]\nkind = \"sops\"\n\
              [[network.secret-injection]]\nhost = \"api.example\"\n\
+             paths = [\"/mcp\", \"/v1/**\"]\n\
              methods = [\"GET\", \"HEAD\"]\n\
              secret = \"project.TOKEN\"\n",
         )
@@ -1019,6 +1025,10 @@ mod tests {
                     pod_port: 15432,
                 },
             ]
+        );
+        assert_eq!(
+            parsed.network.secret_injection[0].paths.as_deref(),
+            Some(["/mcp".to_owned(), "/v1/**".to_owned()].as_slice())
         );
         assert_eq!(parsed.network.secret_injection[0].methods, ["GET", "HEAD"]);
         assert!(parsed.network.secret_injection[0].header.is_none());

@@ -13,6 +13,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use globset::GlobBuilder;
+use globset::GlobMatcher;
 use hyper::Method;
 use notify::Event;
 use notify::EventKind;
@@ -36,6 +38,8 @@ use crate::services::secrets::SecretReference;
 
 pub(crate) const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_SECRET_RULES: usize = 64;
+const MAX_SECRET_PATHS_PER_RULE: usize = 64;
+const MAX_SECRET_PATH_PATTERN_BYTES: usize = 2048;
 const MAX_HOST_PORTS: usize = 64;
 const MAX_POLICY_PORTS: usize = 256;
 const POLICY_WATCH_CHANNEL_CAPACITY: usize = 64;
@@ -67,6 +71,8 @@ pub(crate) struct HostPortMapping {
 #[derive(Clone)]
 pub struct SecretInjection {
     pub host: String,
+    pub paths: Vec<String>,
+    path_matchers: Vec<GlobMatcher>,
     pub methods: Vec<Method>,
     pub header: Option<String>,
     pub placeholder: String,
@@ -78,11 +84,24 @@ impl std::fmt::Debug for SecretInjection {
         formatter
             .debug_struct("SecretInjection")
             .field("host", &self.host)
+            .field("paths", &self.paths)
             .field("methods", &self.methods)
             .field("header", &self.header)
             .field("placeholder", &self.placeholder)
             .field("reference", &"[SECRET REFERENCE]")
-            .finish()
+            .finish_non_exhaustive()
+    }
+}
+
+impl SecretInjection {
+    /// Returns whether this rule admits the request path.
+    #[must_use]
+    pub(crate) fn matches_path(&self, path: &str) -> bool {
+        self.path_matchers.is_empty()
+            || self
+                .path_matchers
+                .iter()
+                .any(|matcher| matcher.is_match(path))
     }
 }
 
@@ -172,6 +191,20 @@ impl NetworkPolicy {
         let mut secret_injection = Vec::with_capacity(rules.len());
         for rule in rules {
             validate_host_pattern(&rule.host)?;
+            let paths = match rule.paths {
+                None => Vec::new(),
+                Some(paths) if paths.is_empty() || paths.len() > MAX_SECRET_PATHS_PER_RULE => {
+                    return Err(invalid_policy(format!(
+                        "HTTP secret-injection paths must contain between 1 and \
+                         {MAX_SECRET_PATHS_PER_RULE} patterns"
+                    )));
+                }
+                Some(paths) => paths.iter().map(ToString::to_string).collect(),
+            };
+            let path_matchers = paths
+                .iter()
+                .map(|path| compile_secret_injection_path(path))
+                .collect::<Result<Vec<_>, _>>()?;
             let methods = rule
                 .methods
                 .iter()
@@ -214,6 +247,8 @@ impl NetworkPolicy {
             }
             secret_injection.push(SecretInjection {
                 host: rule.host.to_ascii_lowercase(),
+                paths,
+                path_matchers,
                 methods,
                 header: rule.header.map(|header| header.to_ascii_lowercase()),
                 placeholder,
@@ -272,12 +307,19 @@ impl NetworkPolicy {
             .any(|rule| host_matches(&rule.host, host))
     }
 
-    /// Returns whether a matching injection rule admits an HTTP method.
+    /// Returns whether a matching injection rule admits an HTTP request.
     #[must_use]
-    pub(crate) fn allows_secret_injection_method(&self, host: &str, method: &Method) -> bool {
-        self.secret_injection
-            .iter()
-            .any(|rule| host_matches(&rule.host, host) && rule.methods.contains(method))
+    pub(crate) fn allows_secret_injection_request(
+        &self,
+        host: &str,
+        path: &str,
+        method: &Method,
+    ) -> bool {
+        self.secret_injection.iter().any(|rule| {
+            host_matches(&rule.host, host)
+                && rule.matches_path(path)
+                && rule.methods.contains(method)
+        })
     }
 
     #[must_use]
@@ -610,6 +652,27 @@ fn infer_placeholder(secret_name: &str) -> String {
     )
 }
 
+/// Compiles one absolute request-path glob with separator-aware matching.
+fn compile_secret_injection_path(pattern: &str) -> Result<GlobMatcher, Report<NetworkPolicyError>> {
+    let invalid = || {
+        invalid_policy(format!(
+            "invalid HTTP secret-injection path pattern {pattern:?}"
+        ))
+    };
+    if !pattern.starts_with('/')
+        || pattern.len() > MAX_SECRET_PATH_PATTERN_BYTES
+        || pattern.contains(['\r', '\n', '#'])
+    {
+        return Err(invalid());
+    }
+    let mut builder = GlobBuilder::new(pattern);
+    builder.literal_separator(true).backslash_escape(true);
+    builder
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|_| invalid())
+}
+
 fn validate_ports(ports: &[u16], name: &str) -> Result<(), Report<NetworkPolicyError>> {
     if ports.len() > MAX_POLICY_PORTS || ports.contains(&0) {
         return Err(invalid_policy(format!("invalid network {name}")));
@@ -724,10 +787,11 @@ mod tests {
         assert_eq!(policy.https_ports, [443]);
     }
 
-    /// Verifies explicit ports and secret-injection methods are parsed while
-    /// optional placeholders may be omitted and legacy keys are rejected.
+    /// Verifies explicit ports and path-scoped secret-injection rules are
+    /// parsed while optional placeholders may be omitted and legacy keys are
+    /// rejected.
     #[test]
-    fn config_parses_explicit_ports_and_secret_injection_methods() {
+    fn config_parses_explicit_ports_and_secret_injection_rules() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         fs::write(
@@ -735,6 +799,7 @@ mod tests {
             "[secrets.providers.project]\nkind = 'sops'\n\
              [network]\nhost-ports = [3000, '5432:15432']\nallow-ports = [22, 8443]\n\
              [[network.secret-injection]]\nhost = 'api.example'\n\
+             paths = ['/v1/models', '/v1/responses/*']\n\
              methods = ['GET', 'HEAD']\n\
              secret = 'project.API_TOKEN'\n",
         )
@@ -744,6 +809,10 @@ mod tests {
         assert_eq!(network.host_ports.as_ref().unwrap().len(), 2);
         assert_eq!(network.allow_ports.unwrap().as_ref(), [22, 8443]);
         let secret_injection = network.secret_injection.unwrap();
+        assert_eq!(
+            secret_injection[0].paths.as_ref().unwrap().as_ref(),
+            ["/v1/models", "/v1/responses/*"]
+        );
         assert_eq!(secret_injection[0].methods.as_ref(), ["GET", "HEAD"]);
         assert!(secret_injection[0].header.is_none());
         assert!(secret_injection[0].placeholder.is_none());
@@ -752,6 +821,10 @@ mod tests {
         assert_eq!(
             policy.secret_injection[0].methods,
             [Method::GET, Method::HEAD]
+        );
+        assert_eq!(
+            policy.secret_injection[0].paths,
+            ["/v1/models", "/v1/responses/*"]
         );
 
         fs::write(&config, "[network]\nhost-ports = [3000, '5432:15432']\n").unwrap();
@@ -798,6 +871,51 @@ mod tests {
         assert!(NetworkPolicy::load(&config).is_err());
     }
 
+    /// Verifies omitted path restrictions admit every path while explicit
+    /// restrictions reject invalid lists and apply separator-aware glob
+    /// matching.
+    #[test]
+    fn secret_injection_requires_valid_path_globs() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let prefix = "[secrets.providers.project]\nkind = 'sops'\n\
+                      [network]\n[[network.secret-injection]]\nhost = 'api.example'\n\
+                      methods = ['GET']\nsecret = 'project.API_TOKEN'\n";
+
+        fs::write(&config, prefix).unwrap();
+        let policy = NetworkPolicy::load(&config).unwrap();
+        assert!(policy.secret_injection[0].matches_path("/any/nested/path"));
+
+        for paths in ["[]", "['mcp']", "['/mcp#fragment']", "['/mcp/[']", "['']"] {
+            fs::write(&config, format!("{prefix}paths = {paths}\n")).unwrap();
+            assert!(
+                NetworkPolicy::load(&config).is_err(),
+                "accepted invalid paths {paths}"
+            );
+        }
+
+        fs::write(
+            &config,
+            format!(
+                "{prefix}paths = ['/mcp', '/v1/*/logs', '/v2/**', \
+                 '/v3/{{events,logs}}/[0-9]?']\n"
+            ),
+        )
+        .unwrap();
+        let policy = NetworkPolicy::load(&config).unwrap();
+        let rule = &policy.secret_injection[0];
+        assert!(rule.matches_path("/mcp"));
+        assert!(!rule.matches_path("/mcp/"));
+        assert!(rule.matches_path("/v1/core1/logs"));
+        assert!(!rule.matches_path("/v1/team/core1/logs"));
+        assert!(rule.matches_path("/v2/team/core1/logs"));
+        assert!(!rule.matches_path("/v3/team/core1/logs"));
+        assert!(rule.matches_path("/v3/events/7a"));
+        assert!(rule.matches_path("/v3/logs/0z"));
+        assert!(!rule.matches_path("/v3/traces/7a"));
+        assert!(!rule.matches_path("/v3/logs/a7"));
+    }
+
     /// Verifies every host-enforced network setting is replaced for new flows
     /// while a previously acquired flow snapshot remains unchanged.
     #[tokio::test]
@@ -819,6 +937,7 @@ mod tests {
              deny-hosts = ['blocked.example']\nallow-ports = [8443]\n\
              http-ports = [8080]\nhttps-ports = [8443]\n\
              [[network.secret-injection]]\nhost = 'api.example'\nmethods = ['POST']\n\
+             paths = ['/mcp', '/events/**']\n\
              header = 'authorization'\nplaceholder = 'replace-me'\n\
              secret = 'project.API_TOKEN'\n",
         )
@@ -853,6 +972,7 @@ mod tests {
         assert_eq!(policy.https_ports, [8443]);
         assert_eq!(policy.secret_injection.len(), 1);
         assert_eq!(policy.secret_injection[0].methods, [Method::POST]);
+        assert_eq!(policy.secret_injection[0].paths, ["/mcp", "/events/**"]);
         assert_eq!(
             policy.secret_injection[0].header.as_deref(),
             Some("authorization")
