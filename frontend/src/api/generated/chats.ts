@@ -36,12 +36,32 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "chats": __sidex_types.builtins.Sequence<ChatSummary> };
 /**
+ * Returns attributed chat usage observed during one half-open time interval.
+ */
+ export type GetChatUsageReportAction = { /**
+                                            * Inclusive beginning of the report interval.
+                                            */
+                                                        "from": __schema_common.Timestamp, /**
+                                            * Exclusive end of the report interval.
+                                            */
+                                                        "until": __schema_common.Timestamp };
+/**
+ * Current attributed chat usage for the requested interval.
+ */
+ export type GetChatUsageReportOutput = { /**
+                                            * Complete usage report.
+                                            */
+                                                        "report": ChatUsageReport };
+/**
  * Creates a durable chat for one pod.
  */
  export type CreateChatAction = { /**
                                             * Pod in which the chat's harness runs.
                                             */
                                                         "podId": __schema_pods.PodId, /**
+                                            * Workspace-local cost center to which this chat's usage is attributed.
+                                            */
+                                                        "costCenterId"?: ChatCostCenterId, /**
                                             * Coding harness to associate durably with the chat.
                                             */
                                                         "harness": ChatHarnessKind, /**
@@ -78,6 +98,9 @@ import * as __schema_workspaces from "./workspaces";
  * and prompt execution continue asynchronously and are reported through their subscriptions.
  */
  export type CreatePodChatAction = { /**
+                                            * Workspace-local cost center to which this chat's usage is attributed.
+                                            */
+                                                        "costCenterId"?: ChatCostCenterId, /**
                                             * Coding harness to associate durably with the chat.
                                             */
                                                         "harness": ChatHarnessKind, /**
@@ -144,6 +167,20 @@ import * as __schema_workspaces from "./workspaces";
  * Successful result of archiving a chat.
  */
  export type ArchiveChatOutput = Record<string, never>;
+/**
+ * Reattributes all usage belonging to one active chat.
+ */
+ export type SetChatCostCenterAction = { /**
+                                            * Chat whose usage attribution should change.
+                                            */
+                                                        "chatId": ChatId, /**
+                                            * New workspace-local cost center, or none to leave the chat unassigned.
+                                            */
+                                                        "costCenterId"?: ChatCostCenterId };
+/**
+ * Successful result of changing a chat's cost center.
+ */
+ export type SetChatCostCenterOutput = Record<string, never>;
 /**
  * Clears the attention flag for a chat that the user has viewed.
  */
@@ -351,9 +388,30 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "harnesses": __sidex_types.builtins.Sequence<ChatHarness> };
 /**
+ * Subscribes to attributed chat usage for one half-open time interval.
+ */
+ export type ChatUsageReportSubscription = { /**
+                                            * Inclusive beginning of the report interval.
+                                            */
+                                                        "from": __schema_common.Timestamp, /**
+                                            * Exclusive end of the report interval.
+                                            */
+                                                        "until": __schema_common.Timestamp };
+/**
+ * Complete replacement emitted when the requested usage report changes.
+ */
+ export type ChatUsageReportEvent = { /**
+                                            * Current attributed usage for the subscribed interval.
+                                            */
+                                                        "report": ChatUsageReport };
+/**
  * A stable durable chat identifier.
  */
  export type ChatId = __sidex_types.Nominal<(string), "::tascarrel_api::chats::ChatId">;
+/**
+ * A stable workspace-local cost-center identifier.
+ */
+ export type ChatCostCenterId = __sidex_types.Nominal<__sidex_types.builtins.String, "::tascarrel_api::chats::ChatCostCenterId">;
 /**
  * Identifies one runtime binding attempt for a chat.
  */
@@ -551,6 +609,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Latest effective model selection, or the harness default when unknown.
                                             */
                                                         "model"?: ChatModelSelection, /**
+                                            * Workspace-local cost center to which all usage from this chat is attributed.
+                                            */
+                                                        "costCenterId"?: ChatCostCenterId, /**
                                             * User-facing title.
                                             */
                                                         "title": __sidex_types.builtins.String, /**
@@ -1082,6 +1143,57 @@ import * as __schema_workspaces from "./workspaces";
                                             * Stable identifier for the pricing inputs used in this calculation.
                                             */
                                                         "pricingCatalogVersion": __sidex_types.builtins.String };
+/**
+ * Attributed chat usage observed during one half-open time interval.
+ */
+ export type ChatUsageReport = { /**
+                                            * Inclusive beginning of the report interval.
+                                            */
+                                                        "from": __schema_common.Timestamp, /**
+                                            * Exclusive end of the report interval.
+                                            */
+                                                        "until": __schema_common.Timestamp, /**
+                                            * Usage across every cost center, including unassigned chats.
+                                            */
+                                                        "total": ChatUsageAggregate, /**
+                                            * Usage partitions ordered by cost-center identifier, with unassigned usage first.
+                                            */
+                                                        "costCenters": __sidex_types.builtins.Sequence<ChatCostCenterUsage> };
+/**
+ * Usage attributed to one cost center or to the unassigned partition.
+ */
+ export type ChatCostCenterUsage = { /**
+                                            * Assigned workspace-local cost center, or none for unassigned chats.
+                                            */
+                                                        "costCenterId"?: ChatCostCenterId, /**
+                                            * Usage attributed to this partition.
+                                            */
+                                                        "usage": ChatUsageAggregate };
+/**
+ * Aggregate usage counters and completeness metadata.
+ */
+ export type ChatUsageAggregate = { /**
+                                            * Inclusive token counters aggregated across the selected turns.
+                                            */
+                                                        "tokens": ChatTokenUsage, /**
+                                            * Locally calculated costs grouped by currency.
+                                            */
+                                                        "calculatedCosts": __sidex_types.builtins.Sequence<__schema_common.Money>, /**
+                                            * Number of distinct chats contributing usage.
+                                            */
+                                                        "chatCount": __sidex_types.builtins.U64, /**
+                                            * Number of turns contributing usage.
+                                            */
+                                                        "turnCount": __sidex_types.builtins.U64, /**
+                                            * Number of contributing turns with a locally calculated cost.
+                                            */
+                                                        "pricedTurnCount": __sidex_types.builtins.U64, /**
+                                            * Number of contributing turns whose latest usage remains provisional.
+                                            */
+                                                        "provisionalTurnCount": __sidex_types.builtins.U64, /**
+                                            * Number of contributing turns whose usage covers only the primary agent.
+                                            */
+                                                        "primaryAgentTurnCount": __sidex_types.builtins.U64 };
 /**
  * One entry in a chat's authoritative timeline.
  */

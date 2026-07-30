@@ -10,6 +10,7 @@ export type ChatComposerDraft = {
 export type ChatCreatorDraft = {
   title: string;
   harnessKey?: string;
+  costCenterKey?: string;
 };
 
 export function loadChatComposerDraft(draftId: string): ChatComposerDraft | undefined {
@@ -59,6 +60,9 @@ export function loadChatCreatorDraft(draftId: string): ChatCreatorDraft | undefi
     return {
       title: value.title,
       ...(typeof value.harnessKey === "string" ? { harnessKey: value.harnessKey } : {}),
+      ...(typeof value.costCenterKey === "string"
+        ? { costCenterKey: value.costCenterKey }
+        : {}),
     };
   } catch {
     return undefined;

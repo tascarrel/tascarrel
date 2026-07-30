@@ -698,7 +698,10 @@ mod tests {
             .unwrap();
         let initial = subscription.recv().await.unwrap();
         assert!(initial.settings.is_none());
-        let settings = api::WorkspaceSettings { chat: None };
+        let settings = api::WorkspaceSettings {
+            chat: None,
+            usage: None,
+        };
 
         let reread = service.read(&workspace_name).await.unwrap();
         assert_eq!(reread.config_instance_id, initial.config_instance_id);

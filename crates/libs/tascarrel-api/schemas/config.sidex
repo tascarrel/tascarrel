@@ -12,7 +12,7 @@
 //! times when opened and whenever they change.
 
 import common::Timestamp
-import chats::{ChatHarnessKind, ChatModel, ChatModelPricing, ChatModelSelection}
+import chats::{ChatCostCenterId, ChatHarnessKind, ChatModel, ChatModelPricing, ChatModelSelection}
 import network::PortMapping
 import workspaces::WorkspaceName
 
@@ -144,6 +144,24 @@ record ServerAuthenticationConfig {
 record WorkspaceSettings {
     /// Chat interface preferences.
     chat?: WorkspaceChatSettings,
+    /// Workspace-local usage attribution settings.
+    usage?: WorkspaceUsageSettings,
+}
+
+/// Cost centers available for workspace chat usage attribution.
+record WorkspaceUsageSettings {
+    /// Cost center selected initially for new chats, when configured.
+    default_cost_center?: ChatCostCenterId,
+    /// Cost centers keyed by their stable workspace-local identifier.
+    cost_centers?: [string: WorkspaceCostCenter],
+}
+
+/// One workspace-local cost center used to attribute chat usage.
+record WorkspaceCostCenter {
+    /// Human-readable cost-center name.
+    name: string,
+    /// Whether the cost center remains visible only for historical assignments.
+    archived?: bool,
 }
 
 /// Portable preferences for the workspace chat interface.

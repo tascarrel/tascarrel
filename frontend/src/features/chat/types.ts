@@ -15,6 +15,7 @@ export type AttachmentUrlResolver = (attachmentId: chats.ChatAttachmentId) => st
 
 export type StartChatSubmission = {
   harness: chats.ChatHarnessKind;
+  costCenterId?: chats.ChatCostCenterId;
   title?: string;
   model?: chats.ChatModelSelection;
   prompt: chats.ChatPrompt;
@@ -27,6 +28,7 @@ export type ChatScreenActions = {
   attach: () => Promise<void>;
   detach: () => Promise<void>;
   archive: () => Promise<void>;
+  setCostCenter: (costCenterId?: chats.ChatCostCenterId) => Promise<void>;
   flushPromptQueue: () => Promise<void>;
   removeQueuedPrompt: (queuedPromptId: chats.ChatQueuedPromptId) => Promise<void>;
   resolveRequest: (
@@ -40,6 +42,7 @@ export type ChatScreenProps = {
   replica?: ChatReplica;
   harness?: chats.ChatHarness;
   modelPreferences?: config.WorkspaceChatModelPreferences;
+  usageSettings?: config.WorkspaceUsageSettings;
   slashCommands?: config.WorkspaceChatConfig["commands"];
   status: ChatConnectionStatus;
   actions: ChatScreenActions;

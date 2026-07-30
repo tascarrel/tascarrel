@@ -1,21 +1,26 @@
 //! `SQLite` storage used by the durable state layer.
 
+use jiff::Timestamp;
 use reportify::Report;
 use reportify::ResultExt as _;
 use tascarrel_api::ids::ChatId;
 use tascarrel_api::types::chats::ChatAgentStatus;
+use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatHarnessKind;
 use tascarrel_api::types::chats::ChatModelSelection;
 use tascarrel_api::types::chats::ChatPromptAttachment;
 use tascarrel_api::types::chats::ChatSummary;
 use tascarrel_api::types::chats::ChatTimelineEntry;
 use tascarrel_api::types::chats::ChatTurn;
+use tascarrel_api::types::chats::ChatUsageReport;
 use tokio_rusqlite::Connection;
 use tokio_rusqlite::rusqlite;
 use tokio_rusqlite::rusqlite::OptionalExtension as _;
 
 use crate::services::chats::harness::protocol::ResumeCursor;
 use crate::services::chats::state::protocol::HarnessResumption;
+use crate::services::chats::state::usage;
+use crate::services::chats::state::usage::UsageRecord;
 
 reportify::new_whatever_type! {
     /// Failure while accessing chat state in SQLite.
@@ -23,6 +28,7 @@ reportify::new_whatever_type! {
 }
 
 /// Serialized access to the state layer's `SQLite` database.
+#[derive(Clone)]
 pub struct Storage {
     database: Connection,
 }
@@ -47,9 +53,10 @@ impl Storage {
                     .execute(
                         "INSERT INTO chats (
                              chat_id, pod_id, title, harness_jsonb, model_jsonb,
-                             resume_cursor_jsonb, archived, attention_required, created_at, updated_at
+                             resume_cursor_jsonb, archived, attention_required, cost_center_id,
+                             created_at, updated_at
                          ) VALUES (
-                             ?1, ?2, ?3, jsonb(?4), jsonb(?5), NULL, 0, ?6, ?7, ?8
+                             ?1, ?2, ?3, jsonb(?4), jsonb(?5), NULL, 0, ?6, ?7, ?8, ?9
                          )",
                         (
                             summary.chat_id.0.as_ref(),
@@ -58,6 +65,10 @@ impl Storage {
                             harness,
                             model,
                             summary.attention_required,
+                            summary
+                                .cost_center_id
+                                .as_ref()
+                                .map(ChatCostCenterId::as_str),
                             summary.created_at.to_string(),
                             summary.updated_at.to_string(),
                         ),
@@ -178,6 +189,57 @@ impl Storage {
             .whatever("unable to access the SQLite connection")?
             .message("unable to load harness resumption data")
             .field("chat_id", diagnostic_chat_id)
+    }
+
+    /// Aggregates durable chat usage observed during one half-open interval.
+    pub async fn usage_report(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> Result<ChatUsageReport, Report<StorageError>> {
+        self.database
+            .call_raw(move |database| -> Result<_, Report<StorageError>> {
+                let mut statement = database
+                    .prepare(
+                        "SELECT chats.chat_id, chats.cost_center_id, json(chat_turns.turn_jsonb)
+                         FROM chat_turns
+                         JOIN chats USING (chat_id)
+                         ORDER BY chats.cost_center_id, chats.chat_id, chat_turns.turn_index",
+                    )
+                    .whatever("unable to prepare the durable chat-usage query")?;
+                let rows = statement
+                    .query_map([], |row| {
+                        let chat_id = parse_id(row.get_ref(0)?.as_str()?)?;
+                        let cost_center_id = row
+                            .get::<_, Option<String>>(1)?
+                            .map(|value| parse_id::<ChatCostCenterId>(&value))
+                            .transpose()?;
+                        let turn = parse_json::<ChatTurn>(row.get_ref(2)?.as_str()?)?;
+                        Ok((chat_id, cost_center_id, turn))
+                    })
+                    .whatever("unable to query durable chat usage")?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (chat_id, cost_center_id, turn) =
+                        row.whatever("unable to decode durable chat usage")?;
+                    let Some(usage) = turn.usage else {
+                        continue;
+                    };
+                    if usage.observed_at < from || usage.observed_at >= until {
+                        continue;
+                    }
+                    records.push(UsageRecord {
+                        chat_id,
+                        cost_center_id,
+                        usage,
+                    });
+                }
+                usage::build_report(from, until, records)
+                    .whatever("unable to aggregate durable chat usage")
+            })
+            .await
+            .whatever("unable to access the SQLite connection")?
+            .message("unable to load durable chat usage")
     }
 
     /// Stores one compacted durable state change.
@@ -327,7 +389,7 @@ fn load_chat_summaries(
     let mut statement = database
         .prepare(
             "SELECT chat_id, pod_id, title, json(harness_jsonb), json(model_jsonb),
-                    attention_required, created_at, updated_at
+                    attention_required, cost_center_id, created_at, updated_at
              FROM chats
              WHERE archived = 0
              ORDER BY updated_at DESC, chat_id",
@@ -344,8 +406,12 @@ fn load_chat_summaries(
                 .map(|value| parse_json::<ChatModelSelection>(&value))
                 .transpose()?;
             let attention_required = row.get(5)?;
-            let created_at = parse_timestamp(row.get_ref(6)?.as_str()?)?;
-            let updated_at = parse_timestamp(row.get_ref(7)?.as_str()?)?;
+            let cost_center_id = row
+                .get::<_, Option<String>>(6)?
+                .map(|value| parse_id::<ChatCostCenterId>(&value))
+                .transpose()?;
+            let created_at = parse_timestamp(row.get_ref(7)?.as_str()?)?;
+            let updated_at = parse_timestamp(row.get_ref(8)?.as_str()?)?;
             Ok(ChatSummary {
                 chat_id,
                 pod_id,
@@ -355,6 +421,7 @@ fn load_chat_summaries(
                 attention_required,
                 harness,
                 model,
+                cost_center_id,
                 title,
                 created_at,
                 updated_at,
@@ -509,7 +576,8 @@ fn store_summary(
                  harness_jsonb = jsonb(?4),
                  model_jsonb = jsonb(?5),
                  attention_required = ?6,
-                 updated_at = ?7
+                 cost_center_id = ?7,
+                 updated_at = ?8
              WHERE chat_id = ?1",
             (
                 summary.chat_id.0.as_ref(),
@@ -518,6 +586,10 @@ fn store_summary(
                 harness,
                 model,
                 summary.attention_required,
+                summary
+                    .cost_center_id
+                    .as_ref()
+                    .map(ChatCostCenterId::as_str),
                 summary.updated_at.to_string(),
             ),
         )
@@ -680,14 +752,28 @@ fn json_error(error: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use jiff::Timestamp;
+    use tascarrel_api::ArcVec;
+    use tascarrel_api::ids::ChatBindingId;
     use tascarrel_api::ids::ChatId;
+    use tascarrel_api::ids::ChatTurnId;
     use tascarrel_api::types::chats::ChatAgentStatus;
+    use tascarrel_api::types::chats::ChatCalculatedCost;
+    use tascarrel_api::types::chats::ChatCostCenterId;
     use tascarrel_api::types::chats::ChatHarnessKind;
     use tascarrel_api::types::chats::ChatSummary;
+    use tascarrel_api::types::chats::ChatTokenUsage;
+    use tascarrel_api::types::chats::ChatTurn;
+    use tascarrel_api::types::chats::ChatTurnState;
+    use tascarrel_api::types::chats::ChatTurnUsage;
+    use tascarrel_api::types::chats::ChatUsageCoverage;
+    use tascarrel_api::types::chats::ChatUsageSnapshot;
+    use tascarrel_api::types::chats::ChatUsageState;
+    use tascarrel_api::types::common::Money;
     use tascarrel_api::types::pods::PodId;
 
     use super::DurableUpdate;
     use super::Storage;
+    use super::StoredTurn;
     use crate::Database;
     use crate::services::chats::harness::protocol::ResumeCursor;
 
@@ -712,6 +798,7 @@ mod tests {
                 attention_required: false,
                 harness: ChatHarnessKind::Codex,
                 model: None,
+                cost_center_id: None,
                 title: "Opaque cursor".into(),
                 created_at: now,
                 updated_at: now,
@@ -735,5 +822,101 @@ mod tests {
 
         let resumption = storage.load_resumption(&chat_id).await.unwrap().unwrap();
         assert_eq!(resumption.resume_cursor, Some(cursor));
+    }
+
+    /// Confirms that interval reports read attributed turn usage from the
+    /// durable database and continue to include archived chats.
+    #[tokio::test]
+    async fn usage_report_includes_archived_chats() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = Database::open(temporary.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let storage = Storage::open(database.connection().clone());
+        let chat_id = ChatId::generate();
+        let observed_at = timestamp("2026-07-15T12:00:00Z");
+        storage
+            .create_chat(ChatSummary {
+                chat_id: chat_id.clone(),
+                pod_id: PodId::generate(),
+                binding: None,
+                last_binding_error: None,
+                agent_status: ChatAgentStatus::Idle,
+                attention_required: false,
+                harness: ChatHarnessKind::Codex,
+                model: None,
+                cost_center_id: Some(ChatCostCenterId::new("client_alpha")),
+                title: "Attributed usage".into(),
+                created_at: observed_at,
+                updated_at: observed_at,
+            })
+            .await
+            .unwrap();
+        storage
+            .store_update(DurableUpdate {
+                chat_id: Some(chat_id.clone()),
+                turns: vec![StoredTurn {
+                    chat_id: chat_id.clone(),
+                    turn_index: 0,
+                    turn: ChatTurn {
+                        turn_id: ChatTurnId::generate(),
+                        binding_id: ChatBindingId::generate(),
+                        state: ChatTurnState::Completed,
+                        started_at: Some(observed_at),
+                        completed_at: Some(observed_at),
+                        error: None,
+                        usage: Some(ChatTurnUsage {
+                            state: ChatUsageState::Settled,
+                            observed_at,
+                            snapshot: ChatUsageSnapshot {
+                                coverage: ChatUsageCoverage::ExecutionTree,
+                                tokens: ChatTokenUsage {
+                                    input_tokens: 120,
+                                    output_tokens: 30,
+                                    cache_read_input_tokens: Some(20),
+                                    cache_write_input_tokens: Some(0),
+                                    cache_writes_by_ttl: ArcVec::new(),
+                                    reasoning_output_tokens: Some(5),
+                                },
+                                models: ArcVec::new(),
+                                provider_estimated_cost: None,
+                            },
+                            calculated_cost: Some(ChatCalculatedCost {
+                                amount: Money {
+                                    currency: "USD".into(),
+                                    amount: 4,
+                                },
+                                pricing_catalog_version: "test".into(),
+                            }),
+                        }),
+                    },
+                }],
+                ..DurableUpdate::default()
+            })
+            .await
+            .unwrap();
+        assert!(storage.archive_chat(&chat_id).await.unwrap());
+
+        let report = storage
+            .usage_report(
+                timestamp("2026-07-01T00:00:00Z"),
+                timestamp("2026-08-01T00:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.total.tokens.input_tokens, 120);
+        assert_eq!(report.total.turn_count, 1);
+        assert_eq!(
+            report.cost_centers[0]
+                .cost_center_id
+                .as_ref()
+                .map(ChatCostCenterId::as_str),
+            Some("client_alpha")
+        );
+    }
+
+    fn timestamp(value: &str) -> Timestamp {
+        value.parse().unwrap()
     }
 }

@@ -49,6 +49,8 @@ use tascarrel_api::types::chats::DetachChatBindingAction;
 use tascarrel_api::types::chats::DetachChatBindingOutput;
 use tascarrel_api::types::chats::FlushChatPromptQueueAction;
 use tascarrel_api::types::chats::FlushChatPromptQueueOutput;
+use tascarrel_api::types::chats::GetChatUsageReportAction;
+use tascarrel_api::types::chats::GetChatUsageReportOutput;
 use tascarrel_api::types::chats::GetPodChatsOutput;
 use tascarrel_api::types::chats::InterruptChatAction;
 use tascarrel_api::types::chats::InterruptChatOutput;
@@ -58,6 +60,8 @@ use tascarrel_api::types::chats::ResolveChatRequestAction;
 use tascarrel_api::types::chats::ResolveChatRequestOutput;
 use tascarrel_api::types::chats::SendChatPromptAction;
 use tascarrel_api::types::chats::SendChatPromptOutput;
+use tascarrel_api::types::chats::SetChatCostCenterAction;
+use tascarrel_api::types::chats::SetChatCostCenterOutput;
 use tascarrel_api::types::pods::PodId;
 use tascarrel_protocol::MAX_CHAT_ATTACHMENT_BYTES;
 use tokio::fs::File;
@@ -85,6 +89,7 @@ use crate::services::chats::harness::protocol::HarnessPromptAttachment;
 use crate::services::chats::state::ChatListStoreSubscription;
 use crate::services::chats::state::ChatState;
 use crate::services::chats::state::ChatStoreSubscription;
+use crate::services::chats::state::UsageReportSubscription;
 use crate::services::chats::state::protocol::ChatStateError;
 use crate::services::chats::state::protocol::CreateChatRequest;
 use crate::services::chats::state::protocol::IngestHarnessEventRequest;
@@ -193,6 +198,25 @@ impl ChatEngine {
         })
     }
 
+    /// Returns attributed durable chat usage for one half-open interval.
+    pub(crate) fn get_usage_report(
+        &self,
+        action: &GetChatUsageReportAction,
+    ) -> BoxFuture<'_, Result<GetChatUsageReportOutput, ChatEngineError>> {
+        let from = action.from;
+        let until = action.until;
+        Box::pin(async move {
+            self.inner.ensure_running()?;
+            let report = self
+                .inner
+                .state
+                .usage_report(from, until)
+                .await
+                .map_err(state_api_error)?;
+            Ok(GetChatUsageReportOutput { report })
+        })
+    }
+
     /// Creates a durable chat and queues its initial prompt while attaching
     /// when provided.
     pub fn create_chat(
@@ -284,6 +308,7 @@ impl ChatEngine {
                 .create_chat(CreateChatRequest {
                     title: initial_title.clone(),
                     pod_id: action.pod_id,
+                    cost_center_id: action.cost_center_id,
                     harness: action.harness,
                     model: action.model,
                 })
@@ -365,6 +390,22 @@ impl ChatEngine {
             self.inner.ensure_running()?;
             self.inner.archive_chat(action.chat_id).await?;
             Ok(ArchiveChatOutput {})
+        })
+    }
+
+    /// Reattributes every turn belonging to one active chat.
+    pub fn set_cost_center(
+        &self,
+        action: SetChatCostCenterAction,
+    ) -> BoxFuture<'_, Result<SetChatCostCenterOutput, ChatEngineError>> {
+        Box::pin(async move {
+            self.inner.ensure_running()?;
+            self.inner
+                .state
+                .set_cost_center(action.chat_id, action.cost_center_id)
+                .await
+                .map_err(state_api_error)?;
+            Ok(SetChatCostCenterOutput {})
         })
     }
 
@@ -503,6 +544,19 @@ impl ChatEngine {
         self.inner
             .state
             .subscribe_chats(subscription)
+            .map_err(state_api_error)
+    }
+
+    /// Subscribes to attributed durable usage for one half-open interval.
+    pub fn subscribe_usage_report(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> Result<UsageReportSubscription, ChatEngineError> {
+        self.inner.ensure_running()?;
+        self.inner
+            .state
+            .subscribe_usage_report(from, until)
             .map_err(state_api_error)
     }
 

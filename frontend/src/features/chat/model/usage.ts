@@ -94,7 +94,7 @@ function presentUsage(turns: chats.ChatTurn[]): UsagePresentation | undefined {
   };
 }
 
-function formatMoney(currency: string, amount: bigint): string {
+export function formatMoney(currency: string, amount: bigint): string {
   try {
     const formatter = new Intl.NumberFormat(undefined, {
       style: "currency",
@@ -107,13 +107,13 @@ function formatMoney(currency: string, amount: bigint): string {
   }
 }
 
-function formatCompactNumber(value: bigint): string {
+export function formatCompactNumber(value: bigint): string {
   return new Intl.NumberFormat(undefined, {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(value);
 }
 
-function formatNumber(value: bigint): string {
+export function formatNumber(value: bigint): string {
   return new Intl.NumberFormat().format(value);
 }

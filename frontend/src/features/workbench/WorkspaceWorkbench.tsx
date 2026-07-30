@@ -574,6 +574,7 @@ export function WorkspaceWorkbench({
             modelPreferences={selectedHarness
               ? chatModelPreferences(settings, selectedHarness.kind)
               : undefined}
+            usageSettings={settings?.usage}
             slashCommands={slashCommands}
             attachmentUploader={uploadAttachment}
             attachmentUrl={attachmentUrl}
@@ -1010,6 +1011,7 @@ function SelectedChat({
   summary,
   harness,
   modelPreferences,
+  usageSettings,
   slashCommands,
   attachmentUploader,
   attachmentUrl,
@@ -1019,6 +1021,7 @@ function SelectedChat({
   summary: chats.ChatSummary;
   harness?: chats.ChatHarness;
   modelPreferences?: config.WorkspaceChatModelPreferences;
+  usageSettings?: config.WorkspaceUsageSettings;
   slashCommands?: config.WorkspaceChatConfig["commands"];
   attachmentUploader: (file: File) => Promise<chats.ChatPromptAttachment>;
   attachmentUrl: (attachmentId: chats.ChatAttachmentId) => string;
@@ -1033,6 +1036,7 @@ function SelectedChat({
       replica={chatState.value}
       harness={harness}
       modelPreferences={modelPreferences}
+      usageSettings={usageSettings}
       slashCommands={slashCommands}
       attachmentUploader={attachmentUploader}
       attachmentUrl={attachmentUrl}
@@ -1090,6 +1094,7 @@ function createChat(
     podId,
     harness: submission.harness,
     ...(submission.title ? { title: submission.title } : {}),
+    ...(submission.costCenterId ? { costCenterId: submission.costCenterId } : {}),
     ...(submission.model ? { model: submission.model } : {}),
     initialPrompt: submission.prompt,
     autoAttach: true,
@@ -1110,6 +1115,7 @@ function createPodChat(
   return guestApi(workspace).execute("chats_CreatePodChat", {
     harness: submission.harness,
     ...(submission.title ? { title: submission.title } : {}),
+    ...(submission.costCenterId ? { costCenterId: submission.costCenterId } : {}),
     ...(submission.model ? { model: submission.model } : {}),
     initialPrompt: submission.prompt,
   });
@@ -1146,6 +1152,12 @@ function chatActions(workspace: workspaces.WorkspaceName, chatId: chats.ChatId) 
     },
     archive: async () => {
       await api.execute("chats_Archive", { chatId });
+    },
+    setCostCenter: async (costCenterId?: chats.ChatCostCenterId) => {
+      await api.execute("chats_SetCostCenter", {
+        chatId,
+        ...(costCenterId ? { costCenterId } : {}),
+      });
     },
     flushPromptQueue: async () => {
       await api.execute("chats_FlushPromptQueue", { chatId });

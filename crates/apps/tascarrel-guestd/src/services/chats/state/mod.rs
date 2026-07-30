@@ -25,6 +25,7 @@ use tascarrel_api::ids::ChatId;
 use tascarrel_api::ids::ChatItemId;
 use tascarrel_api::ids::ChatRequestId;
 use tascarrel_api::ids::ChatTurnId;
+use tascarrel_api::is_valid_chat_cost_center_id;
 use tascarrel_api::types::chats;
 use tascarrel_api::types::chats::Chat;
 use tascarrel_api::types::chats::ChatActivity;
@@ -33,6 +34,7 @@ use tascarrel_api::types::chats::ChatAgentStatus;
 use tascarrel_api::types::chats::ChatBinding;
 use tascarrel_api::types::chats::ChatBindingError;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatItem;
 use tascarrel_api::types::chats::ChatItemCompleted;
 use tascarrel_api::types::chats::ChatItemState;
@@ -51,6 +53,7 @@ use tascarrel_api::types::chats::ChatTimelineEntry;
 use tascarrel_api::types::chats::ChatTurn;
 use tascarrel_api::types::chats::ChatTurnState;
 use tascarrel_api::types::chats::ChatTurnUsage;
+use tascarrel_api::types::chats::ChatUsageReport;
 use tascarrel_api::types::chats::ChatUsageState;
 use tascarrel_api::types::chats::TextContent;
 use tokio::sync::Mutex as AsyncMutex;
@@ -77,9 +80,11 @@ mod cost;
 mod layer;
 pub mod protocol;
 mod storage;
+mod usage;
 
 pub(crate) use layer::ChatListStoreSubscription;
 pub(crate) use layer::ChatStoreSubscription;
+pub(crate) use usage::UsageReportSubscription;
 
 /// Durable chat state consumed by the binding-aware engine.
 pub struct ChatState {
@@ -193,6 +198,32 @@ impl ChatState {
         })
     }
 
+    /// Returns attributed durable usage for one half-open interval.
+    pub fn usage_report(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> BoxFuture<'_, Result<ChatUsageReport, ChatStateError>> {
+        let layer = Arc::clone(&self.layer);
+        Box::pin(async move {
+            validate_usage_interval(from, until)?;
+            layer
+                .usage_report(from, until)
+                .await
+                .map_err(state_layer_error)
+        })
+    }
+
+    /// Subscribes to attributed durable usage for one half-open interval.
+    pub fn subscribe_usage_report(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> Result<UsageReportSubscription, ChatStateError> {
+        validate_usage_interval(from, until)?;
+        Ok(self.layer.subscribe_usage_report(from, until))
+    }
+
     /// Creates a chat durably associated with one harness implementation.
     pub fn create_chat(
         &self,
@@ -200,6 +231,7 @@ impl ChatState {
     ) -> BoxFuture<'_, Result<CreateChatResult, ChatStateError>> {
         Box::pin(async move {
             let _guard = self.operations.lock().await;
+            validate_cost_center_id(request.cost_center_id.as_ref())?;
             let chat_id = ChatId::generate();
             let now = Timestamp::now();
             let summary = ChatSummary {
@@ -211,6 +243,7 @@ impl ChatState {
                 attention_required: false,
                 harness: request.harness,
                 model: request.model,
+                cost_center_id: request.cost_center_id,
                 title: request.title.into(),
                 created_at: now,
                 updated_at: now,
@@ -220,6 +253,24 @@ impl ChatState {
                 .await
                 .map_err(state_layer_error)?;
             Ok(CreateChatResult { chat_id })
+        })
+    }
+
+    /// Reattributes every turn belonging to one active chat.
+    pub fn set_cost_center(
+        &self,
+        chat_id: ChatId,
+        cost_center_id: Option<ChatCostCenterId>,
+    ) -> BoxFuture<'_, Result<(), ChatStateError>> {
+        Box::pin(async move {
+            let _guard = self.operations.lock().await;
+            validate_cost_center_id(cost_center_id.as_ref())?;
+            let mut summary = self.summary(&chat_id).await?;
+            if summary.cost_center_id == cost_center_id {
+                return Ok(());
+            }
+            summary.cost_center_id = cost_center_id;
+            self.apply_summary(summary).await
         })
     }
 
@@ -796,6 +847,28 @@ fn summary_update(summary: ChatSummary) -> StateUpdate {
     }
 }
 
+fn validate_usage_interval(from: Timestamp, until: Timestamp) -> Result<(), ChatStateError> {
+    if from >= until {
+        return Err(invalid_input(
+            "usage report end must be later than its beginning",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cost_center_id(
+    cost_center_id: Option<&ChatCostCenterId>,
+) -> Result<(), ChatStateError> {
+    if cost_center_id
+        .is_some_and(|cost_center_id| !is_valid_chat_cost_center_id(cost_center_id.as_str()))
+    {
+        return Err(invalid_input(
+            "cost-center identifier must contain 1-64 ASCII letters, digits, hyphens, or underscores",
+        ));
+    }
+    Ok(())
+}
+
 fn agent_status(snapshot: &Chat) -> ChatAgentStatus {
     let Some(binding_id) = snapshot
         .summary
@@ -1005,6 +1078,7 @@ mod tests {
             .create_chat(CreateChatRequest {
                 title: "Attention test".into(),
                 pod_id: PodId::generate(),
+                cost_center_id: None,
                 harness: ChatHarnessKind::Codex,
                 model: None,
             })

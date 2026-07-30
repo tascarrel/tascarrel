@@ -33,10 +33,26 @@ record GetPodChatsOutput {
     chats: [ChatSummary],
 }
 
+/// Returns attributed chat usage observed during one half-open time interval.
+record GetChatUsageReportAction {
+    /// Inclusive beginning of the report interval.
+    from: Timestamp,
+    /// Exclusive end of the report interval.
+    until: Timestamp,
+}
+
+/// Current attributed chat usage for the requested interval.
+record GetChatUsageReportOutput {
+    /// Complete usage report.
+    report: ChatUsageReport,
+}
+
 /// Creates a durable chat for one pod.
 record CreateChatAction {
     /// Pod in which the chat's harness runs.
     pod_id: PodId,
+    /// Workspace-local cost center to which this chat's usage is attributed.
+    cost_center_id?: ChatCostCenterId,
     /// Coding harness to associate durably with the chat.
     harness: ChatHarnessKind,
     /// Explicit initial user-facing title.
@@ -67,6 +83,8 @@ record CreateChatOutput {
 /// The action returns after both resources are observable. Pod preparation, harness attachment,
 /// and prompt execution continue asynchronously and are reported through their subscriptions.
 record CreatePodChatAction {
+    /// Workspace-local cost center to which this chat's usage is attributed.
+    cost_center_id?: ChatCostCenterId,
     /// Coding harness to associate durably with the chat.
     harness: ChatHarnessKind,
     /// Explicit initial user-facing title shared by the pod and chat.
@@ -122,6 +140,17 @@ record ArchiveChatAction {
 
 /// Successful result of archiving a chat.
 record ArchiveChatOutput {}
+
+/// Reattributes all usage belonging to one active chat.
+record SetChatCostCenterAction {
+    /// Chat whose usage attribution should change.
+    chat_id: ChatId,
+    /// New workspace-local cost center, or none to leave the chat unassigned.
+    cost_center_id?: ChatCostCenterId,
+}
+
+/// Successful result of changing a chat's cost center.
+record SetChatCostCenterOutput {}
 
 /// Clears the attention flag for a chat that the user has viewed.
 record AcknowledgeChatAttentionAction {
@@ -297,12 +326,30 @@ record ChatHarnessListEvent {
     harnesses: [ChatHarness],
 }
 
+/// Subscribes to attributed chat usage for one half-open time interval.
+record ChatUsageReportSubscription {
+    /// Inclusive beginning of the report interval.
+    from: Timestamp,
+    /// Exclusive end of the report interval.
+    until: Timestamp,
+}
+
+/// Complete replacement emitted when the requested usage report changes.
+record ChatUsageReportEvent {
+    /// Current attributed usage for the subscribed interval.
+    report: ChatUsageReport,
+}
+
 // Domain Types
 
 /// A stable durable chat identifier.
 #[json(type = "string")]
 #[rust(type = "crate::ids::ChatId")]
 opaque ChatId
+
+/// A stable workspace-local cost-center identifier.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper ChatCostCenterId: string
 
 /// Identifies one runtime binding attempt for a chat.
 #[json(type = "string")]
@@ -510,6 +557,8 @@ record ChatSummary {
     harness: ChatHarnessKind,
     /// Latest effective model selection, or the harness default when unknown.
     model?: ChatModelSelection,
+    /// Workspace-local cost center to which all usage from this chat is attributed.
+    cost_center_id?: ChatCostCenterId,
     /// User-facing title.
     title: string,
     /// Time at which the chat was created.
@@ -1029,6 +1078,44 @@ record ChatCalculatedCost {
     amount: Money,
     /// Stable identifier for the pricing inputs used in this calculation.
     pricing_catalog_version: string,
+}
+
+/// Attributed chat usage observed during one half-open time interval.
+record ChatUsageReport {
+    /// Inclusive beginning of the report interval.
+    from: Timestamp,
+    /// Exclusive end of the report interval.
+    until: Timestamp,
+    /// Usage across every cost center, including unassigned chats.
+    total: ChatUsageAggregate,
+    /// Usage partitions ordered by cost-center identifier, with unassigned usage first.
+    cost_centers: [ChatCostCenterUsage],
+}
+
+/// Usage attributed to one cost center or to the unassigned partition.
+record ChatCostCenterUsage {
+    /// Assigned workspace-local cost center, or none for unassigned chats.
+    cost_center_id?: ChatCostCenterId,
+    /// Usage attributed to this partition.
+    usage: ChatUsageAggregate,
+}
+
+/// Aggregate usage counters and completeness metadata.
+record ChatUsageAggregate {
+    /// Inclusive token counters aggregated across the selected turns.
+    tokens: ChatTokenUsage,
+    /// Locally calculated costs grouped by currency.
+    calculated_costs: [Money],
+    /// Number of distinct chats contributing usage.
+    chat_count: u64,
+    /// Number of turns contributing usage.
+    turn_count: u64,
+    /// Number of contributing turns with a locally calculated cost.
+    priced_turn_count: u64,
+    /// Number of contributing turns whose latest usage remains provisional.
+    provisional_turn_count: u64,
+    /// Number of contributing turns whose usage covers only the primary agent.
+    primary_agent_turn_count: u64,
 }
 
 /// One entry in a chat's authoritative timeline.

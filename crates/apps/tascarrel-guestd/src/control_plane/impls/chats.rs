@@ -20,6 +20,7 @@ use crate::services::chats::ChatEngineError;
 use crate::services::chats::ChatListStoreSubscription;
 use crate::services::chats::HarnessListSubscription;
 use crate::services::chats::HarnessManagerError;
+use crate::services::chats::UsageReportSubscription;
 use crate::services::pods::PodServiceError;
 
 macro_rules! chat_permissions {
@@ -62,6 +63,24 @@ impl ExecuteAction for api::GetPodChatsAction {
             .chats()
             .engine()
             .get_pod_chats(self.pod_id)
+            .await
+            .map_err(chat_error)
+    }
+}
+
+#[async_trait]
+impl ExecuteAction for api::GetChatUsageReportAction {
+    chat_permissions!();
+
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        context
+            .state()
+            .chats()
+            .engine()
+            .get_usage_report(&self)
             .await
             .map_err(chat_error)
     }
@@ -147,6 +166,7 @@ impl ExecuteAction for api::CreatePodChatAction {
             .create_pod_chat(
                 api::CreateChatAction {
                     pod_id: pod.pod_id.clone(),
+                    cost_center_id: self.cost_center_id,
                     harness: self.harness,
                     title: self.title,
                     model: self.model,
@@ -163,6 +183,24 @@ impl ExecuteAction for api::CreatePodChatAction {
             pod_id: pod.pod_id,
             chat_id: chat.chat_id,
         })
+    }
+}
+
+#[async_trait]
+impl ExecuteAction for api::SetChatCostCenterAction {
+    chat_permissions!();
+
+    async fn execute(
+        self,
+        context: InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        context
+            .state()
+            .chats()
+            .engine()
+            .set_cost_center(self)
+            .await
+            .map_err(chat_error)
     }
 }
 
@@ -490,6 +528,41 @@ impl EventSource for HarnessListSubscription {
         Ok(HarnessListSubscription::recv(self)
             .await
             .map(|harnesses| api::ChatHarnessListEvent { harnesses }))
+    }
+}
+
+#[async_trait]
+impl OpenSubscription for api::ChatUsageReportSubscription {
+    chat_subscription_permissions!();
+
+    type Source = UsageReportSubscription;
+
+    async fn open(
+        self,
+        context: SubscriptionCtx<'_>,
+    ) -> Result<Self::Source, Report<wire::OperationError>> {
+        context
+            .state()
+            .chats()
+            .engine()
+            .subscribe_usage_report(self.from, self.until)
+            .map_err(chat_error)
+    }
+}
+
+#[async_trait]
+impl EventSource for UsageReportSubscription {
+    type Event = api::ChatUsageReportEvent;
+
+    async fn recv(&mut self) -> Result<Option<Self::Event>, Report<wire::OperationError>> {
+        UsageReportSubscription::recv(self)
+            .await
+            .map(|report| report.map(|report| api::ChatUsageReportEvent { report }))
+            .map_err(|report| {
+                report.escalate(wire::OperationError::Internal(operation_error_details(
+                    "failed to load chat usage report",
+                )))
+            })
     }
 }
 

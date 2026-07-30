@@ -11,6 +11,7 @@ use hyper::header::HeaderName;
 use hyper::header::HeaderValue;
 use reportify::ErrorExt as _;
 use reportify::Report;
+use tascarrel_api::is_valid_chat_cost_center_id;
 use tascarrel_api::types::config as api;
 use thiserror::Error;
 
@@ -23,6 +24,7 @@ use thiserror::Error;
 pub(crate) fn validate(
     settings: &api::WorkspaceSettings,
 ) -> Result<(), Report<SettingsValidationError>> {
+    validate_usage_settings(settings.usage.as_ref())?;
     let Some(tasci) = settings.chat.as_ref().and_then(|chat| chat.tasci.as_ref()) else {
         return Ok(());
     };
@@ -106,6 +108,14 @@ pub(crate) fn validate(
 /// Value-safe semantic settings failures.
 #[derive(Clone, Copy, Debug, Error)]
 pub(crate) enum SettingsValidationError {
+    #[error(
+        "cost-center identifiers must contain 1-64 ASCII letters, digits, hyphens, or underscores"
+    )]
+    InvalidCostCenterId,
+    #[error("cost-center names must contain non-whitespace text")]
+    InvalidCostCenterName,
+    #[error("the default cost center must reference an active configured cost center")]
+    InvalidDefaultCostCenter,
     #[error("Tasci endpoint aliases must not be empty or contain surrounding whitespace")]
     InvalidEndpointAlias,
     #[error("Tasci endpoint display names must not be empty when specified")]
@@ -160,6 +170,35 @@ pub(crate) enum SettingsValidationError {
     InvalidMcpHeaderName,
     #[error("Tasci MCP header values are not valid HTTP header text")]
     InvalidMcpHeaderValue,
+}
+
+/// Validates cost-center identifiers, names, and the configured default.
+fn validate_usage_settings(
+    usage: Option<&api::WorkspaceUsageSettings>,
+) -> Result<(), Report<SettingsValidationError>> {
+    let Some(usage) = usage else {
+        return Ok(());
+    };
+    if let Some(cost_centers) = &usage.cost_centers {
+        for (id, cost_center) in cost_centers {
+            if !is_valid_chat_cost_center_id(id) {
+                return Err(SettingsValidationError::InvalidCostCenterId.report());
+            }
+            if cost_center.name.trim().is_empty() {
+                return Err(SettingsValidationError::InvalidCostCenterName.report());
+            }
+        }
+    }
+    if let Some(default) = &usage.default_cost_center
+        && !usage.cost_centers.as_ref().is_some_and(|cost_centers| {
+            cost_centers
+                .get(default.as_str())
+                .is_some_and(|cost_center| cost_center.archived != Some(true))
+        })
+    {
+        return Err(SettingsValidationError::InvalidDefaultCostCenter.report());
+    }
+    Ok(())
 }
 
 /// Validates a stable map key without constraining its portable character set.
@@ -316,4 +355,32 @@ fn valid_secret_name(name: &str) -> bool {
             .next()
             .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tests {
+    use tascarrel_api::types::chats::ChatCostCenterId;
+
+    use super::*;
+
+    /// Confirms that archived cost centers remain historical-only and cannot
+    /// become the default for new chats.
+    #[test]
+    fn rejects_archived_usage_default() {
+        let settings = api::WorkspaceSettings {
+            chat: None,
+            usage: Some(api::WorkspaceUsageSettings {
+                default_cost_center: Some(ChatCostCenterId::new("internal")),
+                cost_centers: Some(HashMap::from([(
+                    "internal".into(),
+                    api::WorkspaceCostCenter {
+                        name: "Internal".into(),
+                        archived: Some(true),
+                    },
+                )])),
+            }),
+        };
+
+        assert!(validate(&settings).is_err());
+    }
 }

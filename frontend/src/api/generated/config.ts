@@ -171,7 +171,30 @@ import * as __schema_workspaces from "./workspaces";
  export type WorkspaceSettings = { /**
                                             * Chat interface preferences.
                                             */
-                                                        "chat"?: WorkspaceChatSettings };
+                                                        "chat"?: WorkspaceChatSettings, /**
+                                            * Workspace-local usage attribution settings.
+                                            */
+                                                        "usage"?: WorkspaceUsageSettings };
+/**
+ * Cost centers available for workspace chat usage attribution.
+ */
+ export type WorkspaceUsageSettings = { /**
+                                            * Cost center selected initially for new chats, when configured.
+                                            */
+                                                        "defaultCostCenter"?: __schema_chats.ChatCostCenterId, /**
+                                            * Cost centers keyed by their stable workspace-local identifier.
+                                            */
+                                                        "costCenters"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceCostCenter> };
+/**
+ * One workspace-local cost center used to attribute chat usage.
+ */
+ export type WorkspaceCostCenter = { /**
+                                            * Human-readable cost-center name.
+                                            */
+                                                        "name": __sidex_types.builtins.String, /**
+                                            * Whether the cost center remains visible only for historical assignments.
+                                            */
+                                                        "archived"?: __sidex_types.builtins.Bool };
 /**
  * Portable preferences for the workspace chat interface.
  */

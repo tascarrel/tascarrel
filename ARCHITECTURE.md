@@ -350,8 +350,15 @@ separate workspace-level subvolumes mounted into every pod in that workspace.
 Destroying a pod removes its private subvolumes without modifying the image or
 other pods.
 
-Pod, image, and chat records live in a SQLite database in the guest. On
-startup, `guestd` compares those durable records with Btrfs and any leftover
+Pod, image, and chat records live in a SQLite database in the guest. Chat
+records include their current workspace-local cost-center assignment and the
+latest absolute token-usage and calculated-cost snapshot for each turn.
+`guestd` computes interval usage reports from those durable records, including
+archived chats; changing a chat assignment therefore reattributes its whole
+recorded history. Cost-center declarations and display names remain portable
+host-owned `settings.json` preferences.
+
+On startup, `guestd` compares durable records with Btrfs and any leftover
 `runc` state. Previously running pods become stopped records instead of being
 assumed to contain live processes.
 

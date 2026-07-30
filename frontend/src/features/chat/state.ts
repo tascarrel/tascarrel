@@ -1,5 +1,5 @@
 import { guestApi } from "../../api/client.ts";
-import type { chats, store, workspaces } from "../../api/generated/index.ts";
+import type { chats, common, store, workspaces } from "../../api/generated/index.ts";
 import type { BackendStateDefinition } from "../../shared/state/BackendStateCache.ts";
 import { useBackendState } from "../../shared/state/StateCacheProvider.tsx";
 import { applyStoreEvent } from "../../shared/state/storeEvents.ts";
@@ -20,6 +20,14 @@ export function useChatHarnesses(workspace: workspaces.WorkspaceName) {
 
 export function useChat(workspace: workspaces.WorkspaceName, chatId: chats.ChatId) {
   return useBackendState(chatDefinition(workspace, chatId));
+}
+
+export function useChatUsageReport(
+  workspace: workspaces.WorkspaceName,
+  from: common.Timestamp,
+  until: common.Timestamp,
+) {
+  return useBackendState(chatUsageReportDefinition(workspace, from, until));
 }
 
 function chatListDefinition(
@@ -107,6 +115,27 @@ function chatDefinition(
         cursor: event.stamp,
       };
     },
+  };
+}
+
+function chatUsageReportDefinition(
+  workspace: workspaces.WorkspaceName,
+  from: common.Timestamp,
+  until: common.Timestamp,
+): BackendStateDefinition<chats.ChatUsageReport, chats.ChatUsageReportEvent, never> {
+  return {
+    key: `guest/${workspace}/chat-usage/${from}/${until}`,
+    retention: "lru",
+    connect: (_cursor, handlers) => guestApi(workspace).subscribe(
+      "chats_UsageReport",
+      { from, until },
+      {
+        onEvent: handlers.onEvent,
+        onState: handlers.onConnection,
+        onError: handlers.onError,
+      },
+    ),
+    applyEvent: (_current, event) => ({ value: event.report }),
   };
 }
 

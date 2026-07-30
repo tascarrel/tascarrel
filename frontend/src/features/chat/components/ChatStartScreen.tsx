@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { chats, config } from "../../../api/generated/index.ts";
 import { Button } from "../../../components/ui/Button.tsx";
+import { SelectControl } from "../../../components/ui/SelectControl.tsx";
 import {
   loadChatComposerDraft,
   loadChatCreatorDraft,
@@ -18,6 +19,8 @@ import type {
   StartChatSubmission,
 } from "../types.ts";
 import { ChatComposer } from "./ChatComposer.tsx";
+
+const UNASSIGNED_COST_CENTER = ":unassigned";
 
 export function ChatStartScreen({
   draftId,
@@ -48,6 +51,9 @@ export function ChatStartScreen({
   const composerDraftId = `creator:${draftId}`;
   const [restoredDraft] = useState(() => loadChatCreatorDraft(draftId));
   const [harnessKey, setHarnessKey] = useState<string | undefined>(restoredDraft?.harnessKey);
+  const [costCenterKey, setCostCenterKey] = useState<string | undefined>(
+    restoredDraft?.costCenterKey,
+  );
   const [title, setTitle] = useState(restoredDraft?.title ?? "");
   const [promptEmpty, setPromptEmpty] = useState(() => {
     const composerDraft = loadChatComposerDraft(composerDraftId);
@@ -66,6 +72,23 @@ export function ChatStartScreen({
     ) ?? authenticatedHarnesses[0],
     [authenticatedHarnesses, harnessKey, settings?.chat?.defaultHarness],
   );
+  const activeCostCenters = useMemo(
+    () => Object.entries(settings?.usage?.costCenters ?? {})
+      .filter((entry): entry is [string, config.WorkspaceCostCenter] =>
+        entry[1] !== undefined && entry[1].archived !== true
+      )
+      .sort((left, right) => left[1].name.localeCompare(right[1].name)),
+    [settings?.usage?.costCenters],
+  );
+  const selectedCostCenter = activeCostCenters.some(([id]) => id === costCenterKey)
+    ? costCenterKey as chats.ChatCostCenterId
+    : undefined;
+  const effectiveCostCenter: chats.ChatCostCenterId | undefined =
+    costCenterKey === undefined
+      ? settings?.usage?.defaultCostCenter
+      : costCenterKey === UNASSIGNED_COST_CENTER || costCenterKey === ""
+        ? undefined
+        : selectedCostCenter ?? settings?.usage?.defaultCostCenter;
 
   useEffect(() => {
     if (harness && harnessKindKey(harness.kind) !== harnessKey) {
@@ -74,8 +97,12 @@ export function ChatStartScreen({
   }, [harness, harnessKey]);
 
   useEffect(() => {
-    storeChatCreatorDraft(draftId, { title, ...(harnessKey ? { harnessKey } : {}) });
-  }, [draftId, harnessKey, title]);
+    storeChatCreatorDraft(draftId, {
+      title,
+      ...(harnessKey ? { harnessKey } : {}),
+      ...(costCenterKey !== undefined ? { costCenterKey } : {}),
+    });
+  }, [costCenterKey, draftId, harnessKey, title]);
 
   const createWithoutChat = async () => {
     const explicitTitle = title.trim();
@@ -112,7 +139,7 @@ export function ChatStartScreen({
             </p>
           </div>
 
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 px-1">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-3 px-1">
             <div className="flex flex-wrap gap-2" role="group" aria-label="Harness">
               {authenticatedHarnesses.map((candidate) => {
                 const key = harnessKindKey(candidate.kind);
@@ -139,6 +166,22 @@ export function ChatStartScreen({
                 </span>
               ) : null}
             </div>
+            {activeCostCenters.length ? (
+              <SelectControl
+                className="w-48"
+                label="Cost center"
+                value={effectiveCostCenter ?? UNASSIGNED_COST_CENTER}
+                options={[
+                  { value: UNASSIGNED_COST_CENTER, label: "Unassigned" },
+                  ...activeCostCenters.map(([id, costCenter]) => ({
+                    value: id,
+                    label: costCenter.name,
+                  })),
+                ]}
+                disabled={Boolean(startingTarget)}
+                onChange={setCostCenterKey}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -172,6 +215,9 @@ export function ChatStartScreen({
               try {
                 await onStart({
                   harness: harness.kind,
+                  ...(effectiveCostCenter
+                    ? { costCenterId: effectiveCostCenter }
+                    : {}),
                   ...(explicitTitle ? { title: explicitTitle } : {}),
                   ...(prompt.model ? { model: prompt.model } : {}),
                   prompt,

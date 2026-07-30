@@ -6,8 +6,12 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 
-import type { chats } from "../../../api/generated/index.ts";
+import type { chats, config } from "../../../api/generated/index.ts";
 import { Button } from "../../../components/ui/Button.tsx";
+import {
+  SelectControl,
+  type SelectControlOption,
+} from "../../../components/ui/SelectControl.tsx";
 import type { ChatScreenProps } from "../types.ts";
 import { chatTimeline, chatTurns } from "../model/replicas.ts";
 import { ChatComposer } from "./ChatComposer.tsx";
@@ -19,6 +23,7 @@ export function ChatScreen({
   replica,
   harness,
   modelPreferences,
+  usageSettings,
   slashCommands,
   actions,
   attachmentUploader,
@@ -141,11 +146,73 @@ export function ChatScreen({
               : undefined}
           >
             {queuedPrompts}
+            <ChatCostCenterControl
+              summary={summary}
+              usageSettings={usageSettings}
+              disabled={Boolean(busy)}
+              onChange={(costCenterId) =>
+                void run("cost-center", () => actions.setCostCenter(costCenterId))
+              }
+            />
             <ChatStatusBar summary={summary} replica={replica} runningTurn={runningTurn} />
             {composer}
           </ComposerFooter>
         </div>
       </section>
+    </div>
+  );
+}
+
+const UNASSIGNED_COST_CENTER = ":unassigned";
+
+function ChatCostCenterControl({
+  summary,
+  usageSettings,
+  disabled,
+  onChange,
+}: {
+  summary: chats.ChatSummary;
+  usageSettings?: config.WorkspaceUsageSettings;
+  disabled: boolean;
+  onChange: (costCenterId?: chats.ChatCostCenterId) => void;
+}) {
+  const options: SelectControlOption[] = Object.entries(usageSettings?.costCenters ?? {})
+    .filter((entry): entry is [string, config.WorkspaceCostCenter] =>
+      entry[1] !== undefined && entry[1].archived !== true
+    )
+    .map(([id, costCenter]) => ({ value: id, label: costCenter.name }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+  if (
+    summary.costCenterId
+    && !options.some((option) => option.value === summary.costCenterId)
+  ) {
+    const configured = usageSettings?.costCenters?.[summary.costCenterId];
+    options.push({
+      value: summary.costCenterId,
+      label: configured?.name ?? summary.costCenterId,
+      badge: { label: configured?.archived === true ? "Archived" : "Unconfigured" },
+    });
+  }
+  if (!options.length && !summary.costCenterId) return null;
+
+  return (
+    <div className="flex justify-end px-3.5 pt-2">
+      <SelectControl
+        className="w-48"
+        hideLabel
+        label="Chat cost center"
+        value={summary.costCenterId ?? UNASSIGNED_COST_CENTER}
+        options={[
+          { value: UNASSIGNED_COST_CENTER, label: "Unassigned" },
+          ...options,
+        ]}
+        disabled={disabled}
+        onChange={(value) => onChange(
+          value === UNASSIGNED_COST_CENTER
+            ? undefined
+            : value as chats.ChatCostCenterId,
+        )}
+      />
     </div>
   );
 }

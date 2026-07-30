@@ -2,6 +2,7 @@
 
 use tascarrel_api::ids::ChatBindingId;
 use tascarrel_api::ids::ChatId;
+use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatHarnessKind;
 use tascarrel_api::types::chats::ChatModelSelection;
 use tascarrel_api::types::pods::PodId;
@@ -16,6 +17,8 @@ pub struct CreateChatRequest {
     pub title: String,
     /// Pod in which the chat's harness runs.
     pub pod_id: PodId,
+    /// Workspace-local cost center receiving this chat's usage.
+    pub cost_center_id: Option<ChatCostCenterId>,
     /// Harness implementation durably associated with the chat.
     pub harness: ChatHarnessKind,
     /// Initial model selection, or the harness default.

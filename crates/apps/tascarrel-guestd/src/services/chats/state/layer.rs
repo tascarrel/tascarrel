@@ -21,9 +21,11 @@ use tascarrel_api::types::chats::ChatListMutation;
 use tascarrel_api::types::chats::ChatMutation;
 use tascarrel_api::types::chats::ChatSummary;
 use tascarrel_api::types::chats::ChatTimelineEntry;
+use tascarrel_api::types::chats::ChatUsageReport;
 use tascarrel_store::Stamp;
 use tascarrel_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::watch;
 
 use crate::services::chats::harness::protocol::ResumeCursor;
 use crate::services::chats::state::protocol::HarnessResumption;
@@ -34,6 +36,7 @@ use crate::services::chats::state::storage::StoredChat;
 use crate::services::chats::state::storage::StoredChatCheckpoint;
 use crate::services::chats::state::storage::StoredTimelineEntry;
 use crate::services::chats::state::storage::StoredTurn;
+use crate::services::chats::state::usage::UsageReportSubscription;
 
 type ChatListStore = Store<ChatList, ChatListMutation>;
 type ChatStore = Store<Chat, ChatMutation>;
@@ -51,6 +54,7 @@ pub struct StateLayer {
     chats: Mutex<HashMap<ChatId, ChatSlot>>,
     update_lock: AsyncMutex<()>,
     history_limit: NonZeroUsize,
+    usage_changes: watch::Sender<u64>,
 }
 
 impl StateLayer {
@@ -88,12 +92,14 @@ impl StateLayer {
             reduce_chat_list,
             history_limit,
         );
+        let (usage_changes, _) = watch::channel(0);
         Ok(Self {
             storage,
             list,
             chats: Mutex::new(chats),
             update_lock: AsyncMutex::new(()),
             history_limit,
+            usage_changes,
         })
     }
 
@@ -180,6 +186,12 @@ impl StateLayer {
                 &next_chat,
             )
             .escalate(StateLayerError::Reconciliation)?;
+            let usage_changed = durable.turns.iter().any(|turn| turn.turn.usage.is_some())
+                || matches!(
+                    &chat_update.payload,
+                    ChatMutation::UpdateSummary(summary)
+                        if summary.cost_center_id != current_chat.summary.cost_center_id
+                );
             self.storage
                 .store_update(durable)
                 .await
@@ -189,6 +201,11 @@ impl StateLayer {
                 && let Some(slot) = lock(&self.chats).get_mut(&chat_update.chat_id)
             {
                 slot.summary = summary.clone();
+            }
+            if usage_changed {
+                self.usage_changes.send_modify(|revision| {
+                    *revision = revision.wrapping_add(1);
+                });
             }
         }
 
@@ -262,6 +279,32 @@ impl StateLayer {
     /// Subscribes to the workspace chat-list reducer store.
     pub fn subscribe_chats(&self, after: Option<Stamp>) -> ChatListStoreSubscription {
         self.list.subscribe(after)
+    }
+
+    /// Returns attributed durable usage for one half-open interval.
+    pub async fn usage_report(
+        &self,
+        from: jiff::Timestamp,
+        until: jiff::Timestamp,
+    ) -> Result<ChatUsageReport, Report<StateLayerError>> {
+        self.storage
+            .usage_report(from, until)
+            .await
+            .escalate(StateLayerError::Storage)
+    }
+
+    /// Subscribes to attributed usage for one half-open interval.
+    pub fn subscribe_usage_report(
+        &self,
+        from: jiff::Timestamp,
+        until: jiff::Timestamp,
+    ) -> UsageReportSubscription {
+        UsageReportSubscription::new(
+            self.storage.clone(),
+            from,
+            until,
+            self.usage_changes.subscribe(),
+        )
     }
 
     /// Subscribes to one chat's reducer store.
@@ -824,6 +867,7 @@ mod tests {
                 attention_required: false,
                 harness: ChatHarnessKind::Codex,
                 model: None,
+                cost_center_id: None,
                 title: "Durability test".into(),
                 created_at: now,
                 updated_at: now,

@@ -38,6 +38,7 @@ pub(crate) use manager::HarnessManagerError;
 pub(crate) use state::ChatListStoreSubscription;
 use state::ChatState;
 pub(crate) use state::ChatStoreSubscription;
+pub(crate) use state::UsageReportSubscription;
 pub(crate) use title::fallback_title;
 
 /// Workspace chat feature composed from durable state and harness management.
