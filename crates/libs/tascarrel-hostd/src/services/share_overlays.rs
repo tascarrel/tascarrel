@@ -645,7 +645,8 @@ fn current_entry(
             kind,
             size: u64::try_from(stat.st_size)
                 .map_err(|_| invalid("host share entry has a negative size"))?,
-            mode: stat.st_mode & 0o7777,
+            mode: u32::try_from(u64::from(stat.st_mode & 0o7777))
+                .map_err(|_| internal("host share mode does not fit the protocol mode type"))?,
             content_digest: digest,
         },
         modified_seconds: stat.st_mtime,
@@ -878,7 +879,8 @@ fn write_directory(
         .as_ref()
         .ok_or_else(|| internal("missing proposed ShareFS directory"))?;
     let (parent, name) = open_parent(root, &change.components)?;
-    match rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(proposed.version.mode)) {
+    let mode = host_mode(proposed.version.mode)?;
+    match rustix::fs::mkdirat(&parent, name, mode) {
         Ok(()) | Err(rustix::io::Errno::EXIST) => {}
         Err(error) => return Err(io_error("create approved host share directory", error)),
     }
@@ -889,7 +891,7 @@ fn write_directory(
         Mode::empty(),
     )
     .map_err(|error| io_error("open approved host share directory", error))?;
-    rustix::fs::fchmod(&directory, Mode::from_raw_mode(proposed.version.mode))
+    rustix::fs::fchmod(&directory, mode)
         .map_err(|error| io_error("set approved host share directory mode", error))
 }
 
@@ -903,6 +905,7 @@ fn write_file(
         .as_deref()
         .ok_or_else(|| internal("missing approved file contents"))?;
     let (parent, name) = open_parent(root, &change.components)?;
+    let mode = host_mode(proposed.version.mode)?;
     let temporary = OsString::from(format!(".tascarrel-sharefs-{}", uuid::Uuid::new_v4()));
     let fd = rustix::fs::openat(
         &parent,
@@ -915,7 +918,7 @@ fn write_file(
     let result = (|| {
         file.write_all(contents)
             .map_err(|error| internal(format!("write approved host share file: {error}")))?;
-        rustix::fs::fchmod(file.as_fd(), Mode::from_raw_mode(proposed.version.mode))
+        rustix::fs::fchmod(file.as_fd(), mode)
             .map_err(|error| io_error("set approved host share file mode", error))?;
         file.sync_all()
             .map_err(|error| internal(format!("sync approved host share file: {error}")))?;
@@ -1073,6 +1076,13 @@ fn entry_kind(stat: &Stat) -> Result<ShareOverlayEntryKind, Report<ShareOverlayS
     } else {
         Err(invalid("host share contains an unsupported entry type"))
     }
+}
+
+/// Converts a validated protocol mode to the host platform's raw mode type.
+fn host_mode(mode: u32) -> Result<Mode, Report<ShareOverlayServiceError>> {
+    let mode = rustix::fs::RawMode::try_from(mode)
+        .map_err(|_| internal("validated ShareFS mode does not fit the host mode type"))?;
+    Ok(Mode::from_raw_mode(mode))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
