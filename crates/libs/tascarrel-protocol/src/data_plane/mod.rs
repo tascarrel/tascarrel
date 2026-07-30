@@ -24,6 +24,7 @@ pub use errors::RemoteError;
 pub use files::MUX_WORKSPACE_FILE_READ_ENDPOINT;
 pub use files::WorkspaceFileReadRequest;
 pub use files::WorkspaceFileReadResponse;
+pub use host_operations::AUTOMATION_HOST_OPERATION_MARKER_PREFIX;
 pub use host_operations::HostOperationInputRequest;
 pub use host_operations::HostOperationInputResponse;
 pub use host_operations::MAX_HOST_OPERATION_INPUT_BYTES;

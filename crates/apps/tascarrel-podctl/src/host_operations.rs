@@ -13,6 +13,7 @@ use std::time::Duration;
 use reportify::ErrorExt as _;
 use reportify::ResultExt as _;
 use tascarrel_api::types::host_operations as api;
+use tascarrel_protocol::AUTOMATION_HOST_OPERATION_MARKER_PREFIX;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::HostOperationInputResponse;
 use tascarrel_protocol::MUX_POD_HOST_OPERATION_INPUT_ENDPOINT;
@@ -40,6 +41,7 @@ pub(crate) async fn run(
     client: &PodClient,
     command: String,
     parameters: Vec<String>,
+    automation_report_id: Option<String>,
 ) -> PodctlResult<()> {
     let parameters = parse_parameters(parameters)?;
     let requested = client
@@ -49,6 +51,12 @@ pub(crate) async fn run(
             parameters,
         })
         .await?;
+    if let Some(nonce) = automation_report_id {
+        eprintln!(
+            "{AUTOMATION_HOST_OPERATION_MARKER_PREFIX}{nonce}::{}",
+            requested.operation_id.0
+        );
+    }
     for input in requested.inputs {
         let operation_id = requested.operation_id.clone();
         let input_name = input.name.clone();

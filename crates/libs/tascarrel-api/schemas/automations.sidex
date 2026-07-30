@@ -1,0 +1,400 @@
+//! Host-owned, durable workspace automation workflows.
+//!
+//! Workflow definitions are loaded from `automations/*.yaml` in the workspace
+//! configuration directory. Each execution owns one dedicated pod and runs its
+//! steps sequentially. The host daemon retains execution state and output
+//! independently of the workspace VM.
+
+import chats::{ChatHarnessKind, ChatId, ChatModelSelection, ChatTurnId}
+import common::Timestamp
+import host_operations::HostOperationId
+import pods::PodId
+import processes::{ProcessId, ProcessLogSource}
+import protocol::Actor
+import workspaces::WorkspaceName
+
+// RPC
+
+/// Starts one manual execution from the current validated definition.
+record StartAutomationAction {
+    /// Workspace containing the automation definition.
+    workspace: WorkspaceName,
+    /// Stable automation identifier derived from the definition filename.
+    automation_id: string,
+}
+
+/// Identifier assigned to the admitted execution.
+record StartAutomationOutput {
+    /// Newly admitted durable execution.
+    execution_id: AutomationExecutionId,
+}
+
+/// Requests cancellation of a queued, waiting, or running execution.
+record CancelAutomationExecutionAction {
+    /// Execution to cancel.
+    execution_id: AutomationExecutionId,
+}
+
+/// Acknowledges that cancellation was durably requested.
+record CancelAutomationExecutionOutput {}
+
+/// Resolves the human gate at the current approval step.
+record ResolveAutomationApprovalAction {
+    /// Execution waiting at the approval step.
+    execution_id: AutomationExecutionId,
+    /// Decision to apply.
+    decision: AutomationApprovalDecision,
+}
+
+/// Acknowledges that the approval decision was durably recorded.
+record ResolveAutomationApprovalOutput {}
+
+// Subscriptions
+
+/// Subscribes to validated automation definitions for one workspace.
+record AutomationCatalogSubscription {
+    /// Workspace whose definitions to observe.
+    workspace: WorkspaceName,
+}
+
+/// Complete catalog replacement emitted when definitions or errors change.
+record AutomationCatalogEvent {
+    /// Current validated catalog.
+    value: AutomationCatalog,
+}
+
+/// Subscribes to durable automation executions visible to the caller.
+record AutomationExecutionListSubscription {
+    /// Restricts executions to one workspace when supplied.
+    workspace?: WorkspaceName,
+    /// Last complete-list revision already observed.
+    cursor?: AutomationRevision,
+}
+
+/// Complete execution list emitted whenever its revision changes.
+record AutomationExecutionListEvent {
+    /// Revision derived from the complete emitted list.
+    revision: AutomationRevision,
+    /// Executions ordered from newest to oldest.
+    value: AutomationExecutionList,
+}
+
+/// Replays and follows permanent, sanitized output for one execution.
+record AutomationOutputSubscription {
+    /// Execution whose output to observe.
+    execution_id: AutomationExecutionId,
+    /// Last sequence already observed, or absent to replay from the beginning.
+    after_sequence?: u64,
+}
+
+/// One output update or replay/live boundary.
+record AutomationOutputEvent {
+    /// Output stream update.
+    update: AutomationOutputUpdate,
+}
+
+// Domain Types
+
+/// Identifies one durable automation execution.
+#[json(type = "string")]
+#[rust(type = "crate::ids::AutomationExecutionId")]
+opaque AutomationExecutionId
+
+/// SHA-256 revision derived from one complete automation snapshot.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper AutomationRevision: string
+
+/// Current automation definitions and independent file errors.
+record AutomationCatalog {
+    /// Valid definitions ordered by stable identifier.
+    automations: [AutomationDefinition],
+    /// Invalid files which were excluded from the catalog.
+    errors: [AutomationConfigurationError],
+}
+
+/// One invalid automation definition.
+record AutomationConfigurationError {
+    /// Path relative to the workspace configuration directory.
+    path: string,
+    /// Safe parsing or validation diagnostic.
+    message: string,
+}
+
+/// One immutable validated workflow definition.
+record AutomationDefinition {
+    /// Stable identifier derived from the YAML filename.
+    id: string,
+    /// Human-readable workflow name.
+    name: string,
+    /// Optional longer purpose.
+    description?: string,
+    /// Events which may admit executions.
+    triggers: [AutomationTrigger],
+    /// Default coding-harness selection for agent steps.
+    agent_defaults?: AutomationAgentSelection,
+    /// Maximum simultaneous executions of this definition.
+    max_concurrent: u32,
+    /// Overall execution time limit in seconds.
+    timeout_seconds?: u64,
+    /// Sequential workflow steps.
+    steps: [AutomationStepDefinition],
+}
+
+/// Event which may start an automation.
+#[json(tag = "type")]
+variant AutomationTrigger {
+    /// Allows an authenticated human to start the automation.
+    Manual,
+    /// Starts the automation according to a UTC cron expression.
+    Schedule: AutomationScheduleTrigger,
+}
+
+/// One UTC cron schedule.
+record AutomationScheduleTrigger {
+    /// Five-field cron expression evaluated in UTC.
+    cron: string,
+}
+
+/// Harness and model selected for an agent step.
+record AutomationAgentSelection {
+    /// Coding harness used for the Automation-owned chat.
+    harness: ChatHarnessKind,
+    /// Explicit provider model and options, or the harness default when absent.
+    model?: ChatModelSelection,
+}
+
+/// One step in a sequential workflow.
+record AutomationStepDefinition {
+    /// Stable identifier unique within the workflow.
+    id: string,
+    /// Human-readable step name.
+    name: string,
+    /// Whether execution continues when this step fails.
+    continue_on_error: bool,
+    /// Operation performed by this step.
+    kind: AutomationStepKind,
+}
+
+/// Operations supported by the first workflow version.
+#[json(tag = "type")]
+variant AutomationStepKind {
+    /// Runs a shell command inside the execution pod.
+    Command: AutomationCommandStep,
+    /// Runs one turn through an existing coding harness and chat.
+    Agent: AutomationAgentStep,
+    /// Invokes a configured approval-gated host command from the execution pod.
+    HostCommand: AutomationHostCommandStep,
+    /// Pauses until a human approves or rejects the execution.
+    Approval: AutomationApprovalStep,
+}
+
+/// Shell command executed in the Automation pod.
+record AutomationCommandStep {
+    /// Shell source passed to `bash -lc`.
+    run: string,
+    /// Working directory, or the pod's configured workspace directory when absent.
+    working_directory?: string,
+    /// Non-secret environment values added for this step.
+    environment: [string: string],
+}
+
+/// Coding-harness turn executed in the Automation-owned chat.
+record AutomationAgentStep {
+    /// User prompt supplied to the coding harness.
+    prompt: string,
+    /// Step-specific harness and model override.
+    selection?: AutomationAgentSelection,
+}
+
+/// Configured host command requested through `podctl`.
+record AutomationHostCommandStep {
+    /// Trusted host-command name from `config.toml`.
+    command: string,
+    /// Declared host-command parameter values.
+    parameters: [string: string],
+}
+
+/// Human gate owned durably by hostd.
+record AutomationApprovalStep {
+    /// Decision requested from an approver.
+    prompt: string,
+}
+
+/// Complete durable execution inventory.
+record AutomationExecutionList {
+    /// Executions ordered from newest to oldest.
+    executions: [AutomationExecution],
+}
+
+/// One immutable workflow snapshot and its current lifecycle state.
+record AutomationExecution {
+    /// Stable execution identifier.
+    id: AutomationExecutionId,
+    /// Workspace containing the captured workflow.
+    workspace: WorkspaceName,
+    /// Definition identifier selected at admission.
+    automation_id: string,
+    /// Complete definition captured when admitted.
+    definition: AutomationDefinition,
+    /// Actor or scheduler which caused this execution.
+    trigger: AutomationExecutionTrigger,
+    /// Authenticated actor which requested a manual execution, when applicable.
+    requested_by?: Actor,
+    /// Time at which hostd admitted the execution.
+    created_at: Timestamp,
+    /// Time at which step execution began.
+    started_at?: Timestamp,
+    /// Time at which the execution reached a terminal state.
+    finished_at?: Timestamp,
+    /// Current execution lifecycle state.
+    state: AutomationExecutionState,
+    /// Dedicated execution pod, once created.
+    pod_id?: PodId,
+    /// Automation-owned chat shared by agent steps, once created.
+    chat_id?: ChatId,
+    /// Step states in definition order.
+    steps: [AutomationStepExecution],
+    /// Human-readable terminal or interruption diagnostic.
+    error?: string,
+}
+
+/// Cause of one execution.
+#[json(tag = "type")]
+variant AutomationExecutionTrigger {
+    /// Started through the manual action.
+    Manual,
+    /// Started by one cron occurrence.
+    Schedule: AutomationScheduledExecution,
+}
+
+/// One deduplicated scheduled occurrence.
+record AutomationScheduledExecution {
+    /// Cron expression which matched.
+    cron: string,
+    /// UTC minute used as the occurrence identity.
+    scheduled_for: Timestamp,
+}
+
+/// Current lifecycle of an automation execution.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant AutomationExecutionState {
+    /// Admitted and waiting for concurrency capacity.
+    Queued,
+    /// The dedicated pod is being prepared or a step is running.
+    Running,
+    /// The current approval step requires a human decision.
+    WaitingForApproval,
+    /// The current agent turn requires structured human input in its chat.
+    WaitingForInput,
+    /// Every required step completed successfully.
+    Succeeded,
+    /// A required step failed.
+    Failed,
+    /// Cancellation completed before successful execution.
+    Canceled,
+    /// Hostd restarted while a non-reconcilable side effect was active.
+    Interrupted,
+}
+
+/// Current execution state for one captured step.
+record AutomationStepExecution {
+    /// Captured step definition.
+    definition: AutomationStepDefinition,
+    /// Current step lifecycle.
+    state: AutomationStepState,
+    /// Time at which this step began.
+    started_at?: Timestamp,
+    /// Time at which this step reached a terminal state.
+    finished_at?: Timestamp,
+    /// Supervised pod process used by command and host-command steps.
+    process_id?: ProcessId,
+    /// Harness turn used by an agent step.
+    turn_id?: ChatTurnId,
+    /// Host operation discovered from the trusted pod helper.
+    host_operation_id?: HostOperationId,
+    /// Durable decision and actor for an approval step, once resolved.
+    approval_resolution?: AutomationApprovalResolution,
+    /// Human-readable failure diagnostic.
+    error?: string,
+}
+
+/// Current lifecycle of one step.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant AutomationStepState {
+    /// No work has begun.
+    Pending,
+    /// The step is currently executing.
+    Running,
+    /// The approval step requires a human decision.
+    WaitingForApproval,
+    /// The agent step requires structured human input in its chat.
+    WaitingForInput,
+    /// The step completed successfully.
+    Succeeded,
+    /// The step failed.
+    Failed,
+    /// The step did not run because an earlier step terminated execution.
+    Skipped,
+    /// The step was canceled.
+    Canceled,
+}
+
+/// Human decision for an approval step.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant AutomationApprovalDecision {
+    /// Allows execution to continue.
+    Approve,
+    /// Rejects the step and fails the execution.
+    Reject,
+}
+
+/// Auditable resolution of one human approval step.
+record AutomationApprovalResolution {
+    /// Decision applied to the gate.
+    decision: AutomationApprovalDecision,
+    /// Authenticated actor which resolved the gate.
+    resolved_by: Actor,
+    /// Time at which hostd durably recorded the decision.
+    resolved_at: Timestamp,
+}
+
+/// One permanently retained Automation output line.
+record AutomationOutputLine {
+    /// Monotonic execution-wide sequence starting at one.
+    sequence: u64,
+    /// Step which emitted the line, when applicable.
+    step_id?: string,
+    /// Original process output stream, or Automation for host-owned messages.
+    source: AutomationOutputSource,
+    /// Sanitized line content without a line terminator.
+    content: string,
+    /// Time at which hostd retained the line.
+    observed_at: Timestamp,
+}
+
+/// Source of one retained output line.
+#[json(tag = "type")]
+variant AutomationOutputSource {
+    /// Host-owned lifecycle message.
+    Automation,
+    /// Output forwarded from a supervised pod process.
+    Process: ProcessLogSource,
+}
+
+/// Replayable Automation output stream update.
+#[json(tag = "type")]
+variant AutomationOutputUpdate {
+    /// One retained line.
+    Line: AutomationOutputLine,
+    /// Marks the replay/live boundary captured when the subscription opened.
+    CaughtUp: AutomationOutputCaughtUp,
+}
+
+/// Replay/live boundary for Automation output.
+record AutomationOutputCaughtUp {
+    /// Last sequence retained when the subscription opened.
+    last_sequence: u64,
+}

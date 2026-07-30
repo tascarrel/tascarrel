@@ -7,7 +7,7 @@ import {
 
 import { App } from "../App.tsx";
 
-export type WorkspaceView = "agent" | "code" | "changes" | "files" | "pod" | "images" | "network" | "repositories" | "operations" | "settings";
+export type WorkspaceView = "agent" | "code" | "changes" | "files" | "pod" | "images" | "network" | "repositories" | "automations" | "operations" | "settings";
 export type GlobalScreenName = "connecting" | "reconnecting" | "welcome";
 export type WorkspaceScreenName = "destroying" | "failed" | "starting" | "stopped" | "stopping";
 
@@ -92,6 +92,11 @@ const repositoriesRoute = createRoute({
   path: "/workspaces/$workspace/repositories",
   component: emptyRouteComponent,
 });
+const automationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workspaces/$workspace/automations",
+  component: emptyRouteComponent,
+});
 const operationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workspaces/$workspace/operations",
@@ -148,6 +153,7 @@ const routeTree = rootRoute.addChildren([
   imagesRoute,
   networkRoute,
   repositoriesRoute,
+  automationsRoute,
   operationsRoute,
   settingsRoute,
   createPodRoute,
@@ -225,6 +231,9 @@ export function useWorkbenchRoute(): WorkbenchRoute {
 
   const repositories = matchRoute({ to: "/workspaces/$workspace/repositories" });
   if (repositories) return { ...repositories, view: "repositories" };
+
+  const automations = matchRoute({ to: "/workspaces/$workspace/automations" });
+  if (automations) return { ...automations, view: "automations" };
 
   const operations = matchRoute({ to: "/workspaces/$workspace/operations" });
   if (operations) return { ...operations, view: "operations" };

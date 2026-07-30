@@ -15,6 +15,10 @@ pub const MUX_HOST_OPERATION_INPUT_ENDPOINT: &str = "tascarrel-host-operation-in
 /// Maximum accepted Git bundle size for one input.
 pub const MAX_HOST_OPERATION_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
+/// Prefix used by the trusted pod helper to correlate an Automation
+/// host-command process with its durable host operation.
+pub const AUTOMATION_HOST_OPERATION_MARKER_PREFIX: &str = "::tascarrel-automation-host-operation::";
+
 /// Untrusted input header supplied by the requesting pod.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

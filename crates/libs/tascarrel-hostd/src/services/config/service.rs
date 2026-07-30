@@ -137,6 +137,25 @@ impl ConfigService {
         })
     }
 
+    /// Resolves one validated workspace configuration directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigServiceError::InvalidRequest`] when the name is not a
+    /// valid workspace path component.
+    pub fn workspace_directory(
+        &self,
+        workspace_name: &WorkspaceName,
+    ) -> Result<PathBuf, Report<ConfigServiceError>> {
+        workspace_path(&self.inner.workspaces_directory, workspace_name)
+    }
+
+    /// Returns the root containing workspace configuration directories.
+    #[must_use]
+    pub fn workspaces_directory(&self) -> &Path {
+        &self.inner.workspaces_directory
+    }
+
     /// Starts background observation from a prepared event source.
     fn start(config: ConfigServiceConfig, events: WatchEvents) -> Self {
         let (shutdown, shutdown_receiver) = watch::channel(false);

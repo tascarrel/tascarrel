@@ -150,6 +150,9 @@ enum HostOperationCommand {
         /// once.
         #[arg(short = 'p', long = "parameter")]
         parameters: Vec<String>,
+        /// Internal correlation nonce supplied by the Automation runner.
+        #[arg(long, hide = true)]
+        automation_report_id: Option<String>,
     },
     /// List durable operations initiated by this pod.
     List,
@@ -309,8 +312,9 @@ async fn run_cli() -> PodctlResult<()> {
             HostOperationCommand::Run {
                 command,
                 parameters,
+                automation_report_id,
             } => {
-                host_operations::run(&client, command, parameters).await?;
+                host_operations::run(&client, command, parameters, automation_report_id).await?;
             }
             HostOperationCommand::List => {
                 print_json(&host_operations::list(&client).await?)?;

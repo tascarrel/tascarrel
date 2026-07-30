@@ -7,6 +7,9 @@ export type HostActions = {
   "auth_CreatePairingKey": { input: types.auth.CreatePairingKeyAction; output: types.auth.CreatePairingKeyOutput };
   "auth_RevokeBrowserSession": { input: types.auth.RevokeBrowserSessionAction; output: types.auth.RevokeBrowserSessionOutput };
   "auth_CreateHttpRouteTicket": { input: types.auth.CreateHttpRouteTicketAction; output: types.auth.CreateHttpRouteTicketOutput };
+  "automations_Start": { input: types.automations.StartAutomationAction; output: types.automations.StartAutomationOutput };
+  "automations_Cancel": { input: types.automations.CancelAutomationExecutionAction; output: types.automations.CancelAutomationExecutionOutput };
+  "automations_ResolveApproval": { input: types.automations.ResolveAutomationApprovalAction; output: types.automations.ResolveAutomationApprovalOutput };
   "config_UpdateSettings": { input: types.config.UpdateWorkspaceSettingsAction; output: types.config.UpdateWorkspaceSettingsOutput };
   "config_ResolveTasciModel": { input: types.config.ResolveTasciModelAction; output: types.config.ResolveTasciModelOutput };
   "config_ResolveMcpServers": { input: types.config.ResolveMcpServersAction; output: types.config.ResolveMcpServersOutput };
@@ -85,6 +88,9 @@ export type GuestActions = {
 
 export type HostSubscriptions = {
   "auth_BrowserSessionsChanged": { input: types.auth.BrowserSessionsChangedSubscription; output: types.auth.BrowserSessionsChangedEvent };
+  "automations_Catalog": { input: types.automations.AutomationCatalogSubscription; output: types.automations.AutomationCatalogEvent };
+  "automations_Executions": { input: types.automations.AutomationExecutionListSubscription; output: types.automations.AutomationExecutionListEvent };
+  "automations_Output": { input: types.automations.AutomationOutputSubscription; output: types.automations.AutomationOutputEvent };
   "config_Changed": { input: types.config.ConfigChangedSubscription; output: types.config.ConfigChangedEvent };
   "secrets_Changed": { input: types.secrets.SecretsChangedSubscription; output: types.secrets.SecretsChangedEvent };
   "network_DnsRequests": { input: types.network.DnsRequestsSubscription; output: types.network.DnsRequestsEvent };

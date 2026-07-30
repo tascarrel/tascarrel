@@ -55,6 +55,8 @@ record CreateChatAction {
     cost_center_id?: ChatCostCenterId,
     /// Coding harness to associate durably with the chat.
     harness: ChatHarnessKind,
+    /// Product feature which owns this chat, or Interactive when omitted.
+    purpose?: ChatPurpose,
     /// Explicit initial user-facing title.
     ///
     /// When omitted, the chat is created immediately with a prompt-derived fallback title and the
@@ -230,7 +232,10 @@ record SendChatPromptAction {
 }
 
 /// Result of submitting a chat prompt.
-record SendChatPromptOutput {}
+record SendChatPromptOutput {
+    /// Whether the prompt started a turn or entered the runtime queue.
+    delivery: ChatPromptDelivery,
+}
 
 /// Interrupts the active turn, if any, and sends all queued prompts as one prompt.
 record FlushChatPromptQueueAction {
@@ -555,6 +560,8 @@ record ChatSummary {
     attention_required: bool,
     /// Coding harness durably associated with the chat.
     harness: ChatHarnessKind,
+    /// Product feature which owns this chat, or Interactive when absent.
+    purpose?: ChatPurpose,
     /// Latest effective model selection, or the harness default when unknown.
     model?: ChatModelSelection,
     /// Workspace-local cost center to which all usage from this chat is attributed.
@@ -565,6 +572,42 @@ record ChatSummary {
     created_at: Timestamp,
     /// Time of the most recent durable change.
     updated_at: Timestamp,
+}
+
+/// Product feature which owns a durable chat.
+#[json(tag = "type")]
+variant ChatPurpose {
+    /// A chat created and controlled directly by a user.
+    Interactive,
+    /// A chat created for one host-owned Automation execution.
+    Automation: AutomationChatPurpose,
+}
+
+/// Correlation metadata for an Automation-owned chat.
+record AutomationChatPurpose {
+    /// Automation execution identifier retained as an opaque cross-service reference.
+    execution_id: string,
+}
+
+/// Admission result for one submitted chat prompt.
+#[json(tag = "type")]
+variant ChatPromptDelivery {
+    /// The harness accepted the prompt as a new turn.
+    Started: ChatPromptStarted,
+    /// The prompt will be delivered after attachment or the active turn.
+    Queued: ChatPromptQueued,
+}
+
+/// A chat prompt accepted as a harness turn.
+record ChatPromptStarted {
+    /// Stable turn identifier returned by the harness adapter.
+    turn_id: ChatTurnId,
+}
+
+/// A chat prompt retained in the runtime queue.
+record ChatPromptQueued {
+    /// Runtime queue identifier.
+    queued_prompt_id: ChatQueuedPromptId,
 }
 
 /// Coarse runtime status of the agent associated with a chat.

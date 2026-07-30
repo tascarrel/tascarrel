@@ -18,6 +18,7 @@ use tascarrel_api::types::protocol as wire;
 
 use crate::services::auth::AuthService;
 use crate::services::auth::AuthServiceError;
+use crate::services::automations::AutomationService;
 use crate::services::config::ConfigService;
 use crate::services::host_operations::HostOperationService;
 use crate::services::network::NetworkService;
@@ -29,6 +30,7 @@ use crate::services::workspaces::WorkspaceService;
 #[derive(Clone)]
 pub struct HostState {
     auth: AuthService,
+    automations: AutomationService,
     workspaces: WorkspaceService,
     config: ConfigService,
     host_operations: HostOperationService,
@@ -40,8 +42,13 @@ pub struct HostState {
 impl HostState {
     /// Creates host state from its long-lived services.
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the host state is the explicit composition root for independent services"
+    )]
     pub fn new(
         auth: AuthService,
+        automations: AutomationService,
         workspaces: WorkspaceService,
         config: ConfigService,
         host_operations: HostOperationService,
@@ -51,6 +58,7 @@ impl HostState {
     ) -> Self {
         Self {
             auth,
+            automations,
             workspaces,
             config,
             host_operations,
@@ -63,6 +71,11 @@ impl HostState {
     /// Returns the host-owned browser authentication service.
     pub(crate) fn auth(&self) -> &AuthService {
         &self.auth
+    }
+
+    /// Returns the durable workspace Automation service.
+    pub(crate) fn automations(&self) -> &AutomationService {
+        &self.automations
     }
 
     /// Returns the workspace lifecycle service.

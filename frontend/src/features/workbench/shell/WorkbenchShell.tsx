@@ -15,6 +15,7 @@ import {
   Settings,
   ShieldCheck,
   TerminalSquare,
+  Workflow,
 } from "lucide-react";
 import {
   useEffect,
@@ -107,6 +108,7 @@ type WorkbenchShellProps = {
   imagesView: ReactNode;
   networkView: ReactNode;
   repositoriesView: ReactNode;
+  automationsView: ReactNode;
   operationsView: ReactNode;
   settingsView: ReactNode;
   publishedWebPreviews?: readonly WebPreview[];
@@ -125,6 +127,7 @@ type WorkbenchShellProps = {
   attentionPodIds?: ReadonlySet<pods.PodId>;
   agentNeedsInput?: boolean;
   repositoryApprovalCount?: number;
+  automationApprovalCount?: number;
   hostOperationApprovalCount?: number;
   onSelectAgent: (agentId: string) => void;
   onNewAgent: () => void;
@@ -208,6 +211,7 @@ const MODE_PRESENTATION = {
   images: { label: "Images", icon: Images },
   network: { label: "Network", icon: Network },
   repositories: { label: "Repositories", icon: GitBranch },
+  automations: { label: "Automations", icon: Workflow },
   operations: { label: "Host Operations", icon: ShieldCheck },
   settings: { label: "Settings", icon: Settings },
 } satisfies Record<WorkbenchMode, { label: string; icon: typeof Bot }>;
@@ -256,6 +260,7 @@ export function WorkbenchShell({
   imagesView,
   networkView,
   repositoriesView,
+  automationsView,
   operationsView,
   settingsView,
   publishedWebPreviews = INITIAL_WEB_PREVIEWS,
@@ -274,6 +279,7 @@ export function WorkbenchShell({
   attentionPodIds = EMPTY_POD_IDS,
   agentNeedsInput = false,
   repositoryApprovalCount,
+  automationApprovalCount,
   hostOperationApprovalCount,
   onSelectAgent,
   onNewAgent,
@@ -349,12 +355,12 @@ export function WorkbenchShell({
     [retainedPublishedWebPreviewIds, selectedWorkspace, webPreviews],
   );
   useRetainedWebPreviewFrames(retainedWebPreviewFrameIds);
-  const activeWorkspaceView: WorkspaceControlView | undefined = mode === "images" || mode === "network" || mode === "repositories" || mode === "operations" || mode === "settings"
+  const activeWorkspaceView: WorkspaceControlView | undefined = mode === "images" || mode === "network" || mode === "repositories" || mode === "automations" || mode === "operations" || mode === "settings"
     ? mode
     : undefined;
   const navigateToMode = (next: WorkbenchMode) => {
     if (!selectedWorkspace) return;
-    if (next === "images" || next === "network" || next === "repositories" || next === "operations" || next === "settings") {
+    if (next === "images" || next === "network" || next === "repositories" || next === "automations" || next === "operations" || next === "settings") {
       void navigate({
         to: `/workspaces/$workspace/${next}`,
         params: { workspace: selectedWorkspace },
@@ -751,6 +757,7 @@ export function WorkbenchShell({
             attentionPodIds={attentionPodIds}
             agentNeedsInput={agentNeedsInput}
             repositoryApprovalCount={repositoryApprovalCount}
+            automationApprovalCount={automationApprovalCount}
             hostOperationApprovalCount={hostOperationApprovalCount}
             activeWorkspaceView={activeWorkspaceView}
             shortcut={SIDEBAR_SHORTCUT}
@@ -869,6 +876,7 @@ export function WorkbenchShell({
                 {mode === "images" ? imagesView : null}
                 {mode === "network" ? networkView : null}
                 {mode === "repositories" ? repositoriesView : null}
+                {mode === "automations" ? automationsView : null}
                 {mode === "operations" ? operationsView : null}
                 {mode === "settings" ? settingsView : null}
               </div>

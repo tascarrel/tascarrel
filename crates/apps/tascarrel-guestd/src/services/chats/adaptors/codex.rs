@@ -2197,7 +2197,7 @@ struct TurnLifecycleParams {
 struct NativeTurn {
     id: String,
     status: Option<String>,
-    error: Option<RpcError>,
+    error: Option<CodexError>,
 }
 
 #[derive(Deserialize)]
@@ -2294,9 +2294,14 @@ struct WarningParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ErrorNotificationParams {
-    error: Option<RpcError>,
+    error: Option<CodexError>,
     message: Option<String>,
     will_retry: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CodexError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -2362,6 +2367,47 @@ mod tests {
         assert_eq!(
             parsed["server"]["http_headers"]["Authorization"].as_str(),
             Some("Bearer tascarrel-secret:mcp-token")
+        );
+    }
+
+    /// Codex error notifications are not JSON-RPC error responses and may omit
+    /// a numeric error code.
+    #[test]
+    fn error_notification_accepts_an_error_without_a_code() {
+        let params = serde_json::from_str::<ErrorNotificationParams>(
+            r#"{
+                "error": {"message": "authentication required"},
+                "willRetry": false
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            params.error.map(|error| error.message),
+            Some("authentication required".to_owned())
+        );
+        assert_eq!(params.will_retry, Some(false));
+    }
+
+    /// Failed turn notifications use the same code-optional Codex error
+    /// payload.
+    #[test]
+    fn completed_turn_accepts_an_error_without_a_code() {
+        let params = serde_json::from_str::<TurnLifecycleParams>(
+            r#"{
+                "turn": {
+                    "id": "turn-1",
+                    "status": "failed",
+                    "error": {"message": "authentication required"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(params.turn.status.as_deref(), Some("failed"));
+        assert_eq!(
+            params.turn.error.map(|error| error.message),
+            Some("authentication required".to_owned())
         );
     }
 }

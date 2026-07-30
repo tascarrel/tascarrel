@@ -17,8 +17,10 @@ async-trait.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 bytes.workspace = true
+chrono.workspace = true
 clap = { version = "4.5.40", features = ["derive", "env"] }
 cookie.workspace = true
+croner.workspace = true
 fs2 = "0.4.3"
 futures-util = "0.3.31"
 globset.workspace = true
@@ -42,6 +44,7 @@ rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_ignored.workspace = true
 serde_json = "1"
+serde_yaml_ng.workspace = true
 sha2 = "0.10"
 subtle.workspace = true
 sysinfo = { workspace = true, features = ["system"] }

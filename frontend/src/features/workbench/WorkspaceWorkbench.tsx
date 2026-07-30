@@ -34,6 +34,7 @@ import {
   type PromptSubmission,
   type StartChatSubmission,
 } from "../chat/index.ts";
+import { useAutomationExecutions } from "../automations/state.ts";
 import { removeChatComposerDraft } from "../chat/model/drafts.ts";
 import { harnessKindKey } from "../chat/model/format.ts";
 import { chatModelPreferences } from "../chat/model/modelPreferences.ts";
@@ -94,6 +95,11 @@ const ImagesView = lazy(() =>
 );
 const NetworkView = lazy(() =>
   import("../network/NetworkView.tsx").then((module) => ({ default: module.NetworkView }))
+);
+const AutomationsView = lazy(() =>
+  import("../automations/AutomationsView.tsx").then((module) => ({
+    default: module.AutomationsView,
+  }))
 );
 const HostOperationsView = lazy(() =>
   import("../hostOperations/HostOperationsView.tsx").then((module) => ({
@@ -168,6 +174,7 @@ export function WorkspaceWorkbench({
   const codeSessionState = useCodeSessions(workspace);
   const repositoryState = useRepositories(workspace);
   const repositoryApprovalState = useRepositoryApprovals(workspace);
+  const automationExecutionState = useAutomationExecutions(workspace);
   const hostOperationState = useHostOperations(workspace);
   const repositoryStatusState = useRepositoryStatuses(workspace);
   const pods = podState.value?.pods ?? [];
@@ -176,6 +183,7 @@ export function WorkspaceWorkbench({
     || route.view === "images"
     || route.view === "network"
     || route.view === "repositories"
+    || route.view === "automations"
     || route.view === "operations"
     || route.view === "settings";
   const routedPod = pods.find((pod) => pod.id === route.pod);
@@ -208,7 +216,11 @@ export function WorkspaceWorkbench({
     () => new Set(),
   );
   const pendingTerminalRemoval = useRef(new Set<string>());
-  const workspaceChats = chatListState.value?.chats ?? [];
+  const allWorkspaceChats = chatListState.value?.chats ?? [];
+  const workspaceChats = useMemo(
+    () => allWorkspaceChats.filter((chat) => chat.purpose?.type !== "Automation"),
+    [allWorkspaceChats],
+  );
   const busyPodIds = useMemo(
     () => new Set(
       workspaceChats
@@ -231,7 +243,9 @@ export function WorkspaceWorkbench({
       : [],
     [selectedPodId, workspaceChats],
   );
-  const selectedSummary = podChats.find((chat) => chat.chatId === route.chat);
+  const selectedSummary = allWorkspaceChats.find((chat) =>
+    chat.podId === selectedPodId && chat.chatId === route.chat
+  );
   const podTerminals = useMemo(
     () => selectedPodId
       ? (processState.value?.processes ?? []).filter((process) =>
@@ -418,6 +432,7 @@ export function WorkspaceWorkbench({
     ?? harnessState.error?.message
     ?? (mobileLayout ? undefined : processState.error?.message)
     ?? repositoryApprovalState.error?.message
+    ?? automationExecutionState.error?.message
     ?? repositoryStatusState.error?.message
     ?? configState.error?.message
     ?? configState.value?.lastConfigError?.message
@@ -780,6 +795,11 @@ export function WorkspaceWorkbench({
                 <RepositoriesView workspace={workspace} />
               </DesktopPanel>
             )}
+            automationsView={(
+              <DesktopPanel loadingDetail="Loading Automations…">
+                <AutomationsView workspace={workspace} />
+              </DesktopPanel>
+            )}
             operationsView={(
               <DesktopPanel loadingDetail="Loading host operations…">
                 <HostOperationsView workspace={workspace} />
@@ -815,6 +835,11 @@ export function WorkspaceWorkbench({
             attentionPodIds={attentionPodIds}
             agentNeedsInput={selectedSummary?.agentStatus === "UserInputRequired"}
             repositoryApprovalCount={repositoryApprovalState.value?.requests.length}
+            automationApprovalCount={(automationExecutionState.value?.executions ?? []).filter(
+              (execution) =>
+                execution.state === "WaitingForApproval"
+                || execution.state === "WaitingForInput",
+            ).length}
             hostOperationApprovalCount={(hostOperationState.value?.operations ?? []).filter(
               (operation) => operation.state.status === "AwaitingApproval",
             ).length}
@@ -964,7 +989,9 @@ export function UnavailableWorkspace({
         view={view}
         workspaceConnection={connection}
         workspaceConnectionAttempt={connectionAttempt}
-        workspaceScreen={view === "operations" ? undefined : lifecycleScreen}
+        workspaceScreen={view === "automations" || view === "operations"
+          ? undefined
+          : lifecycleScreen}
         onSelectWorkspace={onSelectWorkspace}
         onCreateWorkspace={onCreateWorkspace}
         onStartWorkspace={onStartWorkspace}
@@ -986,6 +1013,9 @@ export function UnavailableWorkspace({
         imagesView={null}
         networkView={null}
         repositoriesView={null}
+        automationsView={selectedWorkspace
+          ? <AutomationsView workspace={selectedWorkspace.name} />
+          : null}
         operationsView={selectedWorkspace
           ? <HostOperationsView workspace={selectedWorkspace.name} />
           : null}

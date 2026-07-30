@@ -1,6 +1,8 @@
 //! Host-owned service implementations independent of control-plane transports.
 //!
 //! [`auth::AuthService`] owns browser pairing and durable sessions.
+//! [`automations::AutomationService`] owns durable workspace workflow
+//! admission, scheduling, execution state, and retained output.
 //! [`config::ConfigService`] owns workspace configuration loading and native
 //! change observation. [`host_operations::HostOperationService`] owns durable,
 //! approval-gated processes executed on the physical host.
@@ -12,6 +14,7 @@
 //! inventory, and VM-instance logs.
 
 pub mod auth;
+pub mod automations;
 pub mod config;
 pub mod host_operations;
 pub mod network;

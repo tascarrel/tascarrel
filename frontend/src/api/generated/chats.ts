@@ -3,6 +3,7 @@
 
 import * as __sidex_types from "@sidex/types";
 import * as __schema_auth from "./auth";
+import * as __schema_automations from "./automations";
 import * as __schema_changes from "./changes";
 import * as __schema_chats from "./chats";
 import * as __schema_code from "./code";
@@ -65,6 +66,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Coding harness to associate durably with the chat.
                                             */
                                                         "harness": ChatHarnessKind, /**
+                                            * Product feature which owns this chat, or Interactive when omitted.
+                                            */
+                                                        "purpose"?: ChatPurpose, /**
                                             * Explicit initial user-facing title.
                                             * 
                                             * When omitted, the chat is created immediately with a prompt-derived fallback title and the
@@ -276,7 +280,10 @@ import * as __schema_workspaces from "./workspaces";
 /**
  * Result of submitting a chat prompt.
  */
- export type SendChatPromptOutput = Record<string, never>;
+ export type SendChatPromptOutput = { /**
+                                            * Whether the prompt started a turn or entered the runtime queue.
+                                            */
+                                                        "delivery": ChatPromptDelivery };
 /**
  * Interrupts the active turn, if any, and sends all queued prompts as one prompt.
  */
@@ -606,6 +613,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Coding harness durably associated with the chat.
                                             */
                                                         "harness": ChatHarnessKind, /**
+                                            * Product feature which owns this chat, or Interactive when absent.
+                                            */
+                                                        "purpose"?: ChatPurpose, /**
                                             * Latest effective model selection, or the harness default when unknown.
                                             */
                                                         "model"?: ChatModelSelection, /**
@@ -621,6 +631,35 @@ import * as __schema_workspaces from "./workspaces";
                                             * Time of the most recent durable change.
                                             */
                                                         "updatedAt": __schema_common.Timestamp };
+/**
+ * Product feature which owns a durable chat.
+ */
+ export type ChatPurpose = ({ "type": "Interactive" } | ({ "type": "Automation" } & AutomationChatPurpose));
+/**
+ * Correlation metadata for an Automation-owned chat.
+ */
+ export type AutomationChatPurpose = { /**
+                                            * Automation execution identifier retained as an opaque cross-service reference.
+                                            */
+                                                        "executionId": __sidex_types.builtins.String };
+/**
+ * Admission result for one submitted chat prompt.
+ */
+ export type ChatPromptDelivery = (({ "type": "Started" } & ChatPromptStarted) | ({ "type": "Queued" } & ChatPromptQueued));
+/**
+ * A chat prompt accepted as a harness turn.
+ */
+ export type ChatPromptStarted = { /**
+                                            * Stable turn identifier returned by the harness adapter.
+                                            */
+                                                        "turnId": ChatTurnId };
+/**
+ * A chat prompt retained in the runtime queue.
+ */
+ export type ChatPromptQueued = { /**
+                                            * Runtime queue identifier.
+                                            */
+                                                        "queuedPromptId": ChatQueuedPromptId };
 /**
  * Coarse runtime status of the agent associated with a chat.
  */

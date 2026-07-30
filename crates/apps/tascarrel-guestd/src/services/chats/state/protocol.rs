@@ -5,6 +5,7 @@ use tascarrel_api::ids::ChatId;
 use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatHarnessKind;
 use tascarrel_api::types::chats::ChatModelSelection;
+use tascarrel_api::types::chats::ChatPurpose;
 use tascarrel_api::types::pods::PodId;
 
 use crate::services::chats::harness::protocol::HarnessEvent;
@@ -21,6 +22,8 @@ pub struct CreateChatRequest {
     pub cost_center_id: Option<ChatCostCenterId>,
     /// Harness implementation durably associated with the chat.
     pub harness: ChatHarnessKind,
+    /// Product feature which owns this chat.
+    pub purpose: Option<ChatPurpose>,
     /// Initial model selection, or the harness default.
     pub model: Option<ChatModelSelection>,
 }

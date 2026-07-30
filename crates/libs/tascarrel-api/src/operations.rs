@@ -156,6 +156,9 @@ macro_rules! with_hostd_operations {
             ("auth_CreatePairingKey", auth::CreatePairingKeyAction, auth::CreatePairingKeyOutput),
             ("auth_RevokeBrowserSession", auth::RevokeBrowserSessionAction, auth::RevokeBrowserSessionOutput),
             ("auth_CreateHttpRouteTicket", auth::CreateHttpRouteTicketAction, auth::CreateHttpRouteTicketOutput),
+            ("automations_Start", automations::StartAutomationAction, automations::StartAutomationOutput),
+            ("automations_Cancel", automations::CancelAutomationExecutionAction, automations::CancelAutomationExecutionOutput),
+            ("automations_ResolveApproval", automations::ResolveAutomationApprovalAction, automations::ResolveAutomationApprovalOutput),
             ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
             ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
             ("config_ResolveMcpServers", config::ResolveMcpServersAction, config::ResolveMcpServersOutput),
@@ -190,6 +193,9 @@ macro_rules! with_hostd_operations {
     (subscriptions => $macro:ident) => {
         $macro! {
             ("auth_BrowserSessionsChanged", auth::BrowserSessionsChangedSubscription, auth::BrowserSessionsChangedEvent),
+            ("automations_Catalog", automations::AutomationCatalogSubscription, automations::AutomationCatalogEvent),
+            ("automations_Executions", automations::AutomationExecutionListSubscription, automations::AutomationExecutionListEvent),
+            ("automations_Output", automations::AutomationOutputSubscription, automations::AutomationOutputEvent),
             ("config_Changed", config::ConfigChangedSubscription, config::ConfigChangedEvent),
             ("secrets_Changed", secrets::SecretsChangedSubscription, secrets::SecretsChangedEvent),
             ("network_DnsRequests", network::DnsRequestsSubscription, network::DnsRequestsEvent),
@@ -221,6 +227,9 @@ macro_rules! with_all_actions {
                 ("auth_CreatePairingKey", auth::CreatePairingKeyAction, auth::CreatePairingKeyOutput),
                 ("auth_RevokeBrowserSession", auth::RevokeBrowserSessionAction, auth::RevokeBrowserSessionOutput),
                 ("auth_CreateHttpRouteTicket", auth::CreateHttpRouteTicketAction, auth::CreateHttpRouteTicketOutput),
+                ("automations_Start", automations::StartAutomationAction, automations::StartAutomationOutput),
+                ("automations_Cancel", automations::CancelAutomationExecutionAction, automations::CancelAutomationExecutionOutput),
+                ("automations_ResolveApproval", automations::ResolveAutomationApprovalAction, automations::ResolveAutomationApprovalOutput),
                 ("config_UpdateSettings", config::UpdateWorkspaceSettingsAction, config::UpdateWorkspaceSettingsOutput),
                 ("config_ResolveTasciModel", config::ResolveTasciModelAction, config::ResolveTasciModelOutput),
                 ("config_ResolveMcpServers", config::ResolveMcpServersAction, config::ResolveMcpServersOutput),
@@ -262,6 +271,9 @@ macro_rules! with_all_subscriptions {
         $crate::__with_guestd_subscriptions! {
             @append $macro {
                 ("auth_BrowserSessionsChanged", auth::BrowserSessionsChangedSubscription, auth::BrowserSessionsChangedEvent),
+                ("automations_Catalog", automations::AutomationCatalogSubscription, automations::AutomationCatalogEvent),
+                ("automations_Executions", automations::AutomationExecutionListSubscription, automations::AutomationExecutionListEvent),
+                ("automations_Output", automations::AutomationOutputSubscription, automations::AutomationOutputEvent),
                 ("config_Changed", config::ConfigChangedSubscription, config::ConfigChangedEvent),
                 ("secrets_Changed", secrets::SecretsChangedSubscription, secrets::SecretsChangedEvent),
                 ("network_DnsRequests", network::DnsRequestsSubscription, network::DnsRequestsEvent),
@@ -357,6 +369,7 @@ mod host_operation_seal {
 
 mod action_impls {
     use crate::types::auth;
+    use crate::types::automations;
     use crate::types::changes;
     use crate::types::chats;
     use crate::types::code;
@@ -388,6 +401,7 @@ mod action_impls {
 
 mod subscription_impls {
     use crate::types::auth;
+    use crate::types::automations;
     use crate::types::changes;
     use crate::types::chats;
     use crate::types::code;
@@ -450,6 +464,7 @@ mod guest_operation_impls {
 
 mod host_operation_impls {
     use crate::types::auth;
+    use crate::types::automations;
     use crate::types::config;
     use crate::types::host_operations;
     use crate::types::network;

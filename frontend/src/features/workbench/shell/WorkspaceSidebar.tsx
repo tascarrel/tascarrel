@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   Square,
   Trash2,
+  Workflow,
   X,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -30,7 +31,7 @@ import { SidebarSectionOverline } from "./SidebarSectionOverline.tsx";
 import { ShellPanelToggle } from "./ShellPanelToggle.tsx";
 import { WorkspaceResourceAlert } from "./WorkspaceResourceAlert.tsx";
 
-export type WorkspaceControlView = "images" | "network" | "repositories" | "operations" | "settings";
+export type WorkspaceControlView = "images" | "network" | "repositories" | "automations" | "operations" | "settings";
 
 export function WorkspaceSidebar({
   workspaces,
@@ -46,6 +47,7 @@ export function WorkspaceSidebar({
   attentionPodIds,
   agentNeedsInput,
   repositoryApprovalCount,
+  automationApprovalCount,
   hostOperationApprovalCount,
   activeWorkspaceView,
   shortcut,
@@ -76,6 +78,7 @@ export function WorkspaceSidebar({
   attentionPodIds: ReadonlySet<pods.PodId>;
   agentNeedsInput: boolean;
   repositoryApprovalCount?: number;
+  automationApprovalCount?: number;
   hostOperationApprovalCount?: number;
   activeWorkspaceView?: WorkspaceControlView;
   shortcut: ReadonlyArray<string>;
@@ -293,6 +296,25 @@ export function WorkspaceSidebar({
         </div>
         <nav className="workspace-controls" aria-label="Workspace controls">
           <SidebarSectionOverline>Workspace</SidebarSectionOverline>
+          <button
+            className="workspace-control-button"
+            type="button"
+            data-active={activeWorkspaceView === "automations" || undefined}
+            aria-current={activeWorkspaceView === "automations" ? "page" : undefined}
+            title="Run and inspect durable workspace workflows"
+            onClick={() => onSelectWorkspaceView("automations")}
+          >
+            <Workflow aria-hidden="true" size={14} />
+            <span>Automations</span>
+            {automationApprovalCount ? (
+              <CountBadge
+                className="ml-auto"
+                count={automationApprovalCount}
+                aria-label={`${automationApprovalCount} ${automationApprovalCount === 1 ? "Automation" : "Automations"} waiting for attention`}
+                tone="warning"
+              />
+            ) : null}
+          </button>
           <button
             className="workspace-control-button"
             type="button"

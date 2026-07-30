@@ -242,6 +242,7 @@ impl ChatState {
                 agent_status: ChatAgentStatus::Idle,
                 attention_required: false,
                 harness: request.harness,
+                purpose: request.purpose,
                 model: request.model,
                 cost_center_id: request.cost_center_id,
                 title: request.title.into(),
@@ -1081,6 +1082,7 @@ mod tests {
                 cost_center_id: None,
                 harness: ChatHarnessKind::Codex,
                 model: None,
+                purpose: None,
             })
             .await
             .unwrap()

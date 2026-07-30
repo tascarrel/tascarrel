@@ -75,7 +75,7 @@ pub enum DatabaseError {
 const CONNECTION_CONFIGURATION: &str = r"
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+PRAGMA synchronous = FULL;
 PRAGMA busy_timeout = 5000;
 PRAGMA trusted_schema = OFF;
 ";
@@ -257,6 +257,22 @@ fn incompatible_schema(message: &'static str) -> Report<DatabaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WAL commits are durable across abrupt VM shutdowns because database
+    /// rows coordinate independently persisted pod storage.
+    #[test]
+    fn connections_use_full_synchronous_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database =
+            rusqlite::Connection::open(directory.path().join("state.sqlite3")).unwrap();
+
+        initialize(&mut database, &[]).unwrap();
+
+        let synchronous = database
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+    }
 
     /// Creates only the migration ledger when no domain migrations exist.
     #[test]

@@ -1,5 +1,6 @@
 //! Hand-written behavior attached to generated API values.
 
+mod automations;
 mod changes;
 mod chats;
 mod files;

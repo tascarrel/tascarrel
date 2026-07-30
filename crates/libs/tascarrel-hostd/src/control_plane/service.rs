@@ -9,6 +9,7 @@ use reportify::Report;
 use serde::de::DeserializeOwned;
 use tascarrel_api::ArcStr;
 use tascarrel_api::types::auth;
+use tascarrel_api::types::automations;
 use tascarrel_api::types::config;
 use tascarrel_api::types::host_operations;
 use tascarrel_api::types::network;
@@ -57,6 +58,11 @@ impl HostControlService {
         Self {
             inner: Arc::new(HostControlServiceInner { state }),
         }
+    }
+
+    /// Returns the host services for internal host-owned orchestration.
+    pub(crate) fn state(&self) -> &HostState {
+        &self.inner.state
     }
 
     /// Serves one authenticated client transport until either side closes it.

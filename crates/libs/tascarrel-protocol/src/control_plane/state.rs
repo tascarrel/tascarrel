@@ -25,6 +25,8 @@ pub(crate) struct LinkState {
     outbound_subscriptions: HashMap<wire::SubscriptionId, u64>,
     finished_inbound_subscriptions: HashSet<wire::SubscriptionId>,
     finished_inbound_subscription_order: VecDeque<wire::SubscriptionId>,
+    finished_outbound_subscriptions: HashSet<wire::SubscriptionId>,
+    finished_outbound_subscription_order: VecDeque<wire::SubscriptionId>,
 }
 
 impl LinkState {
@@ -86,10 +88,14 @@ impl LinkState {
                     }
                 }
                 wire::SubscriptionMessage::GrantCredit(credit) => {
-                    let available =
-                        self.outbound_subscriptions.get(&credit.id).ok_or_else(|| {
-                            protocol_error("cannot grant credit to an unknown subscription")
-                        })?;
+                    let Some(available) = self.outbound_subscriptions.get(&credit.id) else {
+                        if self.finished_outbound_subscriptions.contains(&credit.id) {
+                            return Ok(StateUpdate::None);
+                        }
+                        return Err(protocol_error(
+                            "cannot grant credit to an unknown subscription",
+                        ));
+                    };
                     let updated = available
                         .checked_add(u64::from(credit.events))
                         .ok_or_else(|| protocol_error("subscription credit overflowed"))?;
@@ -110,10 +116,12 @@ impl LinkState {
                     ))
                 }
                 wire::SubscriptionMessage::Unsubscribe(stop) => {
-                    require(
-                        self.outbound_subscriptions.contains_key(&stop.id),
-                        "cannot stop an unknown subscription",
-                    )?;
+                    if !self.outbound_subscriptions.contains_key(&stop.id) {
+                        if self.finished_outbound_subscriptions.contains(&stop.id) {
+                            return Ok(StateUpdate::None);
+                        }
+                        return Err(protocol_error("cannot stop an unknown subscription"));
+                    }
                     Ok(StateUpdate::None)
                 }
                 wire::SubscriptionMessage::Completed(completed) => {
@@ -137,6 +145,7 @@ impl LinkState {
                 self.inbound_rpcs.remove(&id);
             }
             StateUpdate::AddOutboundSubscription(id) => {
+                self.forget_finished_outbound_subscription(&id);
                 self.outbound_subscriptions.insert(id, 0);
             }
             StateUpdate::RemoveInboundSubscription(id) => {
@@ -266,6 +275,7 @@ impl LinkState {
                     &completed.id,
                     "peer completed an unknown subscription",
                 )?;
+                self.remember_finished_outbound_subscription(completed.id.clone());
             }
             wire::SubscriptionMessage::Failed(failed) => {
                 remove_map(
@@ -273,6 +283,7 @@ impl LinkState {
                     &failed.id,
                     "peer failed an unknown subscription",
                 )?;
+                self.remember_finished_outbound_subscription(failed.id.clone());
             }
         }
         Ok(SubscriptionAdmission::Deliver)
@@ -305,10 +316,9 @@ impl LinkState {
         while self.finished_inbound_subscription_order.len()
             > FINISHED_SUBSCRIPTION_HISTORY_CAPACITY
         {
-            let expired = self
-                .finished_inbound_subscription_order
-                .pop_front()
-                .expect("finished subscription history is not empty");
+            let Some(expired) = self.finished_inbound_subscription_order.pop_front() else {
+                break;
+            };
             self.finished_inbound_subscriptions.remove(&expired);
         }
     }
@@ -317,6 +327,30 @@ impl LinkState {
     fn forget_finished_inbound_subscription(&mut self, id: &wire::SubscriptionId) {
         if self.finished_inbound_subscriptions.remove(id) {
             self.finished_inbound_subscription_order
+                .retain(|finished| finished != id);
+        }
+    }
+
+    /// Remembers a peer terminal long enough to tolerate crossed local
+    /// controls.
+    fn remember_finished_outbound_subscription(&mut self, id: wire::SubscriptionId) {
+        let inserted = self.finished_outbound_subscriptions.insert(id.clone());
+        debug_assert!(inserted, "active subscription IDs are unique");
+        self.finished_outbound_subscription_order.push_back(id);
+        while self.finished_outbound_subscription_order.len()
+            > FINISHED_SUBSCRIPTION_HISTORY_CAPACITY
+        {
+            let Some(expired) = self.finished_outbound_subscription_order.pop_front() else {
+                break;
+            };
+            self.finished_outbound_subscriptions.remove(&expired);
+        }
+    }
+
+    /// Forgets a peer terminal identifier when the local side reuses it.
+    fn forget_finished_outbound_subscription(&mut self, id: &wire::SubscriptionId) {
+        if self.finished_outbound_subscriptions.remove(id) {
+            self.finished_outbound_subscription_order
                 .retain(|finished| finished != id);
         }
     }
@@ -466,5 +500,39 @@ mod tests {
             panic!("unknown credit remains invalid");
         };
         assert!(matches!(error.error(), Error::Protocol(_)));
+    }
+
+    /// Verifies local credit crossing a peer terminal does not close the link.
+    #[test]
+    fn local_credit_crossing_a_subscription_terminal_is_allowed() {
+        let mut state = LinkState::default();
+        let id = wire::SubscriptionId::generate();
+        state.outbound_subscriptions.insert(id.clone(), 0);
+        let completed = wire::Message::Subscription(wire::SubscriptionMessage::Completed(
+            wire::SubscriptionCompleted { id: id.clone() },
+        ));
+        assert!(matches!(
+            state.receive(completed, &DenyAll).unwrap(),
+            Received::Deliver(_)
+        ));
+
+        let late_credit = wire::Message::Subscription(wire::SubscriptionMessage::GrantCredit(
+            wire::SubscriptionCredit {
+                id: id.clone(),
+                events: 1,
+            },
+        ));
+        assert!(matches!(
+            state.prepare_send(&late_credit).unwrap(),
+            StateUpdate::None
+        ));
+
+        let unknown_credit = wire::Message::Subscription(wire::SubscriptionMessage::GrantCredit(
+            wire::SubscriptionCredit {
+                id: wire::SubscriptionId::generate(),
+                events: 1,
+            },
+        ));
+        assert!(state.prepare_send(&unknown_credit).is_err());
     }
 }

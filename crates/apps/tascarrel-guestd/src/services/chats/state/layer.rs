@@ -821,6 +821,7 @@ mod tests {
     use tascarrel_api::ids::ChatId;
     use tascarrel_api::ids::ChatItemId;
     use tascarrel_api::ids::ChatTurnId;
+    use tascarrel_api::types::chats::AutomationChatPurpose;
     use tascarrel_api::types::chats::ChatActivity;
     use tascarrel_api::types::chats::ChatActivityKind;
     use tascarrel_api::types::chats::ChatAgentStatus;
@@ -830,6 +831,7 @@ mod tests {
     use tascarrel_api::types::chats::ChatItemKind;
     use tascarrel_api::types::chats::ChatItemState;
     use tascarrel_api::types::chats::ChatMutation;
+    use tascarrel_api::types::chats::ChatPurpose;
     use tascarrel_api::types::chats::ChatSummary;
     use tascarrel_api::types::chats::ChatTimelineEntry;
     use tascarrel_api::types::chats::ChatTurn;
@@ -858,20 +860,7 @@ mod tests {
         let now = Timestamp::now();
         let chat_id = ChatId::generate();
         state
-            .create_chat(ChatSummary {
-                chat_id: chat_id.clone(),
-                pod_id: PodId::generate(),
-                binding: None,
-                last_binding_error: None,
-                agent_status: ChatAgentStatus::Idle,
-                attention_required: false,
-                harness: ChatHarnessKind::Codex,
-                model: None,
-                cost_center_id: None,
-                title: "Durability test".into(),
-                created_at: now,
-                updated_at: now,
-            })
+            .create_chat(automation_chat_summary(chat_id.clone(), now))
             .await
             .unwrap();
 
@@ -937,6 +926,11 @@ mod tests {
                 .unwrap();
         let chat = reopened.chat(&chat_id).await.unwrap().unwrap();
 
+        assert!(matches!(
+            &chat.summary.purpose,
+            Some(ChatPurpose::Automation(purpose))
+                if purpose.execution_id.as_ref() == "automation_execution_test"
+        ));
         assert_eq!(chat.turns.len(), 2);
         assert_eq!(chat.turns[0].turn_id, running_turn_id);
         assert_eq!(chat.turns[1].turn_id, completed_turn_id);
@@ -949,5 +943,25 @@ mod tests {
             &chat.timeline[1],
             ChatTimelineEntry::Activity(activity) if activity.activity_id == activity_id
         ));
+    }
+
+    fn automation_chat_summary(chat_id: ChatId, now: Timestamp) -> ChatSummary {
+        ChatSummary {
+            chat_id,
+            pod_id: PodId::generate(),
+            binding: None,
+            last_binding_error: None,
+            agent_status: ChatAgentStatus::Idle,
+            attention_required: false,
+            harness: ChatHarnessKind::Codex,
+            model: None,
+            cost_center_id: None,
+            purpose: Some(ChatPurpose::Automation(AutomationChatPurpose {
+                execution_id: "automation_execution_test".into(),
+            })),
+            title: "Durability test".into(),
+            created_at: now,
+            updated_at: now,
+        }
     }
 }

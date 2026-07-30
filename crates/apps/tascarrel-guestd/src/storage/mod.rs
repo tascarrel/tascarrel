@@ -149,7 +149,8 @@
 //! turns, timeline entries, attachment metadata, and harness resumption
 //! cursors. One database preserves cross-concern transactions and one migration
 //! order. `SQLite` creates the WAL and shared-memory sidecars in the same
-//! private directory.
+//! private directory and uses full synchronous commits because its lifecycle
+//! rows coordinate independently persisted Btrfs resources.
 //!
 //! The `input` namespace contains content-addressed snapshots received from
 //! hostd. The `current` symlink is atomically replaced and always points to a

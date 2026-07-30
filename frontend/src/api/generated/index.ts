@@ -1,4 +1,5 @@
 export * as auth from "./auth";
+export * as automations from "./automations";
 export * as changes from "./changes";
 export * as chats from "./chats";
 export * as code from "./code";

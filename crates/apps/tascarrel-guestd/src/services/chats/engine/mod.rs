@@ -37,7 +37,10 @@ use tascarrel_api::types::chats::ChatModel;
 use tascarrel_api::types::chats::ChatModelSelection;
 use tascarrel_api::types::chats::ChatPrompt;
 use tascarrel_api::types::chats::ChatPromptAttachment;
+use tascarrel_api::types::chats::ChatPromptDelivery;
 use tascarrel_api::types::chats::ChatPromptMode;
+use tascarrel_api::types::chats::ChatPromptQueued;
+use tascarrel_api::types::chats::ChatPromptStarted;
 use tascarrel_api::types::chats::ChatQueuedPrompt;
 use tascarrel_api::types::chats::ChatSubscription;
 use tascarrel_api::types::chats::ChatTimelineEntry;
@@ -310,6 +313,7 @@ impl ChatEngine {
                     pod_id: action.pod_id,
                     cost_center_id: action.cost_center_id,
                     harness: action.harness,
+                    purpose: action.purpose,
                     model: action.model,
                 })
                 .await
@@ -461,13 +465,14 @@ impl ChatEngine {
             self.inner.ensure_running()?;
             let chat_id = action.chat_id.clone();
             let title_prompt = action.prompt.clone();
-            self.inner
+            let delivery = self
+                .inner
                 .send_prompt(action, processes, pods, network_service)
                 .await?;
             self.inner
                 .schedule_pending_title_generation(chat_id, title_prompt)
                 .await;
-            Ok(SendChatPromptOutput {})
+            Ok(SendChatPromptOutput { delivery })
         })
     }
 
@@ -1365,7 +1370,7 @@ impl EngineInner {
         processes: ProcessSupervisor,
         pods: PodService,
         network_service: Arc<GuestNetworkService>,
-    ) -> Result<(), ChatEngineError> {
+    ) -> Result<ChatPromptDelivery, ChatEngineError> {
         let prepared = self.prepare_prompt(&action.chat_id, action.prompt).await?;
         let PreparedPrompt {
             prompt,
@@ -1379,10 +1384,12 @@ impl EngineInner {
             match &chat.binding {
                 BindingSlot::Attaching { .. } => {
                     let queued_prompt = queued_prompt(prompt);
+                    let queued_prompt_id = queued_prompt.queued_prompt_id.clone();
                     chat.queue.push_back(queued_prompt);
                     PromptTarget::Queued {
                         prompts: queued_prompts(chat),
                         attach: false,
+                        queued_prompt_id,
                     }
                 }
                 BindingSlot::Attached { control, .. } => PromptTarget::Attached {
@@ -1393,10 +1400,12 @@ impl EngineInner {
                 },
                 BindingSlot::Detached => {
                     let queued_prompt = queued_prompt(prompt);
+                    let queued_prompt_id = queued_prompt.queued_prompt_id.clone();
                     chat.queue.push_back(queued_prompt);
                     PromptTarget::Queued {
                         prompts: queued_prompts(chat),
                         attach: true,
+                        queued_prompt_id,
                     }
                 }
                 BindingSlot::Detaching { .. } => {
@@ -1404,8 +1413,12 @@ impl EngineInner {
                 }
             }
         };
-        let (control, active_turn_id, prompt, mut harness_prompt) = match target {
-            PromptTarget::Queued { prompts, attach } => {
+        let (control, active_turn_id, prompt, harness_prompt) = match target {
+            PromptTarget::Queued {
+                prompts,
+                attach,
+                queued_prompt_id,
+            } => {
                 self.state
                     .set_prompt_queue(action.chat_id.clone(), prompts)
                     .await
@@ -1415,7 +1428,9 @@ impl EngineInner {
                     self.schedule_attach(action.chat_id, processes, pods, network_service)
                         .await?;
                 }
-                return Ok(());
+                return Ok(ChatPromptDelivery::Queued(ChatPromptQueued {
+                    queued_prompt_id,
+                }));
             }
             PromptTarget::Attached {
                 control,
@@ -1429,21 +1444,42 @@ impl EngineInner {
                 let mut runtime = lock(&self.runtime);
                 let chat = runtime.chat_mut(&action.chat_id);
                 let queued_prompt = queued_prompt(prompt);
+                let queued_prompt_id = queued_prompt.queued_prompt_id.clone();
                 chat.queue.push_back(queued_prompt);
-                queued_prompts(chat)
+                (queued_prompts(chat), queued_prompt_id)
             };
             self.state
-                .set_prompt_queue(action.chat_id, prompts)
+                .set_prompt_queue(action.chat_id, prompts.0)
                 .await
                 .map_err(state_api_error)?;
-            return Ok(());
+            return Ok(ChatPromptDelivery::Queued(ChatPromptQueued {
+                queued_prompt_id: prompts.1,
+            }));
         }
 
-        if active_turn_id.is_some() && action.mode == ChatPromptMode::Immediate {
+        self.start_prompt(
+            action.chat_id,
+            action.mode,
+            control,
+            active_turn_id,
+            harness_prompt,
+        )
+        .await
+    }
+
+    async fn start_prompt(
+        &self,
+        chat_id: ChatId,
+        mode: ChatPromptMode,
+        control: Arc<dyn HarnessBindingControl>,
+        active_turn_id: Option<ChatTurnId>,
+        mut harness_prompt: HarnessPrompt,
+    ) -> Result<ChatPromptDelivery, ChatEngineError> {
+        if active_turn_id.is_some() && mode == ChatPromptMode::Immediate {
             harness_prompt.model = None;
         }
         let model = harness_prompt.model.clone();
-        let command = if action.mode == ChatPromptMode::InterruptAndSend {
+        let command = if mode == ChatPromptMode::InterruptAndSend {
             HarnessCommand::InterruptAndSend(harness_prompt)
         } else {
             HarnessCommand::SendPrompt(harness_prompt)
@@ -1452,17 +1488,17 @@ impl EngineInner {
         let turn_id = prompt_turn_id(result)?;
         {
             let mut runtime = lock(&self.runtime);
-            let chat = runtime.chat_mut(&action.chat_id);
+            let chat = runtime.chat_mut(&chat_id);
             chat.active_turn_id = Some(turn_id.clone());
             chat.idle_since = None;
         }
         if let Some(model) = model {
             self.state
-                .set_model(action.chat_id, model)
+                .set_model(chat_id, model)
                 .await
                 .map_err(state_api_error)?;
         }
-        Ok(())
+        Ok(ChatPromptDelivery::Started(ChatPromptStarted { turn_id }))
     }
 
     async fn send_next_queued(&self, chat_id: &ChatId, binding_id: &ChatBindingId) {
@@ -2005,6 +2041,7 @@ enum PromptTarget {
     Queued {
         prompts: ArcVec<ChatQueuedPrompt>,
         attach: bool,
+        queued_prompt_id: ChatQueuedPromptId,
     },
     Attached {
         control: Arc<dyn HarnessBindingControl>,

@@ -49,6 +49,8 @@ use crate::remove_control_socket;
 use crate::server_config::ServerConfig;
 use crate::services::auth::AuthService;
 use crate::services::auth::AuthServiceConfig;
+use crate::services::automations::AutomationService;
+use crate::services::automations::AutomationServiceConfig;
 use crate::services::config::ConfigService;
 use crate::services::config::ConfigServiceConfig;
 use crate::services::host_operations::HostOperationService;
@@ -538,7 +540,8 @@ where
         "host workspace service ready"
     );
     let repository_refreshes = repository_service.run_background_refreshes();
-    tokio::pin!(repository_refreshes, workspace_requests);
+    let automations = state.automations().run(host_control.clone());
+    tokio::pin!(repository_refreshes, workspace_requests, automations);
     let result = tokio::select! {
         () = &mut shutdown => {
             info!("host workspace service shutdown requested");
@@ -547,6 +550,7 @@ where
         result = &mut broker => result,
         result = &mut web => result,
         () = &mut repository_refreshes => unreachable!("repository refresh service returned"),
+        () = &mut automations => unreachable!("Automation service returned"),
         result = &mut workspace_requests => result,
     };
 
@@ -694,6 +698,10 @@ impl Initialized {
         ))
         .map_err(|error| anyhow!(error.to_string()))
         .context("start host operation service")?;
+        let automation_service =
+            AutomationService::open(AutomationServiceConfig::new(&prepared.automations_dir))
+                .map_err(|error| anyhow!(error.to_string()))
+                .context("start Automation service")?;
         let network_service = NetworkService::new(NetworkServiceConfig {
             dns_resolver: args.dns_resolver,
             host_port_host: args.host_port_host,
@@ -710,6 +718,7 @@ impl Initialized {
         .context("start host secrets service")?;
         let state = HostState::new(
             auth,
+            automation_service,
             workspace_service,
             config_service,
             host_operation_service,
@@ -732,6 +741,7 @@ struct Prepared {
     workspaces_dir: PathBuf,
     repository_cache_dir: PathBuf,
     host_operations_dir: PathBuf,
+    automations_dir: PathBuf,
     sops: PathBuf,
     workspace_service: WorkspaceServiceConfig,
     ui_root: Option<PathBuf>,
@@ -776,6 +786,7 @@ impl Prepared {
         let sops = host_executable_path(&args.sops)?;
         let repository_cache_dir = state_dir.join("repos");
         let host_operations_dir = state_dir.join("host-operations");
+        let automations_dir = state_dir.join("automations");
 
         let mode = if let Some(guest_socket) = args.guest_socket.clone() {
             let workspace = args
@@ -836,6 +847,7 @@ impl Prepared {
             workspaces_dir,
             repository_cache_dir,
             host_operations_dir,
+            automations_dir,
             sops,
             workspace_service: WorkspaceServiceConfig {
                 runtime_dir,

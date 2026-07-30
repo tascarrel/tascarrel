@@ -118,6 +118,11 @@ crate::ids::define_ids! {
         "Identifier for one durable approval-gated process executed by the host daemon."
     ),
     (
+        AutomationExecutionId,
+        "automation_execution_",
+        "Identifier for one durable automation execution."
+    ),
+    (
         TraceId,
         "trace_",
         "Identifier for one distributed trace."

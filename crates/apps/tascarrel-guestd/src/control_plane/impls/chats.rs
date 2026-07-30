@@ -168,6 +168,7 @@ impl ExecuteAction for api::CreatePodChatAction {
                     pod_id: pod.pod_id.clone(),
                     cost_center_id: self.cost_center_id,
                     harness: self.harness,
+                    purpose: None,
                     title: self.title,
                     model: self.model,
                     initial_prompt: Some(self.initial_prompt),
