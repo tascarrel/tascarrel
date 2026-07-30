@@ -129,6 +129,7 @@ in
 
   boot = {
     initrd.systemd.enable = true;
+    kernelModules = [ "virtio_balloon" ];
     kernelParams = [
       "console=${console},115200n8"
       "panic=1"

@@ -13,8 +13,9 @@
 //! disk or grows it without destructive shrinking and returns a [`VmSpawn`]
 //! whose [`VmSpawn::take_serial_output`] handle implements Tokio's asynchronous
 //! read interface. [`ensure_sparse_raw_disk`] exposes the underlying
-//! preparation primitive. Tascarrel removes known runtime artifacts at shutdown
-//! and removes that directory only when it is empty.
+//! preparation primitive. A default-on virtio balloon reports unused guest
+//! pages so the host can reclaim them. Tascarrel removes known runtime
+//! artifacts at shutdown and removes that directory only when it is empty.
 //! [`preflight`] reports resolved executable paths and versions before startup;
 //! Linux configurations fall back to virtio-9p when virtiofsd is unavailable.
 //! [`query_host_usb_devices`] discovers Linux host devices suitable for USB
@@ -52,6 +53,7 @@
 //!         .build()?;
 //!
 //!     assert_eq!(config.memory_mib(), 2048);
+//!     assert!(config.memory_ballooning());
 //!     Ok(())
 //! }
 //! ```

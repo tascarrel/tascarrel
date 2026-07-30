@@ -36,6 +36,7 @@ pub struct VmConfig {
     pub(crate) qmp_socket: Option<PathBuf>,
     pub(crate) control_port_name: String,
     pub(crate) memory_mib: u32,
+    pub(crate) memory_ballooning: bool,
     pub(crate) vcpu_count: u16,
     pub(crate) acceleration: Acceleration,
     pub(crate) startup_timeout: Duration,
@@ -145,6 +146,12 @@ impl VmConfig {
         self.memory_mib
     }
 
+    /// Returns whether virtio memory ballooning is enabled.
+    #[must_use]
+    pub const fn memory_ballooning(&self) -> bool {
+        self.memory_ballooning
+    }
+
     /// Returns the number of virtual CPUs.
     #[must_use]
     pub const fn vcpu_count(&self) -> u16 {
@@ -185,6 +192,7 @@ pub struct VmConfigBuilder {
     qmp_enabled: bool,
     control_port_name: String,
     memory_mib: u32,
+    memory_ballooning: bool,
     vcpu_count: u16,
     acceleration: Acceleration,
     startup_timeout: Duration,
@@ -291,6 +299,15 @@ impl VmConfigBuilder {
         self
     }
 
+    /// Enables or disables virtio memory ballooning.
+    ///
+    /// Ballooning is enabled by default and reports unused guest pages so the
+    /// host can reclaim them.
+    pub fn memory_ballooning(mut self, enabled: bool) -> Self {
+        self.memory_ballooning = enabled;
+        self
+    }
+
     /// Sets the number of guest virtual CPUs.
     pub fn vcpu_count(mut self, vcpu_count: u16) -> Self {
         self.vcpu_count = vcpu_count;
@@ -338,6 +355,7 @@ impl VmConfigBuilder {
                 .as_ref()
                 .map_or(0, |disk| disk.minimum_size),
             memory_mib = self.memory_mib,
+            memory_ballooning = self.memory_ballooning,
             vcpu_count = self.vcpu_count,
             acceleration = ?self.acceleration,
         ),
@@ -435,6 +453,7 @@ impl VmConfigBuilder {
             qmp_socket: runtime_artifacts.qmp_socket,
             control_port_name: self.control_port_name,
             memory_mib: self.memory_mib,
+            memory_ballooning: self.memory_ballooning,
             vcpu_count: self.vcpu_count,
             acceleration: self.acceleration,
             startup_timeout: self.startup_timeout,
@@ -457,6 +476,7 @@ impl Default for VmConfigBuilder {
             qmp_enabled: false,
             control_port_name: DEFAULT_CONTROL_PORT_NAME.to_owned(),
             memory_mib: DEFAULT_MEMORY_MIB,
+            memory_ballooning: true,
             vcpu_count: DEFAULT_VCPU_COUNT,
             acceleration: Acceleration::default(),
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,

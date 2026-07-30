@@ -227,6 +227,12 @@ fn check_command_version(
 fn check_qemu_capabilities(checks: &mut Vec<DependencyCheck>, qemu: &Path) {
     check_qemu_query(checks, qemu, &["-accel", "help"], required_accelerator());
     check_qemu_query(checks, qemu, &["-device", "help"], "virtio-serial-pci");
+    check_qemu_query(
+        checks,
+        qemu,
+        &["-device", "virtio-balloon-pci,help"],
+        "free-page-reporting",
+    );
     #[cfg(target_os = "linux")]
     for device in ["qemu-xhci", "usb-host"] {
         check_qemu_query(checks, qemu, &["-device", "help"], device);

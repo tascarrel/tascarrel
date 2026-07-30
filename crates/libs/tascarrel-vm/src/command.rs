@@ -92,6 +92,7 @@ impl VmConfig {
         append_host_interfaces(&mut args, self);
         append_boot(&mut args, self);
         append_storage(&mut args, self)?;
+        append_memory_balloon(&mut args, self);
         append_shared_directories(&mut args, self);
         append_control_channel(&mut args, self);
 
@@ -323,6 +324,16 @@ fn append_control_channel(args: &mut Vec<OsString>, config: &VmConfig) {
     ]);
 }
 
+/// Enables guest-driven reclamation of unused memory when configured.
+fn append_memory_balloon(args: &mut Vec<OsString>, config: &VmConfig) {
+    if config.memory_ballooning {
+        args.extend([
+            OsString::from("-device"),
+            OsString::from("virtio-balloon-pci,id=tascarrel-balloon,free-page-reporting=on"),
+        ]);
+    }
+}
+
 /// Appends host-specific shared-directory devices.
 fn append_shared_directories(args: &mut Vec<OsString>, config: &VmConfig) {
     match config.shared_directory_transport {
@@ -440,6 +451,11 @@ mod tests {
         assert_option_value(&command, "-device", "virtio-rng-pci,rng=tascarrel-rng");
         assert_option_value(
             &command,
+            "-device",
+            "virtio-balloon-pci,id=tascarrel-balloon,free-page-reporting=on",
+        );
+        assert_option_value(
+            &command,
             "-object",
             "rng-random,id=tascarrel-rng,filename=/dev/urandom",
         );
@@ -475,6 +491,23 @@ mod tests {
     fn routes_the_serial_console_to_standard_output() {
         let config = base_builder(Architecture::X86_64).build().unwrap();
         assert_option(&config.qemu_command().unwrap(), "-serial", "stdio");
+    }
+
+    /// Omits the balloon device when memory ballooning is disabled.
+    #[test]
+    fn disables_memory_ballooning_when_requested() {
+        let config = base_builder(Architecture::X86_64)
+            .memory_ballooning(false)
+            .build()
+            .unwrap();
+        let command = config.qemu_command().unwrap();
+
+        assert!(
+            !command
+                .args
+                .iter()
+                .any(|argument| { argument.to_string_lossy().contains("virtio-balloon-pci") })
+        );
     }
 
     /// Generates deterministic virtiofs devices and matching backend commands.

@@ -185,6 +185,7 @@ impl Vm {
             data_disk_minimum_size = config.data_disk_minimum_size(),
             shared_directories = config.shared_directories().len(),
             memory_mib = config.memory_mib(),
+            memory_ballooning = config.memory_ballooning(),
             vcpu_count = config.vcpu_count(),
         ),
         err
