@@ -9,6 +9,7 @@ export type HostActions = {
   "auth_CreateHttpRouteTicket": { input: types.auth.CreateHttpRouteTicketAction; output: types.auth.CreateHttpRouteTicketOutput };
   "config_UpdateSettings": { input: types.config.UpdateWorkspaceSettingsAction; output: types.config.UpdateWorkspaceSettingsOutput };
   "config_ResolveTasciModel": { input: types.config.ResolveTasciModelAction; output: types.config.ResolveTasciModelOutput };
+  "config_ResolveMcpServers": { input: types.config.ResolveMcpServersAction; output: types.config.ResolveMcpServersOutput };
   "secrets_Reveal": { input: types.secrets.RevealSecretAction; output: types.secrets.RevealSecretOutput };
   "secrets_Set": { input: types.secrets.SetSecretAction; output: types.secrets.SetSecretOutput };
   "secrets_Delete": { input: types.secrets.DeleteSecretAction; output: types.secrets.DeleteSecretOutput };

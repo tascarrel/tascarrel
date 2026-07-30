@@ -104,6 +104,7 @@ pub(crate) struct HarnessManager {
     codex_credentials_revision: AtomicU64,
     claude_credentials_revision: AtomicU64,
     tasci_configurations: TasciConfigurationStore,
+    mcp_servers: Mutex<Vec<HarnessMcpCatalog>>,
 }
 
 impl HarnessManager {
@@ -181,7 +182,25 @@ impl HarnessManager {
             codex_credentials_revision: AtomicU64::new(0),
             claude_credentials_revision: AtomicU64::new(0),
             tasci_configurations: TasciConfigurationStore::default(),
+            mcp_servers: Mutex::new(Vec::new()),
         }))
+    }
+
+    /// Replaces the MCP catalog used for newly attached sessions of a harness.
+    pub(crate) fn configure_mcp_servers(
+        &self,
+        harness: api::ChatHarnessKind,
+        servers: ArcVec<config_api::McpServerConfiguration>,
+    ) {
+        let mut catalogs = lock(&self.mcp_servers);
+        if let Some(catalog) = catalogs
+            .iter_mut()
+            .find(|catalog| catalog.harness == harness)
+        {
+            catalog.servers = servers;
+        } else {
+            catalogs.push(HarnessMcpCatalog { harness, servers });
+        }
     }
 
     /// Publishes a host-resolved Tasci model and caches its runtime
@@ -946,6 +965,11 @@ impl BindingProvider for HarnessManager {
             let launcher: Arc<dyn HarnessProcessLauncher> = Arc::new(
                 PodHarnessProcessLauncher::new(request.pod_id, processes, pods, network_service),
             );
+            let mcp_servers = lock(&self.mcp_servers)
+                .iter()
+                .find(|catalog| catalog.harness == request.resumption.harness)
+                .map(|catalog| catalog.servers.clone())
+                .unwrap_or_default();
             let harness: Box<dyn Harness> = match request.resumption.harness {
                 api::ChatHarnessKind::Tasci => {
                     let selected = request
@@ -971,28 +995,30 @@ impl BindingProvider for HarnessManager {
                                 "the selected Tasci model was not resolved by hostd".to_owned(),
                             )))
                         })?;
-                    Box::new(TasciAdaptor::new(
-                        PathBuf::from("/usr/local/bin/tasci-exec"),
-                        launcher,
-                        configuration,
-                        self.tasci_configurations.clone(),
-                    ))
+                    Box::new(
+                        TasciAdaptor::new(
+                            PathBuf::from("/usr/local/bin/tasci-exec"),
+                            launcher,
+                            configuration,
+                            self.tasci_configurations.clone(),
+                        )
+                        .with_mcp_servers(mcp_servers),
+                    )
                 }
                 api::ChatHarnessKind::Codex => Box::new(
-                    CodexAdaptor::new(pod_codex_executable(), launcher).with_process_environment(
-                        Arc::new(HarnessEnvironment::codex(PathBuf::from(
-                            "/opt/tascarrel/chat/harness-codex",
-                        ))),
-                    ),
+                    CodexAdaptor::new(pod_codex_executable(), launcher)
+                        .with_process_environment(Arc::new(HarnessEnvironment::codex(
+                            PathBuf::from("/opt/tascarrel/chat/harness-codex"),
+                        )))
+                        .with_mcp_servers(mcp_servers),
                 ),
                 api::ChatHarnessKind::ClaudeCode => Box::new(
                     ClaudeCodeAdaptor::new(pod_claude_executable(), launcher)
-                        .with_process_environment(Arc::new(
-                            HarnessEnvironment::claude_with_source(
-                                PathBuf::from("/opt/tascarrel/chat/harness-claude-code"),
-                                self.claude_credentials.clone(),
-                            ),
-                        )),
+                        .with_process_environment(Arc::new(HarnessEnvironment::claude_with_source(
+                            PathBuf::from("/opt/tascarrel/chat/harness-claude-code"),
+                            self.claude_credentials.clone(),
+                        )))
+                        .with_mcp_servers(mcp_servers),
                 ),
             };
             let session = harness
@@ -1081,6 +1107,11 @@ impl reportify::Whatever for HarnessManagerError {
     fn new() -> Self {
         Self::Internal("chat harness operation failed".to_owned())
     }
+}
+
+struct HarnessMcpCatalog {
+    harness: api::ChatHarnessKind,
+    servers: ArcVec<config_api::McpServerConfiguration>,
 }
 
 struct ActiveCodexLogin {

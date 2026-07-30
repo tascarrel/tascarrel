@@ -54,6 +54,7 @@ use tascarrel_api::types::chats::ChatUsageSnapshot;
 use tascarrel_api::types::chats::ChatUsageState;
 use tascarrel_api::types::chats::StructuredContent;
 use tascarrel_api::types::chats::TextContent;
+use tascarrel_api::types::config as config_api;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::BufReader;
 use tokio::sync::Mutex as AsyncMutex;
@@ -97,6 +98,7 @@ pub struct CodexAdaptor {
     launcher: Arc<dyn HarnessProcessLauncher>,
     process_environment: Option<Arc<dyn ProcessEnvironment>>,
     working_directory: PathBuf,
+    mcp_servers: ArcVec<config_api::McpServerConfiguration>,
 }
 
 impl CodexAdaptor {
@@ -108,6 +110,7 @@ impl CodexAdaptor {
             launcher,
             process_environment: None,
             working_directory: PathBuf::from("/workspace"),
+            mcp_servers: ArcVec::new(),
         }
     }
 
@@ -127,6 +130,17 @@ impl CodexAdaptor {
         self.working_directory = working_directory;
         self
     }
+
+    /// Applies the host-resolved MCP catalog to sessions started by this
+    /// adaptor.
+    #[must_use]
+    pub(crate) fn with_mcp_servers(
+        mut self,
+        mcp_servers: ArcVec<config_api::McpServerConfiguration>,
+    ) -> Self {
+        self.mcp_servers = mcp_servers;
+        self
+    }
 }
 
 impl Harness for CodexAdaptor {
@@ -141,6 +155,7 @@ impl Harness for CodexAdaptor {
                 launcher,
                 environment.as_deref(),
                 working_directory,
+                &[],
             )
             .await?;
             let result = async {
@@ -164,12 +179,14 @@ impl Harness for CodexAdaptor {
         let launcher = Arc::clone(&self.launcher);
         let environment = self.process_environment.clone();
         let working_directory = self.working_directory.clone();
+        let mcp_servers = self.mcp_servers.clone();
         Box::pin(async move {
             let server = start_server(
                 executable,
                 launcher,
                 environment.as_deref(),
                 working_directory,
+                &mcp_servers,
             )
             .await?;
             if let Err(error) = initialize(&server.control).await {
@@ -1741,6 +1758,7 @@ async fn start_server(
     launcher: Arc<dyn HarnessProcessLauncher>,
     process_environment: Option<&dyn ProcessEnvironment>,
     working_directory: PathBuf,
+    mcp_servers: &[config_api::McpServerConfiguration],
 ) -> Result<StartedCodexAppServer, HarnessError> {
     let environment = process_environment
         .map(ProcessEnvironment::variables)
@@ -1756,7 +1774,7 @@ async fn start_server(
         .launch(HarnessProcessSpec {
             title: "Codex chat harness".to_owned(),
             executable,
-            arguments: vec!["app-server".to_owned()],
+            arguments: codex_arguments(mcp_servers),
             environment,
             working_directory,
         })
@@ -1777,6 +1795,40 @@ async fn start_server(
         }),
         messages: CodexMessages { receiver },
     })
+}
+
+/// Builds Codex startup arguments with workspace MCP configuration overrides.
+fn codex_arguments(mcp_servers: &[config_api::McpServerConfiguration]) -> Vec<String> {
+    let mut arguments = Vec::with_capacity(mcp_servers.len().saturating_mul(2) + 1);
+    for server in mcp_servers {
+        let mut configuration = toml::map::Map::new();
+        configuration.insert(
+            "url".to_owned(),
+            toml::Value::String(server.endpoint.to_string()),
+        );
+        if !server.headers.is_empty() {
+            configuration.insert(
+                "http_headers".to_owned(),
+                toml::Value::Table(
+                    server
+                        .headers
+                        .iter()
+                        .map(|(name, value)| {
+                            (name.to_string(), toml::Value::String(value.to_string()))
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        arguments.push("--config".to_owned());
+        arguments.push(format!(
+            "mcp_servers.{}={}",
+            server.name,
+            toml::Value::Table(configuration)
+        ));
+    }
+    arguments.push("app-server".to_owned());
+    arguments
 }
 
 async fn read_messages(
@@ -2275,4 +2327,41 @@ struct NativeQuestion {
 struct NativeQuestionOption {
     label: String,
     description: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Confirms workspace MCP servers become parseable Codex configuration
+    /// overrides before the app-server subcommand.
+    #[test]
+    fn encodes_mcp_servers_as_codex_configuration_overrides() {
+        let servers = [config_api::McpServerConfiguration {
+            name: "private-tools".into(),
+            display_name: "Private Tools".into(),
+            endpoint: "https://mcp.example.com/mcp".into(),
+            headers: HashMap::from([(
+                "Authorization".into(),
+                "Bearer tascarrel-secret:mcp-token".into(),
+            )]),
+        }];
+
+        let arguments = codex_arguments(&servers);
+
+        assert_eq!(arguments[0], "--config");
+        assert_eq!(arguments[2], "app-server");
+        let value = arguments[1]
+            .strip_prefix("mcp_servers.private-tools=")
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(&format!("server = {value}")).unwrap();
+        assert_eq!(
+            parsed["server"]["url"].as_str(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(
+            parsed["server"]["http_headers"]["Authorization"].as_str(),
+            Some("Bearer tascarrel-secret:mcp-token")
+        );
+    }
 }

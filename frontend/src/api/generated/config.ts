@@ -41,8 +41,8 @@ import * as __schema_workspaces from "./workspaces";
  */
  export type UpdateWorkspaceSettingsOutput = Record<string, never>;
 /**
- * Resolves the current Tasci catalog, MCP servers, and one selected model for
- * a workspace harness process.
+ * Resolves the current Tasci catalog and one selected model for a workspace
+ * harness process.
  * 
  * This internal action is available only to the authenticated guest daemon
  * belonging to the requested workspace.
@@ -55,7 +55,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "model"?: __sidex_types.builtins.String };
 /**
- * Runtime endpoint, MCP server, and selectable model configuration.
+ * Runtime endpoint and selectable model configuration.
  */
  export type ResolveTasciModelOutput = { /**
                                             * Workspace-local model alias selected for this session.
@@ -86,10 +86,26 @@ import * as __schema_workspaces from "./workspaces";
                                                         "defaultModel": __sidex_types.builtins.String, /**
                                             * Current secret-free Tasci models expressed as ordinary chat models.
                                             */
-                                                        "models": __sidex_types.builtins.Sequence<__schema_chats.ChatModel>, /**
-                                            * MCP servers configured for this Tasci session.
+                                                        "models": __sidex_types.builtins.Sequence<__schema_chats.ChatModel> };
+/**
+ * Resolves the MCP servers enabled for one workspace harness process.
+ * This internal action is available only to the authenticated guest daemon
+ * belonging to the requested workspace.
+ */
+ export type ResolveMcpServersAction = { /**
+                                            * Workspace whose portable MCP settings to resolve.
                                             */
-                                                        "mcpServers": __sidex_types.builtins.Sequence<TasciMcpServerConfiguration> };
+                                                        "workspaceName": __schema_workspaces.WorkspaceName, /**
+                                            * Harness for which configured server selectors are evaluated.
+                                            */
+                                                        "harness": __schema_chats.ChatHarnessKind };
+/**
+ * MCP servers enabled for one workspace harness process.
+ */
+ export type ResolveMcpServersOutput = { /**
+                                            * Stable, secret-free Streamable HTTP server configurations.
+                                            */
+                                                        "mcpServers": __sidex_types.builtins.Sequence<McpServerConfiguration> };
 /**
  * Subscribes to configuration changes for one workspace owned by the host daemon.
  */
@@ -205,11 +221,14 @@ import * as __schema_workspaces from "./workspaces";
                                             * Per-harness model preferences.
                                             */
                                                         "harnesses"?: WorkspaceChatHarnessSettings, /**
-                                            * Tasci model preferences and endpoint, model, and MCP server catalogs.
+                                            * Streamable HTTP MCP servers available to coding harnesses.
+                                            */
+                                                        "mcpServers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceMcpServer>, /**
+                                            * Tasci model preferences and endpoint and model catalogs.
                                             */
                                                         "tasci"?: WorkspaceTasciSettings };
 /**
- * Endpoint, model, MCP server, and model-presentation settings used by Tasci.
+ * Endpoint, model, and model-presentation settings used by Tasci.
  */
  export type WorkspaceTasciSettings = { /**
                                             * Model alias selected for new Tasci chats.
@@ -231,10 +250,7 @@ import * as __schema_workspaces from "./workspaces";
                                                         "endpoints"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciEndpoint>, /**
                                             * Selectable models keyed by stable workspace-local aliases.
                                             */
-                                                        "models"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciModel>, /**
-                                            * Streamable HTTP MCP servers keyed by stable workspace-local aliases.
-                                            */
-                                                        "mcpServers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciMcpServer> };
+                                                        "models"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, WorkspaceTasciModel> };
 /**
  * One inference endpoint available to Tasci.
  */
@@ -313,9 +329,9 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "pricing"?: __schema_chats.ChatModelPricing };
 /**
- * One Streamable HTTP MCP server available to Tasci.
+ * One Streamable HTTP MCP server available to workspace coding harnesses.
  */
- export type WorkspaceTasciMcpServer = { /**
+ export type WorkspaceMcpServer = { /**
                                             * Human-readable server name, or the map key when absent.
                                             */
                                                         "displayName"?: __sidex_types.builtins.String, /**
@@ -325,11 +341,14 @@ import * as __schema_workspaces from "./workspaces";
                                             * HTTP header templates sent with every MCP request.
                                             * Values may contain host-side secret-injection placeholders.
                                             */
-                                                        "headers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, __sidex_types.builtins.String> };
+                                                        "headers"?: __sidex_types.builtins.ObjectMap<__sidex_types.builtins.String, __sidex_types.builtins.String>, /**
+                                            * Harnesses that receive this server, or every harness when omitted.
+                                            */
+                                                        "harnesses"?: __sidex_types.builtins.Sequence<__schema_chats.ChatHarnessKind> };
 /**
- * Resolved non-secret MCP server configuration sent to a Tasci harness.
+ * Resolved non-secret MCP server configuration sent to a coding harness.
  */
- export type TasciMcpServerConfiguration = { /**
+ export type McpServerConfiguration = { /**
                                             * Stable workspace-local server name used to namespace discovered tools.
                                             */
                                                         "name": __sidex_types.builtins.String, /**

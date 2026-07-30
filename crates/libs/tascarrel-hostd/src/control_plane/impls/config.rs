@@ -1,5 +1,7 @@
 //! Control-plane implementation for host-owned workspace configuration.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use reportify::ErrorExt as _;
 use reportify::Report;
@@ -68,6 +70,31 @@ impl ExecuteAction for api::ResolveTasciModelAction {
         context: crate::control_plane::InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
         resolve_tasci_model(self, context).await
+    }
+}
+
+#[async_trait]
+impl ExecuteAction for api::ResolveMcpServersAction {
+    async fn check_permissions(
+        &self,
+        context: &crate::control_plane::InvocationCtx<'_>,
+    ) -> Result<(), Report<wire::OperationError>> {
+        let caller = &context.require_routing_context()?.caller;
+        if matches!(
+            caller,
+            wire::Actor::Workspace(address) if address.workspace == self.workspace_name
+        ) {
+            Ok(())
+        } else {
+            Err(wire::OperationError::forbidden())
+        }
+    }
+
+    async fn execute(
+        self,
+        context: crate::control_plane::InvocationCtx<'_>,
+    ) -> Result<Self::Output, Report<wire::OperationError>> {
+        resolve_mcp_servers(self, context).await
     }
 }
 
@@ -199,7 +226,6 @@ async fn resolve_tasci_model(
         )
         .collect::<Result<Vec<_>, _>>()?;
     catalog.sort_by(|left, right| left.id.cmp(&right.id));
-    let mcp_servers = resolve_tasci_mcp_servers(tasci);
     Ok(api::ResolveTasciModelOutput {
         selected_model: selected_model.to_owned().into(),
         base_url: endpoint.base_url.clone(),
@@ -210,27 +236,54 @@ async fn resolve_tasci_model(
         authorization_value,
         default_model: default_model.into(),
         models: catalog.into(),
-        mcp_servers,
     })
 }
 
-/// Converts portable MCP settings into a stable runtime catalog.
-fn resolve_tasci_mcp_servers(
-    tasci: &api::WorkspaceTasciSettings,
-) -> ArcVec<api::TasciMcpServerConfiguration> {
-    let mut servers = tasci
-        .mcp_servers
+/// Reads and resolves the current MCP catalog for one workspace harness.
+async fn resolve_mcp_servers(
+    input: api::ResolveMcpServersAction,
+    context: crate::control_plane::InvocationCtx<'_>,
+) -> Result<api::ResolveMcpServersOutput, Report<wire::OperationError>> {
+    let snapshot = context
+        .state()
+        .config()
+        .read(&input.workspace_name)
+        .await
+        .map_err(config_error)?;
+    let mcp_servers = configured_mcp_servers(
+        snapshot
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.chat.as_ref())
+            .and_then(|chat| chat.mcp_servers.as_ref()),
+        &input.harness,
+    );
+    Ok(api::ResolveMcpServersOutput { mcp_servers })
+}
+
+/// Filters and normalizes configured MCP servers for one harness.
+fn configured_mcp_servers(
+    servers: Option<&HashMap<tascarrel_api::ArcStr, api::WorkspaceMcpServer>>,
+    harness: &chats::ChatHarnessKind,
+) -> ArcVec<api::McpServerConfiguration> {
+    let mut configured = servers
         .iter()
         .flat_map(|servers| servers.iter())
-        .map(|(name, server)| api::TasciMcpServerConfiguration {
+        .filter(|(_, server)| {
+            server
+                .harnesses
+                .as_ref()
+                .is_none_or(|harnesses| harnesses.contains(harness))
+        })
+        .map(|(name, server)| api::McpServerConfiguration {
             name: name.clone(),
             display_name: server.display_name.clone().unwrap_or_else(|| name.clone()),
             endpoint: server.endpoint.clone(),
             headers: server.headers.clone().unwrap_or_default(),
         })
         .collect::<Vec<_>>();
-    servers.sort_by(|left, right| left.name.cmp(&right.name));
-    servers.into()
+    configured.sort_by(|left, right| left.name.cmp(&right.name));
+    configured.into()
 }
 
 /// Resolves only non-secret authorization metadata for the Tasci process.
@@ -316,5 +369,50 @@ mod tests {
             tasci_authorization_value(&authorization).unwrap().as_ref(),
             "Bearer tascarrel-secret:api-token"
         );
+    }
+
+    /// Verifies unscoped MCP servers apply everywhere while harness selectors
+    /// include only their named targets.
+    #[test]
+    fn mcp_server_catalog_is_filtered_and_sorted_by_harness() {
+        let servers = HashMap::from([
+            (
+                "shared".into(),
+                api::WorkspaceMcpServer {
+                    display_name: None,
+                    endpoint: "https://shared.example.com/mcp".into(),
+                    headers: None,
+                    harnesses: None,
+                },
+            ),
+            (
+                "claude".into(),
+                api::WorkspaceMcpServer {
+                    display_name: Some("Claude Tools".into()),
+                    endpoint: "https://claude.example.com/mcp".into(),
+                    headers: None,
+                    harnesses: Some(vec![chats::ChatHarnessKind::ClaudeCode].into()),
+                },
+            ),
+            (
+                "tasci".into(),
+                api::WorkspaceMcpServer {
+                    display_name: None,
+                    endpoint: "https://tasci.example.com/mcp".into(),
+                    headers: None,
+                    harnesses: Some(vec![chats::ChatHarnessKind::Tasci].into()),
+                },
+            ),
+        ]);
+
+        let resolved = configured_mcp_servers(Some(&servers), &chats::ChatHarnessKind::ClaudeCode);
+        let names = resolved
+            .iter()
+            .map(|server| server.name.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["claude", "shared"]);
+        assert_eq!(resolved[0].display_name.as_ref(), "Claude Tools");
+        assert_eq!(resolved[1].display_name.as_ref(), "shared");
     }
 }

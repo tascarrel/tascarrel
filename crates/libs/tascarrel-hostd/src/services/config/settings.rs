@@ -19,13 +19,15 @@ use thiserror::Error;
 ///
 /// # Errors
 ///
-/// Returns a value-safe diagnostic when a Tasci endpoint, model, MCP server, or
-/// cross-reference is invalid.
+/// Returns a value-safe diagnostic when a Tasci endpoint, model, workspace MCP
+/// server, or cross-reference is invalid.
 pub(crate) fn validate(
     settings: &api::WorkspaceSettings,
 ) -> Result<(), Report<SettingsValidationError>> {
     validate_usage_settings(settings.usage.as_ref())?;
-    let Some(tasci) = settings.chat.as_ref().and_then(|chat| chat.tasci.as_ref()) else {
+    let chat = settings.chat.as_ref();
+    validate_mcp_servers(chat.and_then(|chat| chat.mcp_servers.as_ref()))?;
+    let Some(tasci) = chat.and_then(|chat| chat.tasci.as_ref()) else {
         return Ok(());
     };
     let endpoints = tasci.endpoints.as_ref();
@@ -91,17 +93,6 @@ pub(crate) fn validate(
             return Err(SettingsValidationError::MissingDefaultModel.report());
         }
     }
-    if let Some(mcp_servers) = &tasci.mcp_servers {
-        for (name, server) in mcp_servers {
-            validate_mcp_server_name(name)?;
-            validate_optional_name(
-                server.display_name.as_deref(),
-                SettingsValidationError::InvalidMcpServerDisplayName,
-            )?;
-            validate_mcp_endpoint(server.endpoint.as_ref())?;
-            validate_mcp_headers(server.headers.as_ref())?;
-        }
-    }
     Ok(())
 }
 
@@ -156,20 +147,20 @@ pub(crate) enum SettingsValidationError {
     InvalidDefaultModel,
     #[error("the default Tasci model is not configured")]
     MissingDefaultModel,
-    #[error(
-        "Tasci MCP server names must contain only ASCII letters, digits, hyphens, and underscores"
-    )]
+    #[error("MCP server name is invalid: use only ASCII letters, digits, hyphens, and underscores")]
     InvalidMcpServerName,
-    #[error("Tasci MCP server display names must not be empty when specified")]
+    #[error("MCP server display name is invalid: it must not be empty")]
     InvalidMcpServerDisplayName,
     #[error(
-        "Tasci MCP endpoints must be absolute HTTP or HTTPS URLs without credentials, queries, or fragments"
+        "MCP endpoint is invalid: use an absolute HTTP or HTTPS URL without credentials, a query, or a fragment"
     )]
     InvalidMcpEndpoint,
-    #[error("Tasci MCP header names are invalid or repeated without regard to case")]
+    #[error("MCP header names are invalid or repeated without regard to case")]
     InvalidMcpHeaderName,
-    #[error("Tasci MCP header values are not valid HTTP header text")]
+    #[error("MCP header value is invalid HTTP header text")]
     InvalidMcpHeaderValue,
+    #[error("MCP harness selectors are invalid: select at least one harness without duplicates")]
+    InvalidMcpHarnesses,
 }
 
 /// Validates cost-center identifiers, names, and the configured default.
@@ -197,6 +188,32 @@ fn validate_usage_settings(
         })
     {
         return Err(SettingsValidationError::InvalidDefaultCostCenter.report());
+    }
+    Ok(())
+}
+
+/// Validates the portable workspace MCP catalog.
+fn validate_mcp_servers(
+    mcp_servers: Option<&HashMap<tascarrel_api::ArcStr, api::WorkspaceMcpServer>>,
+) -> Result<(), Report<SettingsValidationError>> {
+    for (name, server) in mcp_servers.into_iter().flatten() {
+        validate_mcp_server_name(name)?;
+        validate_optional_name(
+            server.display_name.as_deref(),
+            SettingsValidationError::InvalidMcpServerDisplayName,
+        )?;
+        validate_mcp_endpoint(server.endpoint.as_ref())?;
+        validate_mcp_headers(server.headers.as_ref())?;
+        if let Some(harnesses) = &server.harnesses {
+            let has_duplicate = harnesses.iter().enumerate().any(|(index, harness)| {
+                harnesses[..index]
+                    .iter()
+                    .any(|previous| previous == harness)
+            });
+            if harnesses.is_empty() || has_duplicate {
+                return Err(SettingsValidationError::InvalidMcpHarnesses.report());
+            }
+        }
     }
     Ok(())
 }

@@ -28,6 +28,7 @@ import {
 import { useChatHarnesses } from "../chat/state.ts";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { SecretsSettings } from "../secrets/SecretsSettings.tsx";
+import { McpSettings } from "./McpSettings.tsx";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
 import { TasciSettings } from "./TasciSettings.tsx";
 import { UsageSettings } from "./UsageSettings.tsx";
@@ -53,6 +54,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
                 label: "Harnesses",
               }]
             : []),
+          {
+            value: "mcp",
+            label: "MCP",
+          },
           {
             value: "tasci",
             label: "Tasci",
@@ -85,6 +90,10 @@ export function WorkspaceSettings({ workspace }: { workspace: workspaces.Workspa
             <HarnessSettings workspace={workspace.name} />
           </SidebarTabsPanel>
         ) : null}
+
+        <SidebarTabsPanel value="mcp">
+          <McpSettings workspace={workspace.name} />
+        </SidebarTabsPanel>
 
         <SidebarTabsPanel value="tasci">
           <TasciSettings workspace={workspace.name} />

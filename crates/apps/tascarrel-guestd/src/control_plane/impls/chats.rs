@@ -94,7 +94,7 @@ impl ExecuteAction for api::CreateChatAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
-        prepare_tasci(
+        prepare_harness(
             &context,
             &self.harness,
             self.model.as_ref().map(|model| model.model.as_ref()),
@@ -123,7 +123,7 @@ impl ExecuteAction for api::CreatePodChatAction {
         self,
         context: InvocationCtx<'_>,
     ) -> Result<Self::Output, Report<wire::OperationError>> {
-        prepare_tasci(
+        prepare_harness(
             &context,
             &self.harness,
             self.model.as_ref().map(|model| model.model.as_ref()),
@@ -220,7 +220,7 @@ impl ExecuteAction for api::AttachChatBindingAction {
             .await
             .map_err(chat_error)?;
         if let Some((harness, model)) = selection {
-            prepare_tasci(
+            prepare_harness(
                 &context,
                 &harness,
                 model.as_ref().map(|model| model.model.as_ref()),
@@ -293,7 +293,7 @@ impl ExecuteAction for api::SendChatPromptAction {
             .map_err(chat_error)?;
         if let Some((harness, model)) = selection {
             let requested_model = self.prompt.model.as_ref().or(model.as_ref());
-            prepare_tasci(
+            prepare_harness(
                 &context,
                 &harness,
                 requested_model.map(|model| model.model.as_ref()),
@@ -315,16 +315,36 @@ impl ExecuteAction for api::SendChatPromptAction {
     }
 }
 
-async fn prepare_tasci(
+/// Resolves host-owned settings needed before a harness may start or attach.
+async fn prepare_harness(
     context: &InvocationCtx<'_>,
     harness: &api::ChatHarnessKind,
     model: Option<&str>,
 ) -> Result<(), Report<wire::OperationError>> {
+    let workspace_name = context.target_workspace()?.clone();
+    let mcp_servers = context
+        .host()
+        .execute(
+            context.nested_host_request_context()?,
+            config_api::ResolveMcpServersAction {
+                workspace_name: workspace_name.clone(),
+                harness: harness.clone(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            wire::OperationError::Unavailable(operation_error_details(error.to_string())).report()
+        })?;
+    context
+        .state()
+        .chats()
+        .harnesses()
+        .configure_mcp_servers(harness.clone(), mcp_servers.mcp_servers);
+
     if harness != &api::ChatHarnessKind::Tasci {
         return Ok(());
     }
-    let workspace_name = context.target_workspace()?.clone();
-    let output = context
+    let tasci = context
         .host()
         .execute(
             context.nested_host_request_context()?,
@@ -337,7 +357,7 @@ async fn prepare_tasci(
         .map_err(|error| {
             wire::OperationError::Unavailable(operation_error_details(error.to_string())).report()
         })?;
-    context.state().chats().harnesses().configure_tasci(output);
+    context.state().chats().harnesses().configure_tasci(tasci);
     Ok(())
 }
 

@@ -7,6 +7,7 @@
 //! only fields consumed by the adaptor, and Serde ignores every other field.
 //! Do not expand them merely to mirror the complete provider protocol.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -57,6 +58,7 @@ use tascarrel_api::types::chats::ChatUsageSnapshot;
 use tascarrel_api::types::chats::ChatUsageState;
 use tascarrel_api::types::chats::StructuredContent;
 use tascarrel_api::types::chats::TextContent;
+use tascarrel_api::types::config as config_api;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::BufReader;
 use tokio::sync::Mutex as AsyncMutex;
@@ -194,6 +196,7 @@ pub struct ClaudeCodeAdaptor {
     process_environment: Option<Arc<dyn ProcessEnvironment>>,
     working_directory: PathBuf,
     harness_version: Option<String>,
+    mcp_servers: ArcVec<config_api::McpServerConfiguration>,
 }
 
 impl ClaudeCodeAdaptor {
@@ -206,6 +209,7 @@ impl ClaudeCodeAdaptor {
             process_environment: None,
             working_directory: PathBuf::from("/workspace"),
             harness_version: None,
+            mcp_servers: ArcVec::new(),
         }
     }
 
@@ -233,6 +237,17 @@ impl ClaudeCodeAdaptor {
         self.working_directory = working_directory;
         self
     }
+
+    /// Applies the host-resolved MCP catalog to sessions started by this
+    /// adaptor.
+    #[must_use]
+    pub(crate) fn with_mcp_servers(
+        mut self,
+        mcp_servers: ArcVec<config_api::McpServerConfiguration>,
+    ) -> Self {
+        self.mcp_servers = mcp_servers;
+        self
+    }
 }
 
 impl Harness for ClaudeCodeAdaptor {
@@ -249,6 +264,7 @@ impl Harness for ClaudeCodeAdaptor {
                 &LaunchOptions::default(),
                 environment.as_deref(),
                 working_directory,
+                &[],
             )
             .await?;
             let response: InitializeResponse =
@@ -283,6 +299,7 @@ impl Harness for ClaudeCodeAdaptor {
         let launcher = Arc::clone(&self.launcher);
         let environment = self.process_environment.clone();
         let working_directory = self.working_directory.clone();
+        let mcp_servers = self.mcp_servers.clone();
         Box::pin(async move {
             let resume = request
                 .resume_cursor
@@ -305,6 +322,7 @@ impl Harness for ClaudeCodeAdaptor {
                 &launch,
                 environment.as_deref(),
                 working_directory,
+                &mcp_servers,
             )
             .await?;
             let initialize: Result<InitializeResponse, HarnessError> =
@@ -2323,6 +2341,7 @@ async fn start_server(
     options: &LaunchOptions,
     process_environment: Option<&dyn ProcessEnvironment>,
     working_directory: PathBuf,
+    mcp_servers: &[config_api::McpServerConfiguration],
 ) -> Result<StartedClaudeProcess, HarnessError> {
     let mut environment = process_environment
         .map(ProcessEnvironment::variables)
@@ -2369,6 +2388,9 @@ async fn start_server(
             options.provider_session_id.0.clone(),
         ]);
     }
+    if let Some(configuration) = claude_mcp_configuration(mcp_servers)? {
+        arguments.extend(["--mcp-config".to_owned(), configuration]);
+    }
     let process = launcher
         .launch(HarnessProcessSpec {
             title: "Claude Code chat harness".to_owned(),
@@ -2394,6 +2416,57 @@ async fn start_server(
         }),
         messages: ClaudeMessages { receiver },
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeMcpConfiguration {
+    mcp_servers: BTreeMap<String, ClaudeMcpServer>,
+}
+
+#[derive(Serialize)]
+struct ClaudeMcpServer {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    url: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
+}
+
+/// Encodes workspace MCP servers in Claude Code's inline configuration shape.
+fn claude_mcp_configuration(
+    mcp_servers: &[config_api::McpServerConfiguration],
+) -> Result<Option<String>, HarnessError> {
+    if mcp_servers.is_empty() {
+        return Ok(None);
+    }
+    let configuration = ClaudeMcpConfiguration {
+        mcp_servers: mcp_servers
+            .iter()
+            .map(|server| {
+                (
+                    server.name.to_string(),
+                    ClaudeMcpServer {
+                        kind: "http",
+                        url: server.endpoint.to_string(),
+                        headers: server
+                            .headers
+                            .iter()
+                            .map(|(name, value)| (name.to_string(), value.to_string()))
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    serde_json::to_string(&configuration)
+        .map(Some)
+        .map_err(|error| {
+            harness_error(
+                HarnessErrorKind::Internal,
+                format!("failed to encode the Claude Code MCP configuration: {error}"),
+            )
+        })
 }
 
 async fn read_messages(
@@ -2915,6 +2988,20 @@ mod tests {
 
     use super::*;
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestClaudeMcpConfiguration {
+        mcp_servers: BTreeMap<String, TestClaudeMcpServer>,
+    }
+
+    #[derive(Deserialize)]
+    struct TestClaudeMcpServer {
+        #[serde(rename = "type")]
+        kind: String,
+        url: String,
+        headers: BTreeMap<String, String>,
+    }
+
     /// Confirms that the pinned catalog supplies missing models in its curated
     /// order, gates new entries by version, and maps the context option to the
     /// native Claude model spelling.
@@ -2967,6 +3054,32 @@ mod tests {
             .into(),
         };
         assert_eq!(native_model_id(&selection), "claude-opus-5[1m]");
+    }
+
+    /// Confirms workspace MCP servers use Claude Code's additive inline
+    /// configuration shape.
+    #[test]
+    fn encodes_mcp_servers_as_claude_code_configuration() {
+        let servers = [config_api::McpServerConfiguration {
+            name: "private-tools".into(),
+            display_name: "Private Tools".into(),
+            endpoint: "https://mcp.example.com/mcp".into(),
+            headers: HashMap::from([(
+                "Authorization".into(),
+                "Bearer tascarrel-secret:mcp-token".into(),
+            )]),
+        }];
+
+        let encoded = claude_mcp_configuration(&servers).unwrap().unwrap();
+        let parsed: TestClaudeMcpConfiguration = serde_json::from_str(&encoded).unwrap();
+        let server = parsed.mcp_servers.get("private-tools").unwrap();
+
+        assert_eq!(server.kind, "http");
+        assert_eq!(server.url, "https://mcp.example.com/mcp");
+        assert_eq!(
+            server.headers.get("Authorization").map(String::as_str),
+            Some("Bearer tascarrel-secret:mcp-token"),
+        );
     }
 
     fn model(id: &str) -> ChatModel {

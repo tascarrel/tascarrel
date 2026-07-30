@@ -883,8 +883,8 @@ inherit = ["REGISTRY-TOKEN"]
         assert!(!message.contains("secret-value"));
     }
 
-    /// Verifies a complete Tasci catalog and its model preferences are loaded
-    /// and later invalid model and header settings retain that catalog.
+    /// Verifies complete Tasci and MCP catalogs are loaded and later invalid
+    /// model and header settings retain those catalogs.
     #[test]
     fn snapshot_validates_tasci_endpoint_and_model_references() {
         let temporary = tempdir().unwrap();
@@ -894,16 +894,8 @@ inherit = ["REGISTRY-TOKEN"]
         fs::write(workspace.join("settings.json"), valid_tasci_settings()).unwrap();
 
         let valid = load(&workspace, 4 * 1024 * 1024).unwrap().into_event(None);
-        let tasci = valid
-            .settings
-            .as_ref()
-            .unwrap()
-            .chat
-            .as_ref()
-            .unwrap()
-            .tasci
-            .as_ref()
-            .unwrap();
+        let chat = valid.settings.as_ref().unwrap().chat.as_ref().unwrap();
+        let tasci = chat.tasci.as_ref().unwrap();
         assert_eq!(tasci.default_model.as_deref(), Some("qwen"));
         assert_eq!(
             tasci.model_order.as_ref().unwrap().as_ref(),
@@ -922,8 +914,9 @@ inherit = ["REGISTRY-TOKEN"]
                 .as_ref(),
             "local"
         );
-        let exa = tasci.mcp_servers.as_ref().unwrap().get("exa").unwrap();
+        let exa = chat.mcp_servers.as_ref().unwrap().get("exa").unwrap();
         assert_eq!(exa.endpoint.as_ref(), "https://mcp.exa.ai/mcp");
+        assert_eq!(exa.harnesses.as_ref().unwrap().len(), 2);
         assert_eq!(
             exa.headers
                 .as_ref()
@@ -969,11 +962,39 @@ inherit = ["REGISTRY-TOKEN"]
                 .message
                 .contains("MCP header names")
         );
+
+        fs::write(
+            workspace.join("settings.json"),
+            valid_tasci_settings().replace(r#"["Tasci", "ClaudeCode"]"#, "[]"),
+        )
+        .unwrap();
+        let invalid = load(&workspace, 4 * 1024 * 1024)
+            .unwrap()
+            .into_event(Some(&valid));
+
+        assert_eq!(invalid.settings, valid.settings);
+        assert!(
+            invalid
+                .last_settings_error
+                .unwrap()
+                .message
+                .contains("MCP harness selectors")
+        );
     }
 
     fn valid_tasci_settings() -> &'static str {
         r#"{
             "chat": {
+                "mcpServers": {
+                    "exa": {
+                        "displayName": "Exa",
+                        "endpoint": "https://mcp.exa.ai/mcp",
+                        "headers": {
+                            "X-Workspace-Token": "tascarrel-secret:mcp-token"
+                        },
+                        "harnesses": ["Tasci", "ClaudeCode"]
+                    }
+                },
                 "tasci": {
                     "defaultModel": "qwen",
                     "modelOrder": ["qwen", "small"],
@@ -999,15 +1020,6 @@ inherit = ["REGISTRY-TOKEN"]
                             "maxOutputTokens": 32768,
                             "toolCalls": true,
                             "parallelToolCalls": true
-                        }
-                    },
-                    "mcpServers": {
-                        "exa": {
-                            "displayName": "Exa",
-                            "endpoint": "https://mcp.exa.ai/mcp",
-                            "headers": {
-                                "X-Workspace-Token": "tascarrel-secret:mcp-token"
-                            }
                         }
                     }
                 }

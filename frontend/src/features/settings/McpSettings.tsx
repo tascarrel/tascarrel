@@ -1,11 +1,27 @@
 import { Pencil, Plus, Save, Trash2, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
-import type { config } from "../../api/generated/index.ts";
+import { hostApi } from "../../api/client.ts";
+import type {
+  chats,
+  config,
+  workspaces,
+} from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
 import { TextInput } from "../../components/ui/TextInput.tsx";
+import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
+import { sameWorkspaceSettings } from "./settingsComparison.ts";
 import { SettingsField } from "./SettingsField.tsx";
+
+const HARNESS_OPTIONS: {
+  value: chats.ChatHarnessKind;
+  label: string;
+}[] = [
+  { value: "Tasci", label: "Tasci" },
+  { value: "Codex", label: "Codex" },
+  { value: "ClaudeCode", label: "Claude Code" },
+];
 
 type McpServerDraft = {
   originalName?: string;
@@ -13,6 +29,7 @@ type McpServerDraft = {
   displayName: string;
   endpoint: string;
   headers: McpHeaderDraft[];
+  harnesses: chats.ChatHarnessKind[];
 };
 
 type McpHeaderDraft = {
@@ -23,27 +40,86 @@ type McpHeaderDraft = {
 
 type McpServerEntry = {
   name: string;
-  server: config.WorkspaceTasciMcpServer;
+  server: config.WorkspaceMcpServer;
 };
 
 let nextHeaderDraftId = 0;
 
-export function TasciMcpSettings({
-  servers,
-  disabled,
-  onSave,
+export function McpSettings({
+  workspace,
 }: {
-  servers: config.WorkspaceTasciSettings["mcpServers"];
-  disabled: boolean;
-  onSave: (
-    servers: NonNullable<config.WorkspaceTasciSettings["mcpServers"]>,
-  ) => Promise<void>;
+  workspace: workspaces.WorkspaceName;
 }) {
+  const configState = useWorkspaceConfig(workspace);
+  const [pendingSettings, setPendingSettings] =
+    useState<config.WorkspaceSettings>();
+  const [savingSettings, setSavingSettings] = useState(false);
   const [draft, setDraft] = useState<McpServerDraft>();
   const [deleteTarget, setDeleteTarget] = useState<string>();
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string>();
+  const observedSettings = configState.value?.settings;
+  const configInstanceId = configState.value?.configInstanceId;
+  const settings = pendingSettings ?? observedSettings ?? {};
+  const servers = settings.chat?.mcpServers;
+  const disabled = savingSettings
+    || pendingSettings !== undefined
+    || !configInstanceId
+    || Boolean(configState.value?.lastSettingsError);
+  const loading = !configInstanceId
+    && !configState.error
+    && !configState.value?.lastSettingsError;
+  const statusMessage = pendingSettings !== undefined
+    ? "Saving MCP settings…"
+    : loading
+      ? "Loading MCP settings…"
+      : undefined;
   const entries = sortedMcpServerEntries(servers);
+
+  useEffect(() => {
+    if (
+      pendingSettings !== undefined
+      && sameWorkspaceSettings(configState.value?.settings, pendingSettings)
+    ) setPendingSettings(undefined);
+  }, [configState.value?.settings, pendingSettings]);
+
+  useEffect(() => {
+    setDraft(undefined);
+    setDeleteTarget(undefined);
+    setError(undefined);
+  }, [workspace]);
+
+  const persistServers = async (
+    nextServers: NonNullable<config.WorkspaceChatSettings["mcpServers"]>,
+  ) => {
+    if (configState.value?.lastSettingsError) {
+      throw new Error("Fix settings.json before changing MCP settings in the UI.");
+    }
+    if (!configInstanceId) {
+      throw new Error("Workspace configuration is not ready yet.");
+    }
+    const nextSettings: config.WorkspaceSettings = {
+      ...settings,
+      chat: {
+        ...(settings.chat ?? {}),
+        mcpServers: nextServers,
+      },
+    };
+    setPendingSettings(nextSettings);
+    setSavingSettings(true);
+    try {
+      await hostApi.execute("config_UpdateSettings", {
+        workspaceName: workspace,
+        configInstanceId,
+        settings: nextSettings,
+      });
+    } catch (cause) {
+      setPendingSettings(undefined);
+      throw cause;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -64,10 +140,13 @@ export function TasciMcpSettings({
       displayName: optionalTrimmed(draft.displayName),
       endpoint: draft.endpoint,
       headers: Object.keys(headers).length ? headers : undefined,
+      harnesses: draft.harnesses.length === HARNESS_OPTIONS.length
+        ? undefined
+        : draft.harnesses,
     };
     setError(undefined);
     try {
-      await onSave(nextServers);
+      await persistServers(nextServers);
       setDraft(undefined);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -81,7 +160,7 @@ export function TasciMcpSettings({
     setDeleting(true);
     setError(undefined);
     try {
-      await onSave(nextServers);
+      await persistServers(nextServers);
       setDeleteTarget(undefined);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -93,81 +172,100 @@ export function TasciMcpSettings({
 
   return (
     <>
-      <section aria-labelledby="tasci-mcp-servers-title">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h3
-              className="text-xs font-medium text-foreground"
-              id="tasci-mcp-servers-title"
-            >
-              MCP Servers
-            </h3>
-            <p className="mt-1 max-w-3xl text-[11px] leading-5 text-subtle">
-              Tasci connects to each Streamable HTTP endpoint and exposes every
-              advertised tool. Header values may contain host-side
-              secret-injection placeholders.
-            </p>
-          </div>
-          <Button
-            disabled={disabled || draft !== undefined}
-            size="small"
-            onClick={() => {
-              setDraft(newMcpServerDraft());
-              setError(undefined);
-            }}
-          >
-            <Plus aria-hidden="true" className="size-3.5" />
-            Add server
-          </Button>
+      <div className="max-w-4xl">
+        <div className="mb-5">
+          <h2 className="text-sm font-semibold text-foreground">MCP Servers</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-5 text-subtle">
+            Configure Streamable HTTP servers once, then choose which coding
+            harnesses receive them for new sessions. Every tool advertised by a
+            configured server is trusted.
+          </p>
         </div>
 
-        {error ? (
+        {error || configState.error || configState.value?.lastSettingsError ? (
           <p
-            className="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-200"
+            className="mb-4 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-200"
             role="alert"
           >
-            {error}
+            {error
+              ?? configState.error?.message
+              ?? configState.value?.lastSettingsError?.message}
           </p>
         ) : null}
 
-        <div className="mt-3 overflow-hidden rounded-xl border border-ui-border">
-          {entries.map(({ name, server }) => (
-            <McpServerRow
+        {statusMessage ? (
+          <p className="mb-4 text-xs text-subtle" role="status">
+            {statusMessage}
+          </p>
+        ) : null}
+
+        <section aria-labelledby="mcp-server-catalog-title">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3
+                className="text-xs font-medium text-foreground"
+                id="mcp-server-catalog-title"
+              >
+                Server Catalog
+              </h3>
+              <p className="mt-1 max-w-3xl text-[11px] leading-5 text-subtle">
+                Header values may contain host-side secret-injection
+                placeholders. Existing harness sessions keep the catalog with
+                which they started.
+              </p>
+            </div>
+            <Button
               disabled={disabled || draft !== undefined}
-              key={name}
-              name={name}
-              server={server}
-              onDelete={() => setDeleteTarget(name)}
-              onEdit={() => {
-                setDraft(editMcpServerDraft(name, server));
+              size="small"
+              onClick={() => {
+                setDraft(newMcpServerDraft());
                 setError(undefined);
               }}
-            />
-          ))}
-          {!entries.length ? (
-            <p className="bg-surface/50 px-4 py-5 text-xs text-subtle">
-              No MCP servers are configured.
-            </p>
-          ) : null}
-        </div>
+            >
+              <Plus aria-hidden="true" className="size-3.5" />
+              Add server
+            </Button>
+          </div>
 
-        {draft ? (
-          <McpServerEditor
-            disabled={disabled}
-            draft={draft}
-            onCancel={() => {
-              setDraft(undefined);
-              setError(undefined);
-            }}
-            onChange={setDraft}
-            onSubmit={save}
-          />
-        ) : null}
-      </section>
+          <div className="mt-3 overflow-hidden rounded-xl border border-ui-border">
+            {entries.map(({ name, server }) => (
+              <McpServerRow
+                disabled={disabled || draft !== undefined}
+                key={name}
+                name={name}
+                server={server}
+                onDelete={() => setDeleteTarget(name)}
+                onEdit={() => {
+                  setDraft(editMcpServerDraft(name, server));
+                  setError(undefined);
+                }}
+              />
+            ))}
+            {!entries.length && configInstanceId ? (
+              <p className="bg-surface/50 px-4 py-5 text-xs text-subtle">
+                No MCP servers are configured.
+              </p>
+            ) : null}
+          </div>
+
+          {draft ? (
+            <McpServerEditor
+              disabled={disabled}
+              draft={draft}
+              onCancel={() => {
+                setDraft(undefined);
+                setError(undefined);
+              }}
+              onChange={setDraft}
+              onSubmit={save}
+            />
+          ) : null}
+        </section>
+      </div>
 
       <ConfirmDialog
         confirmLabel="Delete server"
-        description={`Delete MCP server ${deleteTarget ?? ""}? Its tools will no longer be available to new Tasci sessions.`}
+        description={`Delete MCP server ${deleteTarget ?? ""}? Its tools will no longer be available to new harness sessions.`}
         destructive
         open={deleteTarget !== undefined}
         pending={deleting}
@@ -189,7 +287,7 @@ function McpServerRow({
   onDelete,
 }: {
   name: string;
-  server: config.WorkspaceTasciMcpServer;
+  server: config.WorkspaceMcpServer;
   disabled: boolean;
   onEdit: () => void;
   onDelete: () => void;
@@ -205,10 +303,11 @@ function McpServerRow({
           {server.endpoint}
         </p>
         <p className="mt-1 text-[10px] text-subtle">
-          Tool namespace <code>mcp__{name}__*</code> ·{" "}
+          Server key <code>{name}</code> ·{" "}
           {headerCount
             ? `${headerCount} header ${headerCount === 1 ? "template" : "templates"}`
-            : "No custom headers"}
+            : "No custom headers"}{" "}
+          · {mcpHarnessLabel(server.harnesses)}
         </p>
       </div>
       <div className="flex items-center gap-1">
@@ -293,6 +392,42 @@ function McpServerEditor({
           </SettingsField>
         </div>
       </div>
+
+      <fieldset className="mt-4">
+        <legend className="text-[11px] font-medium text-foreground">
+          Harnesses
+        </legend>
+        <p className="mt-1 text-[10px] leading-4 text-subtle">
+          Select every harness that should receive this server when starting a
+          new session.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+          {HARNESS_OPTIONS.map((option) => (
+            <label
+              className="flex items-center gap-2 text-xs text-foreground"
+              key={option.value}
+            >
+              <input
+                checked={draft.harnesses.includes(option.value)}
+                className="size-3.5 accent-accent"
+                disabled={disabled}
+                type="checkbox"
+                onChange={(event) =>
+                  onChange({
+                    ...draft,
+                    harnesses: event.target.checked
+                      ? [...draft.harnesses, option.value]
+                      : draft.harnesses.filter(
+                          (harness) => harness !== option.value,
+                        ),
+                  })
+                }
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -397,7 +532,7 @@ function McpServerEditor({
 }
 
 function sortedMcpServerEntries(
-  servers: config.WorkspaceTasciSettings["mcpServers"],
+  servers: config.WorkspaceChatSettings["mcpServers"],
 ): McpServerEntry[] {
   return Object.entries(servers ?? {})
     .flatMap(([name, server]) => (server ? [{ name, server }] : []))
@@ -410,12 +545,13 @@ function newMcpServerDraft(): McpServerDraft {
     displayName: "",
     endpoint: "",
     headers: [],
+    harnesses: HARNESS_OPTIONS.map((option) => option.value),
   };
 }
 
 function editMcpServerDraft(
   name: string,
-  server: config.WorkspaceTasciMcpServer,
+  server: config.WorkspaceMcpServer,
 ): McpServerDraft {
   return {
     originalName: name,
@@ -425,6 +561,9 @@ function editMcpServerDraft(
     headers: Object.entries(server.headers ?? {}).map(([headerName, value]) =>
       newMcpHeaderDraft(headerName, value),
     ),
+    harnesses: server.harnesses
+      ? [...server.harnesses]
+      : HARNESS_OPTIONS.map((option) => option.value),
   };
 }
 
@@ -443,7 +582,7 @@ function updateHeader(
 
 function validateMcpServerDraft(
   draft: McpServerDraft,
-  servers: config.WorkspaceTasciSettings["mcpServers"],
+  servers: config.WorkspaceChatSettings["mcpServers"],
 ): string | undefined {
   if (!/^[A-Za-z0-9_-]+$/.test(draft.name)) {
     return "Server name may contain only ASCII letters, digits, hyphens, and underscores.";
@@ -465,6 +604,9 @@ function validateMcpServerDraft(
   } catch {
     return "MCP endpoint is invalid.";
   }
+  if (!draft.harnesses.length) {
+    return "Select at least one harness.";
+  }
   const names = new Set<string>();
   for (const header of draft.headers) {
     if (!header.name || header.name.trim() !== header.name) {
@@ -482,6 +624,21 @@ function validateMcpServerDraft(
     names.add(canonicalName);
   }
   return undefined;
+}
+
+function mcpHarnessLabel(
+  harnesses: config.WorkspaceMcpServer["harnesses"],
+): string {
+  if (!harnesses || harnesses.length === HARNESS_OPTIONS.length) {
+    return "All harnesses";
+  }
+  return harnesses
+    .map(
+      (harness) =>
+        HARNESS_OPTIONS.find((option) => option.value === harness)?.label
+        ?? harness,
+    )
+    .join(", ");
 }
 
 function optionalTrimmed(value: string): string | undefined {

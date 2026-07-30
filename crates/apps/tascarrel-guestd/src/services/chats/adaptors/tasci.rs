@@ -11,7 +11,6 @@ use jiff::Timestamp;
 use tascarrel_agent::AgentEvent;
 use tascarrel_agent::CompactionReason;
 use tascarrel_agent::HttpAuthorization;
-use tascarrel_agent::McpServerConfiguration;
 use tascarrel_agent::ModelUsage;
 use tascarrel_agent::TasciHarnessCommand;
 use tascarrel_agent::TasciHarnessConfiguration;
@@ -37,6 +36,7 @@ use tascarrel_api::types::chats::ChatUsageSnapshot;
 use tascarrel_api::types::chats::ChatUsageState;
 use tascarrel_api::types::chats::StructuredContent;
 use tascarrel_api::types::chats::TextContent;
+use tascarrel_api::types::config as config_api;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
@@ -71,6 +71,7 @@ pub struct TasciAdaptor {
     launcher: Arc<dyn HarnessProcessLauncher>,
     configuration: TasciRuntimeConfiguration,
     configurations: TasciConfigurationStore,
+    mcp_servers: ArcVec<config_api::McpServerConfiguration>,
 }
 
 impl TasciAdaptor {
@@ -87,7 +88,19 @@ impl TasciAdaptor {
             launcher,
             configuration,
             configurations,
+            mcp_servers: ArcVec::new(),
         }
+    }
+
+    /// Applies the host-resolved MCP catalog to sessions started by this
+    /// adaptor.
+    #[must_use]
+    pub(crate) fn with_mcp_servers(
+        mut self,
+        mcp_servers: ArcVec<config_api::McpServerConfiguration>,
+    ) -> Self {
+        self.mcp_servers = mcp_servers;
+        self
     }
 }
 
@@ -123,7 +136,10 @@ impl Harness for TasciAdaptor {
             write_command(
                 &process.control,
                 TasciHarnessCommand::Start {
-                    configuration: self.configuration.harness.clone(),
+                    configuration: harness_configuration(
+                        self.configuration.harness.clone(),
+                        &self.mcp_servers,
+                    ),
                     session: Some(requested_session.protocol),
                 },
             )
@@ -180,6 +196,7 @@ impl Harness for TasciAdaptor {
                     process: process.control,
                     state,
                     configurations: self.configurations.clone(),
+                    mcp_servers: self.mcp_servers.clone(),
                     events: control_events,
                 }),
                 events: Box::new(TasciEvents { receiver }),
@@ -263,6 +280,7 @@ struct TasciControl {
     process: Arc<dyn HarnessProcessControl>,
     state: Arc<Mutex<TasciSessionState>>,
     configurations: TasciConfigurationStore,
+    mcp_servers: ArcVec<config_api::McpServerConfiguration>,
     events: mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
 }
 
@@ -371,7 +389,7 @@ impl TasciControl {
         let changed_configuration = if requested_model == current_model {
             None
         } else {
-            Some(
+            Some(harness_configuration(
                 self.configurations
                     .configuration(requested_model.model.as_ref())
                     .ok_or_else(|| {
@@ -384,7 +402,8 @@ impl TasciControl {
                         )
                     })?
                     .harness,
-            )
+                &self.mcp_servers,
+            ))
         };
         let turn_id = {
             let mut state = lock(&self.state);
@@ -1409,20 +1428,6 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
             .authorization_header
             .zip(output.authorization_value)
             .map(|(header, value)| HttpAuthorization::new(header, value));
-        let mcp_servers = output
-            .mcp_servers
-            .iter()
-            .map(|server| McpServerConfiguration {
-                name: server.name.to_string(),
-                display_name: server.display_name.to_string(),
-                endpoint: server.endpoint.to_string(),
-                headers: server
-                    .headers
-                    .iter()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
-                    .collect(),
-            })
-            .collect();
         Self {
             selection: ChatModelSelection {
                 model: output.selected_model,
@@ -1435,11 +1440,32 @@ impl From<tascarrel_api::types::config::ResolveTasciModelOutput> for TasciRuntim
                 max_output_tokens: output.max_output_tokens,
                 authorization,
                 working_directory: "/workspace".to_owned(),
-                mcp_servers,
+                mcp_servers: Vec::new(),
             },
             models: output.models,
         }
     }
+}
+
+/// Applies workspace MCP servers to one resolved Tasci model configuration.
+fn harness_configuration(
+    mut configuration: TasciHarnessConfiguration,
+    servers: &[config_api::McpServerConfiguration],
+) -> TasciHarnessConfiguration {
+    configuration.mcp_servers = servers
+        .iter()
+        .map(|server| tascarrel_agent::McpServerConfiguration {
+            name: server.name.to_string(),
+            display_name: server.display_name.to_string(),
+            endpoint: server.endpoint.to_string(),
+            headers: server
+                .headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        })
+        .collect();
+    configuration
 }
 
 #[cfg(test)]

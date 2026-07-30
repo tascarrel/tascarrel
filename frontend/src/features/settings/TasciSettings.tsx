@@ -10,7 +10,6 @@ import { TextInput } from "../../components/ui/TextInput.tsx";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
 import { SettingsField } from "./SettingsField.tsx";
-import { TasciMcpSettings } from "./TasciMcpSettings.tsx";
 
 const NO_DEFAULT_MODEL = "__tasci_no_default_model__";
 
@@ -382,11 +381,6 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
           />
         </section>
 
-        <TasciMcpSettings
-          disabled={mutationDisabled}
-          servers={tasci.mcpServers}
-          onSave={(mcpServers) => persistTasci({ ...tasci, mcpServers })}
-        />
       </div>
 
       <ConfirmDialog
