@@ -132,8 +132,8 @@ record Pod {
 /// Current lifecycle state of a pod.
 #[json(tag = "status")]
 variant PodState {
-    /// The pod's persistent resources are being created.
-    Creating,
+    /// The pod's inputs or persistent resources are being prepared.
+    Creating: PodCreation,
     /// A workspace image is being generated before persistent pod resources can be created.
     Building: PodImageBuild,
     /// The pod's execution environment is being started.
@@ -150,6 +150,29 @@ variant PodState {
     Destroying,
     /// The pod could not complete a lifecycle transition.
     Failed: PodFailure,
+}
+
+/// Progress reported while creating one pod.
+record PodCreation {
+    /// Stable, machine-readable category for the current creation work.
+    phase: PodCreationPhase,
+    /// Backend-owned progress message intended for direct display to the user.
+    /// Clients must not interpret its contents.
+    message: string,
+    /// Time at which the current progress message became active.
+    updated_at: Timestamp,
+}
+
+/// Broad category of work currently blocking pod creation.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant PodCreationPhase {
+    /// External inputs and the workspace image are being prepared.
+    Preparing,
+    /// The pod's durable resources are being materialized.
+    Materializing,
+    /// Interrupted pod creation is being recovered after guest daemon startup.
+    Recovering,
 }
 
 /// Failure encountered while changing a pod's lifecycle state.

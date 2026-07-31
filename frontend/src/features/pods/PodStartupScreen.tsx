@@ -1,7 +1,9 @@
 import { LoaderCircle } from "lucide-react";
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
+  useState,
   type ReactNode,
   type UIEvent,
 } from "react";
@@ -25,9 +27,10 @@ export function PodStartupScreen({
       log={<PodStartupLog state={pod.status} workspace={workspace} />}
       title={presentation.title}
     >
-      <p className="mx-auto max-w-xl text-xs leading-5 text-muted">
+      <p aria-live="polite" className="mx-auto max-w-xl text-xs leading-5 text-muted">
         {presentation.detail}
       </p>
+      {pod.status.status === "Creating" ? <PodCreationTiming state={pod.status} /> : null}
     </LifecycleScreenFrame>
   );
 }
@@ -46,6 +49,8 @@ type StartingPodState = Extract<
   { status: "Creating" | "Building" | "Starting" | "Initializing" }
 >;
 
+type CreatingPodState = Extract<pods.PodState, { status: "Creating" }>;
+
 function PodStartupLog({
   state,
   workspace,
@@ -53,6 +58,7 @@ function PodStartupLog({
   state: StartingPodState;
   workspace: workspaces.WorkspaceName;
 }) {
+  if (state.status === "Creating") return null;
   if (state.status === "Building") {
     return <ImageBuildLog imageId={state.imageId} workspace={workspace} />;
   }
@@ -62,11 +68,28 @@ function PodStartupLog({
   return (
     <StartupLogFrame label="Pod startup log">
       <pre className={LOG_OUTPUT_CLASS_NAME} role="log" aria-label="Pod startup output">
-        {state.status === "Creating"
-          ? "Preparing pod resources. Logs will appear when a startup task produces output."
-          : "Starting the pod runtime. Waiting for initialization output…"}
+        Starting the pod runtime. Waiting for initialization output…
       </pre>
     </StartupLogFrame>
+  );
+}
+
+function PodCreationTiming({ state }: { state: CreatingPodState }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [state.updatedAt]);
+  const updatedAt = new Date(state.updatedAt);
+  const updatedAtMillis = updatedAt.getTime();
+  if (Number.isNaN(updatedAtMillis)) return null;
+  return (
+    <p className="mt-2 text-[10px] text-subtle">
+      <time dateTime={state.updatedAt} title={updatedAt.toLocaleString()}>
+        Current step for {formatElapsed(now - updatedAtMillis)}
+      </time>
+    </p>
   );
 }
 
@@ -224,8 +247,17 @@ function startupPresentation(state: StartingPodState): {
   }
   return {
     title: "Creating Pod",
-    detail: "Preparing the workspace image and persistent pod resources.",
+    detail: state.message,
   };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 function formatImageLogLine(line: images.ImageLogLine): string {

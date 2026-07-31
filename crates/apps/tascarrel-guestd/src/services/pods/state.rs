@@ -347,9 +347,13 @@ fn decode_persistent_state(status: &str) -> Result<PersistentPodState, Report<Po
 }
 
 /// Chooses the initial API status for one recovered persistent state.
-const fn runtime_status(state: PersistentPodState) -> api::PodState {
+fn runtime_status(state: PersistentPodState) -> api::PodState {
     match state {
-        PersistentPodState::Creating => api::PodState::Creating,
+        PersistentPodState::Creating => api::PodState::Creating(api::PodCreation {
+            phase: api::PodCreationPhase::Recovering,
+            message: "Recovering pod resources.".into(),
+            updated_at: Timestamp::now(),
+        }),
         PersistentPodState::Ready => api::PodState::Stopped,
         PersistentPodState::Destroying | PersistentPodState::Destroyed => api::PodState::Destroying,
     }
@@ -402,7 +406,11 @@ mod tests {
         let pod = api::Pod {
             id: api::PodId::generate(),
             title: "Image setup".into(),
-            status: api::PodState::Creating,
+            status: api::PodState::Creating(api::PodCreation {
+                phase: api::PodCreationPhase::Materializing,
+                message: "Creating pod storage.".into(),
+                updated_at: Timestamp::now(),
+            }),
             created_at: Timestamp::now(),
         };
         let image = ImageId::new(format!("sha256:{}", "a".repeat(64))).unwrap();

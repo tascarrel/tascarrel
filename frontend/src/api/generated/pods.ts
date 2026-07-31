@@ -148,7 +148,25 @@ import * as __schema_workspaces from "./workspaces";
 /**
  * Current lifecycle state of a pod.
  */
- export type PodState = ({ "status": "Creating" } | ({ "status": "Building" } & PodImageBuild) | { "status": "Starting" } | ({ "status": "Initializing" } & PodInitialization) | { "status": "Running" } | { "status": "Stopping" } | { "status": "Stopped" } | { "status": "Destroying" } | ({ "status": "Failed" } & PodFailure));
+ export type PodState = (({ "status": "Creating" } & PodCreation) | ({ "status": "Building" } & PodImageBuild) | { "status": "Starting" } | ({ "status": "Initializing" } & PodInitialization) | { "status": "Running" } | { "status": "Stopping" } | { "status": "Stopped" } | { "status": "Destroying" } | ({ "status": "Failed" } & PodFailure));
+/**
+ * Progress reported while creating one pod.
+ */
+ export type PodCreation = { /**
+                                            * Stable, machine-readable category for the current creation work.
+                                            */
+                                                        "phase": PodCreationPhase, /**
+                                            * Backend-owned progress message intended for direct display to the user.
+                                            * Clients must not interpret its contents.
+                                            */
+                                                        "message": __sidex_types.builtins.String, /**
+                                            * Time at which the current progress message became active.
+                                            */
+                                                        "updatedAt": __schema_common.Timestamp };
+/**
+ * Broad category of work currently blocking pod creation.
+ */
+ export type PodCreationPhase = ("Preparing" | "Materializing" | "Recovering");
 /**
  * Failure encountered while changing a pod's lifecycle state.
  */

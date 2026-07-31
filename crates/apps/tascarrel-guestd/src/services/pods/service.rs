@@ -237,7 +237,10 @@ impl PodService {
         let pod = api::Pod {
             id: pod_id.clone(),
             title,
-            status: api::PodState::Creating,
+            status: creation_status(
+                api::PodCreationPhase::Preparing,
+                "Preparing repository caches.",
+            ),
             created_at: Timestamp::now(),
         };
         lock(&self.inner.pending).insert(pod_id.clone(), pod.clone());
@@ -252,6 +255,18 @@ impl PodService {
             let monitored_pod_id = created_pod_id.clone();
             let creation = tokio::spawn(async move {
                 let repositories = repositories.await?;
+                if !service
+                    .transition_pending_creation(
+                        &created_pod_id,
+                        creation_status(
+                            api::PodCreationPhase::Preparing,
+                            "Resolving the workspace image.",
+                        ),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
                 service
                     .complete_creation(
                         &created_pod_id,
@@ -313,7 +328,13 @@ impl PodService {
                         .await
                         .map_err(|error| internal(format!("build pod image: {error}")))?;
                     if !self
-                        .transition_pending_creation(pod_id, api::PodState::Creating)
+                        .transition_pending_creation(
+                            pod_id,
+                            creation_status(
+                                api::PodCreationPhase::Preparing,
+                                "Resolving the workspace image.",
+                            ),
+                        )
                         .await?
                     {
                         return Ok(());
@@ -322,16 +343,39 @@ impl PodService {
             }
         };
 
+        if !self
+            .transition_pending_creation(
+                pod_id,
+                creation_status(
+                    api::PodCreationPhase::Preparing,
+                    "Updating the workspace seed.",
+                ),
+            )
+            .await?
+        {
+            return Ok(());
+        }
         images
             .update_resolved_workspace_seed(&generation, repositories)
             .await
             .map_err(|error| internal(format!("update pod image workspace seed: {error}")))?;
 
+        if !self
+            .transition_pending_creation(
+                pod_id,
+                creation_status(
+                    api::PodCreationPhase::Materializing,
+                    "Allocating pod resources.",
+                ),
+            )
+            .await?
+        {
+            return Ok(());
+        }
         let _operation = self.pod_operation(pod_id).lock_owned().await;
-        let Some(mut pod) = lock(&self.inner.pending).get(pod_id).cloned() else {
+        let Some(pod) = lock(&self.inner.pending).get(pod_id).cloned() else {
             return Ok(());
         };
-        pod.status = api::PodState::Creating;
         let record = self
             .inner
             .state
@@ -1215,7 +1259,10 @@ impl PodService {
         let pod = api::Pod {
             id: pod_id,
             title,
-            status: api::PodState::Creating,
+            status: creation_status(
+                api::PodCreationPhase::Materializing,
+                "Allocating pod resources.",
+            ),
             created_at: Timestamp::now(),
         };
         let record = self
@@ -1238,6 +1285,11 @@ impl PodService {
     ) -> Result<PodRecord, Report<PodServiceError>> {
         let runtime_id = runtime_id(&record.pod.id)?;
 
+        record.pod.status = creation_status(
+            api::PodCreationPhase::Materializing,
+            "Creating pod storage.",
+        );
+        self.publish_record(record.clone());
         let storage = Arc::clone(&self.inner.storage);
         let created = blocking("create pod storage", move || {
             if setup_basis {
@@ -1254,10 +1306,20 @@ impl PodService {
                 return Err(error);
             }
         };
+        record.pod.status = creation_status(
+            api::PodCreationPhase::Materializing,
+            "Configuring Nix store access.",
+        );
+        self.publish_record(record.clone());
         if let Err(error) = self.provision_nix_roots(&record, &storage).await {
             self.mark_failed(&mut record, error.to_string());
             return Err(error);
         }
+        record.pod.status = creation_status(
+            api::PodCreationPhase::Materializing,
+            "Finalizing pod resources.",
+        );
+        self.publish_record(record.clone());
         record.persistent_state = PersistentPodState::Ready;
         record.pod.status = api::PodState::Stopped;
         self.commit_persistent_record(record.clone()).await?;
@@ -2263,6 +2325,15 @@ fn runtime_stamp(
 /// Converts a statically non-zero service default.
 fn nonzero_default(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("service default is statically non-zero")
+}
+
+/// Creates one user-visible pod creation progress state.
+fn creation_status(phase: api::PodCreationPhase, message: &'static str) -> api::PodState {
+    api::PodState::Creating(api::PodCreation {
+        phase,
+        message: message.into(),
+        updated_at: Timestamp::now(),
+    })
 }
 
 /// Runs a blocking pod operation and converts infrastructure failures.
