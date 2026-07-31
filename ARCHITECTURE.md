@@ -402,7 +402,12 @@ pass-through traffic remains opaque.
 The guest firewall also denies direct pod-to-guest and pod-to-pod traffic unless
 Tascarrel provides an explicit path. A pod reaches configured services on the
 host through a reserved synthetic address, which `hostd` translates only to
-approved ports bound to the host's loopback interface (`localhost`).
+approved ports bound to the host's loopback interface (`localhost`). When the
+pod-visible port is configured as HTTP or HTTPS, `hostd` mediates the connection
+even if no external hostname policy requires inspection. Secret-injection rules
+use `host.tascarrel.internal` as the logical request host. Before forwarding the
+request, the proxy rewrites `Host` and any same-origin `Origin` to `localhost`.
+Host mappings on other ports remain raw TCP connections.
 
 For inbound traffic, `hostd` owns the loopback listeners and HTTP routes for
 published pod services. Once a connection is accepted, it asks `guestd` to

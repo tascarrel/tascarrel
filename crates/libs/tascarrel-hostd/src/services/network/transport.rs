@@ -86,6 +86,13 @@ impl TcpDestination {
             Self::ConfiguredHost { .. } => None,
         }
     }
+
+    fn connection_host(&self) -> String {
+        match self {
+            Self::Socket(address) => address.ip().to_string(),
+            Self::ConfiguredHost { host, .. } => host.clone(),
+        }
+    }
 }
 
 impl NetworkService {
@@ -248,7 +255,8 @@ impl NetworkService {
             .report());
         };
         let source = network_source(&request.source)?;
-        let pod_host_forward = (request.destination.ip() == IpAddr::V4(VIRTUAL_HOST_ADDRESS))
+        let virtual_host = request.destination.ip() == IpAddr::V4(VIRTUAL_HOST_ADDRESS);
+        let pod_host_forward = virtual_host
             .then(|| {
                 self.pod_host_forward_destination(workspace, &source, request.destination.port())
             })
@@ -310,11 +318,16 @@ impl NetworkService {
                 Ok(()) => {
                     let request_recorder =
                         self.http_request_recorder(workspace, tcp_flow_id.clone(), source.clone());
-                    let proxy_service = HttpProxy::new(
-                        policy.clone(),
-                        authority,
-                        self.inner.config.connect_timeout,
-                    );
+                    let proxy_service = if virtual_host {
+                        HttpProxy::for_host_port(
+                            policy.clone(),
+                            authority,
+                            self.inner.config.connect_timeout,
+                            destination.connection_host(),
+                        )
+                    } else {
+                        HttpProxy::new(policy.clone(), authority, self.inner.config.connect_timeout)
+                    };
                     let channel = framed.into_inner();
                     match proxy {
                         ProxyMode::Http => {
@@ -614,8 +627,9 @@ fn tcp_destination(
     host_port_host: &str,
 ) -> Result<(TcpDestination, Option<ProxyMode>), TcpAdmissionError> {
     if requested.ip() == IpAddr::V4(VIRTUAL_HOST_ADDRESS) {
+        let proxy = proxy_mode_for_port(policy, requested.port());
         if let Some(destination) = pod_host_forward {
-            return Ok((TcpDestination::Socket(destination), None));
+            return Ok((TcpDestination::Socket(destination), proxy));
         }
         let mapping = policy
             .host_ports
@@ -627,21 +641,16 @@ fn tcp_destination(
                 host: host_port_host.to_owned(),
                 port: mapping.host_port,
             },
-            None,
+            proxy,
         ));
     }
     if !policy.allow_ports.contains(&requested.port()) {
         return Err(TcpAdmissionError::Denied);
     }
-    let proxy = if policy.needs_hostname_inspection()
-        && policy.http_ports.contains(&requested.port())
-    {
-        Some(ProxyMode::Http)
-    } else if policy.needs_hostname_inspection() && policy.https_ports.contains(&requested.port()) {
-        Some(ProxyMode::Https)
-    } else {
-        None
-    };
+    let proxy = policy
+        .needs_hostname_inspection()
+        .then(|| proxy_mode_for_port(policy, requested.port()))
+        .flatten();
     if proxy.is_some() {
         return Ok((TcpDestination::Socket(requested), proxy));
     }
@@ -654,6 +663,17 @@ fn tcp_destination(
         return Err(TcpAdmissionError::Denied);
     }
     Ok((TcpDestination::Socket(requested), None))
+}
+
+/// Selects the configured HTTP mediator for one pod-visible port.
+fn proxy_mode_for_port(policy: &NetworkPolicy, port: u16) -> Option<ProxyMode> {
+    if policy.http_ports.contains(&port) {
+        Some(ProxyMode::Http)
+    } else if policy.https_ports.contains(&port) {
+        Some(ProxyMode::Https)
+    } else {
+        None
+    }
 }
 
 async fn connect_tcp_destination(destination: &TcpDestination) -> io::Result<TcpStream> {
@@ -744,6 +764,40 @@ mod tests {
                 port: 3000,
             }
         );
+    }
+
+    /// Verifies host services on configured HTTP and HTTPS ports enter the
+    /// corresponding mediator even without external hostname policy.
+    #[test]
+    fn virtual_host_uses_configured_http_mediators() {
+        let policy = NetworkPolicy {
+            host_ports: vec![
+                HostPortMapping {
+                    host_port: 8080,
+                    pod_port: 18080,
+                },
+                HostPortMapping {
+                    host_port: 8443,
+                    pod_port: 18443,
+                },
+            ],
+            http_ports: vec![18080],
+            https_ports: vec![18443],
+            ..NetworkPolicy::default()
+        };
+
+        let http = SocketAddr::new(IpAddr::V4(VIRTUAL_HOST_ADDRESS), 18080);
+        let (_, proxy) = tcp_destination(http, &policy, None, "outer.internal").unwrap();
+        assert!(matches!(proxy, Some(ProxyMode::Http)));
+        let dynamic = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 28080);
+        let (destination, proxy) =
+            tcp_destination(http, &policy, Some(dynamic), "outer.internal").unwrap();
+        assert_eq!(destination, TcpDestination::Socket(dynamic));
+        assert!(matches!(proxy, Some(ProxyMode::Http)));
+
+        let https = SocketAddr::new(IpAddr::V4(VIRTUAL_HOST_ADDRESS), 18443);
+        let (_, proxy) = tcp_destination(https, &policy, None, "outer.internal").unwrap();
+        assert!(matches!(proxy, Some(ProxyMode::Https)));
     }
 
     /// Verifies a dynamic pod-scoped mapping takes precedence over a static

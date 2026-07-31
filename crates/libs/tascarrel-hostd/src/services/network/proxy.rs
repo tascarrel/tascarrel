@@ -1,9 +1,10 @@
 //! HTTP and TLS policy enforcement for attributed guest TCP flows.
 //!
-//! [`HttpProxy`] resolves admitted hostnames on the host. It relays TLS
-//! unchanged unless the connection's SNI matches an HTTPS secret-injection
-//! rule, in which case it terminates TLS and enforces the configured HTTP host
-//! and method policy before injecting secrets.
+//! [`HttpProxy`] resolves admitted hostnames on the host. It relays external
+//! TLS unchanged unless the connection's SNI matches an HTTPS secret-injection
+//! rule. HTTP and HTTPS connections to exposed host services are always
+//! mediated so the proxy can inject secrets and rewrite request authority to
+//! localhost.
 
 use std::convert::Infallible;
 use std::io;
@@ -26,13 +27,16 @@ use hyper::Method;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
+use hyper::Uri;
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as client_http1;
 use hyper::header::CONNECTION;
 use hyper::header::HOST;
 use hyper::header::HeaderName;
 use hyper::header::HeaderValue;
+use hyper::header::ORIGIN;
 use hyper::header::UPGRADE;
+use hyper::http::uri::Authority;
 use hyper::server::conn::http1 as server_http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -42,6 +46,7 @@ use rustls::ClientConfig;
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
 use tascarrel_api::types::workspaces::WorkspaceName;
+use tascarrel_protocol::network::VIRTUAL_HOSTNAME;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
@@ -75,6 +80,12 @@ struct HttpConnectionContext {
     workspace_name: WorkspaceName,
     secrets: SecretsService,
     request_recorder: HttpRequestRecorder,
+}
+
+#[derive(Clone, Debug)]
+enum HttpProxyTarget {
+    RequestHost,
+    HostPort { connection_host: String },
 }
 
 #[derive(Debug, Error)]
@@ -179,6 +190,7 @@ pub(crate) struct HttpProxy {
     authority: Option<Arc<WorkspaceAuthority>>,
     interception_client_tls: Option<Arc<ClientConfig>>,
     connect_timeout: Duration,
+    target: HttpProxyTarget,
 }
 
 impl std::fmt::Debug for HttpProxy {
@@ -188,6 +200,7 @@ impl std::fmt::Debug for HttpProxy {
             .field("policy", &self.policy)
             .field("authority", &self.authority)
             .field("connect_timeout", &self.connect_timeout)
+            .field("target", &self.target)
             .finish_non_exhaustive()
     }
 }
@@ -204,6 +217,24 @@ impl HttpProxy {
             authority,
             interception_client_tls,
             connect_timeout,
+            target: HttpProxyTarget::RequestHost,
+        }
+    }
+
+    /// Creates a proxy for one explicitly exposed host service.
+    pub fn for_host_port(
+        policy: NetworkPolicy,
+        authority: Option<Arc<WorkspaceAuthority>>,
+        connect_timeout: Duration,
+        connection_host: String,
+    ) -> Self {
+        let interception_client_tls = authority.as_deref().map(interception_client_config);
+        Self {
+            policy,
+            authority,
+            interception_client_tls,
+            connect_timeout,
+            target: HttpProxyTarget::HostPort { connection_host },
         }
     }
 
@@ -259,7 +290,7 @@ impl HttpProxy {
             .ok_or_else(|| proxy_error("TLS SNI is required"))?
             .to_ascii_lowercase();
         self.require_host(&host)?;
-        if !self.policy.injects_secret_for_host(&host) {
+        if !self.intercepts_tls_for_host(&host) {
             return self.relay_tls(start.io, &host, port).await;
         }
         let authority = self
@@ -424,7 +455,8 @@ impl HttpProxy {
         }
         let wants_upgrade = requests_upgrade(request.headers())?;
         let pod_upgrade = wants_upgrade.then(|| hyper::upgrade::on(&mut request));
-        let host = request_host(&request)?;
+        let request_authority = request_authority(&request)?;
+        let host = request_authority.host().to_ascii_lowercase();
         audit.host = Some(host.clone());
         self.require_host(&host)?;
         if context.tls_host.as_deref().is_some_and(|sni| sni != host) {
@@ -432,6 +464,9 @@ impl HttpProxy {
         }
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
+        if matches!(&self.target, HttpProxyTarget::HostPort { .. }) {
+            rewrite_host_port_request(request.headers_mut(), &request_authority)?;
+        }
         audit.secrets_injected = self
             .inject_secrets(
                 request.headers_mut(),
@@ -455,7 +490,11 @@ impl HttpProxy {
                 .interception_client_tls
                 .as_ref()
                 .ok_or_else(|| proxy_error("workspace HTTPS authority is unavailable"))?;
-            let name = ServerName::try_from(host.clone())
+            let tls_host = match &self.target {
+                HttpProxyTarget::RequestHost => host.clone(),
+                HttpProxyTarget::HostPort { .. } => "localhost".to_owned(),
+            };
+            let name = ServerName::try_from(tls_host)
                 .map_err(|error| proxy_error(format!("invalid TLS server name: {error}")))?;
             let tls = TlsConnector::from(Arc::clone(client_tls))
                 .connect(name, stream)
@@ -486,15 +525,31 @@ impl HttpProxy {
     }
 
     fn require_host(&self, host: &str) -> ProxyResult<()> {
-        if !self.policy.host_allowed(host) {
-            return Err(proxy_error(format!(
-                "host {host:?} is denied by workspace policy"
-            )));
+        match &self.target {
+            HttpProxyTarget::RequestHost if !self.policy.host_allowed(host) => Err(proxy_error(
+                format!("host {host:?} is denied by workspace policy"),
+            )),
+            HttpProxyTarget::HostPort { .. } if host != VIRTUAL_HOSTNAME => Err(proxy_error(
+                format!("host {host:?} does not identify the exposed host service"),
+            )),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     async fn connect(&self, host: &str, port: u16) -> ProxyResult<TcpStream> {
+        if let HttpProxyTarget::HostPort { connection_host } = &self.target {
+            return timeout(
+                self.connect_timeout,
+                TcpStream::connect((connection_host.as_str(), port)),
+            )
+            .await
+            .map_err(|_| proxy_error("timed out connecting to exposed host service"))?
+            .map_err(|error| {
+                proxy_error(format!(
+                    "failed to connect to exposed host service: {error}"
+                ))
+            });
+        }
         let addresses = lookup_host((host, port))
             .await
             .map_err(|error| proxy_error(format!("failed to resolve host {host:?}: {error}")))?;
@@ -516,6 +571,12 @@ impl HttpProxy {
         Err(proxy_error(last_error.unwrap_or_else(|| {
             "host has no policy-allowed address".to_owned()
         })))
+    }
+
+    /// Returns whether this flow must terminate TLS to inspect HTTP requests.
+    fn intercepts_tls_for_host(&self, host: &str) -> bool {
+        matches!(&self.target, HttpProxyTarget::HostPort { .. })
+            || self.policy.injects_secret_for_host(host)
     }
 
     async fn inject_secrets(
@@ -769,11 +830,8 @@ where
     result
 }
 
-fn request_host(request: &Request<Incoming>) -> ProxyResult<String> {
-    let uri_authority = request
-        .uri()
-        .authority()
-        .map(|authority| authority.host().to_ascii_lowercase());
+fn request_authority(request: &Request<Incoming>) -> ProxyResult<Authority> {
+    let uri_authority = request.uri().authority().cloned();
     let header_authority = request
         .headers()
         .get(HOST)
@@ -785,10 +843,9 @@ fn request_host(request: &Request<Incoming>) -> ProxyResult<String> {
                 .parse::<hyper::http::uri::Authority>()
                 .map_err(|error| proxy_error(format!("HTTP Host is invalid: {error}")))
         })
-        .transpose()?
-        .map(|authority| authority.host().to_ascii_lowercase());
+        .transpose()?;
     if let (Some(uri), Some(header)) = (&uri_authority, &header_authority)
-        && uri != header
+        && !uri.host().eq_ignore_ascii_case(header.host())
     {
         return Err(proxy_error(
             "request-target authority does not match HTTP Host",
@@ -797,6 +854,46 @@ fn request_host(request: &Request<Incoming>) -> ProxyResult<String> {
     uri_authority
         .or(header_authority)
         .ok_or_else(|| proxy_error("HTTP Host is required"))
+}
+
+/// Presents a mediated host-port request to its loopback service as localhost.
+fn rewrite_host_port_request(
+    headers: &mut hyper::HeaderMap,
+    original_authority: &Authority,
+) -> ProxyResult<()> {
+    headers.insert(HOST, HeaderValue::from_static("localhost"));
+    let mut values = headers.get_all(ORIGIN).iter();
+    let Some(value) = values.next() else {
+        return Ok(());
+    };
+    if values.next().is_some() {
+        return Err(proxy_error("multiple HTTP Origin headers are not allowed"));
+    }
+    let text = value
+        .to_str()
+        .map_err(|error| proxy_error(format!("HTTP Origin is not text: {error}")))?;
+    let origin: Uri = text
+        .parse()
+        .map_err(|error| proxy_error(format!("HTTP Origin is invalid: {error}")))?;
+    let Some(authority) = origin.authority() else {
+        return Ok(());
+    };
+    if !same_authority(authority, original_authority) {
+        return Ok(());
+    }
+    let scheme = origin
+        .scheme_str()
+        .ok_or_else(|| proxy_error("HTTP Origin has no scheme"))?;
+    headers.insert(
+        ORIGIN,
+        HeaderValue::from_str(&format!("{scheme}://localhost"))
+            .map_err(|error| proxy_error(format!("rewritten HTTP Origin is invalid: {error}")))?,
+    );
+    Ok(())
+}
+
+fn same_authority(left: &Authority, right: &Authority) -> bool {
+    left.host().eq_ignore_ascii_case(right.host()) && left.port_u16() == right.port_u16()
 }
 
 fn inject_header_value(
@@ -996,6 +1093,118 @@ mod tests {
         method: Method,
         uri: &'static str,
         recorder: HttpRequestRecorder,
+    }
+
+    /// Exercises host-port authority rewriting and secret injection through
+    /// one complete mediated HTTP request.
+    #[tokio::test]
+    async fn host_port_proxy_presents_localhost_and_injects_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspaces = directory.path().join("workspaces");
+        let workspace_name = WorkspaceName::new("proxy-test");
+        let workspace = workspaces.join(workspace_name.as_str());
+        fs::create_dir_all(&workspace).unwrap();
+        let fake_sops = directory.path().join("fake-sops");
+        fs::write(&fake_sops, "#!/bin/sh\nset -eu\ncat\n").unwrap();
+        fs::set_permissions(&fake_sops, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            workspace.join("secrets.json"),
+            r#"{"API_TOKEN":"super-secret"}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("config.toml"),
+            "[secrets.providers.project]\nkind = 'sops'\n\
+             [network]\ndefault = 'deny'\n\
+             [[network.secret-injection]]\nhost = 'host.tascarrel.internal'\n\
+             paths = ['/v1/**']\nmethods = ['POST']\n\
+             header = 'authorization'\nsecret = 'project.API_TOKEN'\n",
+        )
+        .unwrap();
+        let policy = NetworkPolicy::load(&workspace.join("config.toml")).unwrap();
+        let secrets =
+            SecretsService::new(SecretsServiceConfig::new(&workspaces, fake_sops)).unwrap();
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            server_http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(|request: Request<Incoming>| async move {
+                        let host = request.headers()[HOST].to_str().unwrap();
+                        let origin = request.headers()[ORIGIN].to_str().unwrap();
+                        let authorization = request.headers()[AUTHORIZATION].to_str().unwrap();
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(format!(
+                            "{host}\n{origin}\n{authorization}"
+                        )))))
+                    }),
+                )
+                .await
+                .unwrap();
+        });
+
+        let proxy =
+            HttpProxy::for_host_port(policy, None, Duration::from_secs(5), "127.0.0.1".to_owned());
+        let (request_stream, mut request_activity) = test_request_stream();
+        let (recorder, _) = test_request_recorder(&request_stream);
+        let (client_io, proxy_io) = duplex(256 * 1024);
+        let proxy_task = tokio::spawn(proxy.serve_http(
+            proxy_io,
+            upstream_port,
+            workspace_name,
+            secrets,
+            recorder,
+        ));
+        let (mut sender, connection) = client_http1::handshake(TokioIo::new(client_io))
+            .await
+            .unwrap();
+        let client_connection = tokio::spawn(connection);
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat")
+                    .header(HOST, "host.tascarrel.internal:18080")
+                    .header(ORIGIN, "http://host.tascarrel.internal:18080")
+                    .header(AUTHORIZATION, "Bearer tascarrel-secret:api-token")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "localhost\nhttp://localhost\nBearer super-secret"
+        );
+        drop(sender);
+
+        timeout(Duration::from_secs(5), client_connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), proxy_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let batch = timeout(Duration::from_secs(5), request_activity.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.entries.len(), 1);
+        assert_eq!(
+            batch.entries[0].host.as_deref(),
+            Some("host.tascarrel.internal")
+        );
+        assert!(batch.entries[0].secrets_injected);
     }
 
     /// Exercises hostname admission and encrypted pass-through for an SNI that

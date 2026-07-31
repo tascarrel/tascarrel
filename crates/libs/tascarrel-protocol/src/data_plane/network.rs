@@ -25,6 +25,8 @@ pub const MUX_NETWORK_TCP_ENDPOINT: &str = "tascarrel-network-tcp-v1";
 pub const VIRTUAL_DNS_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 /// Guest-only address for explicitly exposed host-loopback services.
 pub const VIRTUAL_HOST_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 54);
+/// Guest-only hostname for explicitly exposed host-loopback services.
+pub const VIRTUAL_HOSTNAME: &str = "host.tascarrel.internal";
 /// Maximum framed private-network request or response size.
 pub const MAX_NETWORK_FRAME_LEN: usize = 256 * 1024;
 /// Maximum encoded DNS response accepted from hostd.
