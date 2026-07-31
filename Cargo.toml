@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/tascarrel/tascarrel"
 
 [workspace.dependencies]
+apollo-parser = "0.8.6"
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"

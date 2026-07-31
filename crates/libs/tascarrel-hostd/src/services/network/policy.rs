@@ -74,6 +74,7 @@ pub struct SecretInjection {
     pub paths: Vec<String>,
     path_matchers: Vec<GlobMatcher>,
     pub methods: Vec<Method>,
+    pub(crate) graphql: Option<GraphQlPolicy>,
     pub header: Option<String>,
     pub placeholder: String,
     pub reference: SecretReference,
@@ -86,11 +87,18 @@ impl std::fmt::Debug for SecretInjection {
             .field("host", &self.host)
             .field("paths", &self.paths)
             .field("methods", &self.methods)
+            .field("graphql", &self.graphql)
             .field("header", &self.header)
             .field("placeholder", &self.placeholder)
             .field("reference", &"[SECRET REFERENCE]")
             .finish_non_exhaustive()
     }
+}
+
+/// Application-level admission policy for one GraphQL request body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphQlPolicy {
+    QueriesOnly,
 }
 
 impl SecretInjection {
@@ -221,6 +229,14 @@ impl NetworkPolicy {
                     "HTTP secret-injection methods must not be empty",
                 ));
             }
+            let graphql = rule.graphql.map(|policy| match policy {
+                config_api::WorkspaceGraphQlPolicy::QueriesOnly => GraphQlPolicy::QueriesOnly,
+            });
+            if graphql.is_some() && methods.as_slice() != [Method::POST] {
+                return Err(invalid_policy(
+                    "GraphQL query-only secret injection requires exactly the POST method",
+                ));
+            }
             let reference = SecretReference::parse(rule.secret.as_ref())
                 .map_err(|error| invalid_policy(error.to_string()))?;
             let placeholder = rule
@@ -250,6 +266,7 @@ impl NetworkPolicy {
                 paths,
                 path_matchers,
                 methods,
+                graphql,
                 header: rule.header.map(|header| header.to_ascii_lowercase()),
                 placeholder,
                 reference,
@@ -305,21 +322,6 @@ impl NetworkPolicy {
         self.secret_injection
             .iter()
             .any(|rule| host_matches(&rule.host, host))
-    }
-
-    /// Returns whether a matching injection rule admits an HTTP request.
-    #[must_use]
-    pub(crate) fn allows_secret_injection_request(
-        &self,
-        host: &str,
-        path: &str,
-        method: &Method,
-    ) -> bool {
-        self.secret_injection.iter().any(|rule| {
-            host_matches(&rule.host, host)
-                && rule.matches_path(path)
-                && rule.methods.contains(method)
-        })
     }
 
     #[must_use]
@@ -868,6 +870,28 @@ mod tests {
         assert!(NetworkPolicy::load(&config).is_err());
 
         fs::write(&config, format!("{prefix}methods = ['NOT VALID']\n")).unwrap();
+        assert!(NetworkPolicy::load(&config).is_err());
+    }
+
+    /// Verifies GraphQL query-only admission is parsed and limited to POST
+    /// rules.
+    #[test]
+    fn graphql_query_only_rules_require_post() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let prefix = "[secrets.providers.project]\nkind = 'sops'\n\
+                      [network]\n[[network.secret-injection]]\nhost = 'api.example'\n\
+                      paths = ['/graphql']\ngraphql = 'QueriesOnly'\n\
+                      secret = 'project.API_TOKEN'\n";
+
+        fs::write(&config, format!("{prefix}methods = ['POST']\n")).unwrap();
+        let policy = NetworkPolicy::load(&config).unwrap();
+        assert_eq!(
+            policy.secret_injection[0].graphql,
+            Some(GraphQlPolicy::QueriesOnly)
+        );
+
+        fs::write(&config, format!("{prefix}methods = ['GET', 'POST']\n")).unwrap();
         assert!(NetworkPolicy::load(&config).is_err());
     }
 

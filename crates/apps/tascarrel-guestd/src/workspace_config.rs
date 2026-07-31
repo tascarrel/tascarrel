@@ -494,6 +494,9 @@ fn workspace_network_from_api(
                     .as_ref()
                     .map(|paths| paths.iter().map(ToString::to_string).collect()),
                 methods: secret.methods.iter().map(ToString::to_string).collect(),
+                graphql_queries_only: secret.graphql.as_ref().is_some_and(|policy| {
+                    matches!(policy, config_api::WorkspaceGraphQlPolicy::QueriesOnly)
+                }),
                 header: secret.header.as_ref().map(ToString::to_string),
                 placeholder: secret.placeholder.as_ref().map(ToString::to_string),
                 secret: secret.secret.to_string(),
@@ -552,6 +555,7 @@ pub struct WorkspaceSecretInjection {
     pub host: String,
     pub paths: Option<Vec<String>>,
     pub methods: Vec<String>,
+    pub graphql_queries_only: bool,
     pub header: Option<String>,
     pub placeholder: Option<String>,
     pub secret: String,
@@ -1009,8 +1013,9 @@ mod tests {
              host-ports = [3000, \"5432:15432\"]\n\
              [secrets.providers.project]\nkind = \"sops\"\n\
              [[network.secret-injection]]\nhost = \"api.example\"\n\
-             paths = [\"/mcp\", \"/v1/**\"]\n\
-             methods = [\"GET\", \"HEAD\"]\n\
+             paths = [\"/graphql\"]\n\
+             methods = [\"POST\"]\n\
+             graphql = \"QueriesOnly\"\n\
              secret = \"project.TOKEN\"\n",
         )
         .unwrap();
@@ -1032,9 +1037,10 @@ mod tests {
         );
         assert_eq!(
             parsed.network.secret_injection[0].paths.as_deref(),
-            Some(["/mcp".to_owned(), "/v1/**".to_owned()].as_slice())
+            Some(["/graphql".to_owned()].as_slice())
         );
-        assert_eq!(parsed.network.secret_injection[0].methods, ["GET", "HEAD"]);
+        assert_eq!(parsed.network.secret_injection[0].methods, ["POST"]);
+        assert!(parsed.network.secret_injection[0].graphql_queries_only);
         assert!(parsed.network.secret_injection[0].header.is_none());
         assert_eq!(parsed.network.secret_injection[0].secret, "project.TOKEN");
     }

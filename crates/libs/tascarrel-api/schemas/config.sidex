@@ -657,10 +657,20 @@ record WorkspaceSecretInjectionConfig {
     /// HTTP methods that may be sent to matching hosts.
     /// Requests using other methods are rejected by the host proxy.
     methods: [string],
+    /// Optional GraphQL request policy applied before secret injection.
+    /// Rules with this policy must admit exactly the `POST` method.
+    graphql?: WorkspaceGraphQlPolicy,
     /// Header inspected for the placeholder, or every eligible header when absent.
     header?: string,
     /// Request value replaced by the secret before forwarding.
     placeholder?: string,
     /// Provider-qualified secret reference such as `project.API_TOKEN`.
     secret: string,
+}
+
+/// Admission policy for GraphQL requests carried in JSON HTTP bodies.
+#[json(tagged = externally)]
+variant WorkspaceGraphQlPolicy {
+    /// Admits query operations and rejects mutations and subscriptions.
+    QueriesOnly,
 }

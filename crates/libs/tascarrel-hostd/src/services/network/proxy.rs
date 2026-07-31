@@ -22,6 +22,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
+use http_body_util::Limited;
 use http_body_util::combinators::BoxBody;
 use hyper::Method;
 use hyper::Request;
@@ -31,6 +32,8 @@ use hyper::Uri;
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as client_http1;
 use hyper::header::CONNECTION;
+use hyper::header::CONTENT_ENCODING;
+use hyper::header::CONTENT_TYPE;
 use hyper::header::HOST;
 use hyper::header::HeaderName;
 use hyper::header::HeaderValue;
@@ -64,6 +67,7 @@ use tracing::debug;
 
 use super::policy::MAX_SECRET_BYTES;
 use super::policy::NetworkPolicy;
+use super::policy::SecretInjection;
 use super::policy::forbidden_secret_header;
 use super::service::HttpRequestRecorder;
 use crate::WorkspaceAuthority;
@@ -72,6 +76,8 @@ use crate::services::secrets::SecretsService;
 type ProxyBody = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 type ProxyResult<T> = Result<T, Report<HttpProxyError>>;
 type UpgradeTask = Arc<Mutex<Option<JoinHandle<ProxyResult<()>>>>>;
+
+const MAX_GRAPHQL_REQUEST_BYTES: usize = 256 * 1024;
 
 struct HttpConnectionContext {
     port: u16,
@@ -467,16 +473,10 @@ impl HttpProxy {
         if matches!(&self.target, HttpProxyTarget::HostPort { .. }) {
             rewrite_host_port_request(request.headers_mut(), &request_authority)?;
         }
-        audit.secrets_injected = self
-            .inject_secrets(
-                request.headers_mut(),
-                &host,
-                &path,
-                &method,
-                workspace_name,
-                secrets,
-            )
+        let (mut request, secrets_injected) = self
+            .apply_request_policy(request, &host, &path, &method, workspace_name, secrets)
             .await?;
+        audit.secrets_injected = secrets_injected;
         strip_hop_by_hop(request.headers_mut(), wants_upgrade);
         *request.uri_mut() = request
             .uri()
@@ -579,32 +579,66 @@ impl HttpProxy {
             || self.policy.injects_secret_for_host(host)
     }
 
-    async fn inject_secrets(
+    /// Applies application-level admission and injects secrets for matching
+    /// request rules.
+    async fn apply_request_policy(
         &self,
-        headers: &mut hyper::HeaderMap,
+        request: Request<Incoming>,
         host: &str,
         path: &str,
         method: &Method,
         workspace_name: &WorkspaceName,
         secrets: &SecretsService,
-    ) -> ProxyResult<bool> {
-        if self.policy.injects_secret_for_host(host)
-            && !self
-                .policy
-                .allows_secret_injection_request(host, path, method)
-        {
+    ) -> ProxyResult<(Request<ProxyBody>, bool)> {
+        let mut injection_rules = self
+            .policy
+            .secret_injection
+            .iter()
+            .filter(|rule| {
+                NetworkPolicy::rule_matches(&rule.host, host)
+                    && rule.matches_path(path)
+                    && rule.methods.contains(method)
+            })
+            .collect::<Vec<_>>();
+        if self.policy.injects_secret_for_host(host) && injection_rules.is_empty() {
             return Err(proxy_error(format!(
                 "HTTP request {method} {path:?} is denied for secret-injection host {host:?}"
             )));
         }
-        let mut secrets_injected = false;
-        for rule in &self.policy.secret_injection {
-            if !NetworkPolicy::rule_matches(&rule.host, host)
-                || !rule.matches_path(path)
-                || !rule.methods.contains(method)
-            {
-                continue;
+
+        let inspect_graphql = injection_rules.iter().any(|rule| rule.graphql.is_some());
+        let (mut request, graphql_error) = if inspect_graphql {
+            inspect_graphql_request(request).await?
+        } else {
+            (box_incoming_request(request), None)
+        };
+        if let Some(error) = graphql_error {
+            injection_rules.retain(|rule| rule.graphql.is_none());
+            if injection_rules.is_empty() {
+                return Err(error);
             }
+        }
+
+        let injected = self
+            .inject_secrets(
+                request.headers_mut(),
+                &injection_rules,
+                workspace_name,
+                secrets,
+            )
+            .await?;
+        Ok((request, injected))
+    }
+
+    async fn inject_secrets(
+        &self,
+        headers: &mut hyper::HeaderMap,
+        rules: &[&SecretInjection],
+        workspace_name: &WorkspaceName,
+        secrets: &SecretsService,
+    ) -> ProxyResult<bool> {
+        let mut secrets_injected = false;
+        for rule in rules {
             let secret = secrets
                 .resolve_reference(
                     workspace_name,
@@ -637,6 +671,64 @@ impl HttpProxy {
         }
         Ok(secrets_injected)
     }
+}
+
+async fn inspect_graphql_request(
+    request: Request<Incoming>,
+) -> ProxyResult<(Request<ProxyBody>, Option<Report<HttpProxyError>>)> {
+    if let Err(error) = validate_graphql_headers(request.headers()) {
+        return Ok((box_incoming_request(request), Some(error)));
+    }
+    let (parts, body) = request.into_parts();
+    let body = Limited::new(body, MAX_GRAPHQL_REQUEST_BYTES)
+        .collect()
+        .await
+        .map_err(|error| {
+            proxy_error(format!(
+                "failed to read bounded GraphQL request body: {error}"
+            ))
+        })?
+        .to_bytes();
+    let error = super::graphql::admit_queries_only(&body)
+        .err()
+        .map(|error| proxy_error(error.to_string()));
+    let body = Full::new(body).map_err(|never| match never {}).boxed();
+    Ok((Request::from_parts(parts, body), error))
+}
+
+fn validate_graphql_headers(headers: &hyper::HeaderMap) -> ProxyResult<()> {
+    let mut content_types = headers.get_all(CONTENT_TYPE).iter();
+    let content_type = content_types
+        .next()
+        .ok_or_else(|| proxy_error("GraphQL request Content-Type must be application/json"))?;
+    if content_types.next().is_some()
+        || !content_type.to_str().is_ok_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        })
+    {
+        return Err(proxy_error(
+            "GraphQL request Content-Type must be application/json",
+        ));
+    }
+    if !headers.get_all(CONTENT_ENCODING).iter().all(|value| {
+        value
+            .to_str()
+            .is_ok_and(|value| value.eq_ignore_ascii_case("identity"))
+    }) {
+        return Err(proxy_error(
+            "compressed GraphQL request bodies are not supported",
+        ));
+    }
+    Ok(())
+}
+
+fn box_incoming_request(request: Request<Incoming>) -> Request<ProxyBody> {
+    request.map(|body| {
+        body.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
+            .boxed()
+    })
 }
 
 /// Records the bytes `rustls` consumes while parsing a bounded `ClientHello`.
@@ -733,7 +825,7 @@ where
 
 async fn send_request<T, U>(
     io: T,
-    request: Request<Incoming>,
+    request: Request<ProxyBody>,
     pod_upgrade: Option<hyper::upgrade::OnUpgrade>,
     cleanup_io: SharedIo<U>,
     upgraded: Arc<AtomicBool>,

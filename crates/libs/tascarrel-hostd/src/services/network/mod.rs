@@ -5,6 +5,7 @@
 //! HTTP forwarding into workspace pods.
 
 mod activity;
+mod graphql;
 pub(crate) mod policy;
 mod proxy;
 mod service;

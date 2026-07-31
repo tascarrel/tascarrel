@@ -388,9 +388,12 @@ SNI and resolves that server name itself before relaying TLS unchanged. It
 terminates TLS only when an HTTPS secret-injection rule matches the SNI. In that
 case, every forwarded HTTP host must match the SNI. Each secret-injection rule
 also lists the HTTP methods it admits and may limit admission with a non-empty
-list of path glob patterns. When a host matches one or more rules, `hostd`
-rejects the request unless at least one matching rule admits both its path and
-method. Query strings do not participate in path matching.
+list of path glob patterns. A rule may additionally require a JSON GraphQL body
+to contain only query operations; `hostd` buffers and parses those bounded
+requests before resolving the secret. When a host matches one or more rules,
+`hostd` rejects the request unless at least one matching rule admits its path,
+method, and application-level constraint. Query strings do not participate in
+path matching.
 
 The host daemon retains bounded, in-memory activity streams for attributed DNS
 requests, mediated HTTP requests, and TCP flow lifecycles. HTTP request records
