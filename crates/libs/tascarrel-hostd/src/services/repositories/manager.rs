@@ -298,17 +298,21 @@ impl HostRepositoryManager {
                                             .to_owned()
                                     }),
                                 ),
-                                (Err(report), _) => {
-                                    HostRepositoryCache::Failed(bounded_git_error(&report))
-                                }
-                                (_, Err(report)) => {
-                                    HostRepositoryCache::Failed(bounded_git_error(&report))
-                                }
+                                (Err(report), _) => HostRepositoryCache::Failed(
+                                    bounded_repository_diagnostic(&report),
+                                ),
+                                (_, Err(report)) => HostRepositoryCache::Failed(
+                                    bounded_repository_diagnostic(&report),
+                                ),
                             },
-                            Err(error) => HostRepositoryCache::Failed(bounded_git_error(&error)),
+                            Err(error) => {
+                                HostRepositoryCache::Failed(bounded_repository_diagnostic(&error))
+                            }
                         }
                     }
-                    Err(error) => HostRepositoryCache::Failed(bounded_git_error(&error)),
+                    Err(error) => {
+                        HostRepositoryCache::Failed(bounded_repository_diagnostic(&error))
+                    }
                 }
             } else {
                 HostRepositoryCache::Missing
@@ -1228,7 +1232,7 @@ impl HostRepositoryManager {
                     &namespace,
                     &push_id,
                     &pod_id,
-                    RepositoryPushState::Failed(bounded_git_error(&report)),
+                    RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                 )
                 .await?;
                 return Err(git_report(report));
@@ -1243,7 +1247,7 @@ impl HostRepositoryManager {
                         &namespace,
                         &push_id,
                         &pod_id,
-                        RepositoryPushState::Failed(bounded_git_error(&report)),
+                        RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                     )
                     .await;
                 channel
@@ -1312,7 +1316,7 @@ impl HostRepositoryManager {
                         namespace,
                         push_id,
                         pod_id,
-                        RepositoryPushState::Failed(bounded_git_error(&report)),
+                        RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                     )
                     .await;
             }
@@ -1382,7 +1386,7 @@ impl HostRepositoryManager {
             self.record_push_status(
                 push_id,
                 pod_id,
-                RepositoryPushState::Failed(bounded_git_error(&report)),
+                RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
             )?;
             return Ok(());
         }
@@ -1406,7 +1410,7 @@ impl HostRepositoryManager {
             }
             self.transition_push_status(
                 push_id,
-                RepositoryPushState::Failed(bounded_git_error(&report)),
+                RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
             )?;
         }
         Ok(())
@@ -1488,7 +1492,7 @@ impl HostRepositoryManager {
                         namespace,
                         push_id,
                         pod_id,
-                        RepositoryPushState::Failed(bounded_git_error(&report)),
+                        RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                     )
                     .await;
             }
@@ -1502,7 +1506,7 @@ impl HostRepositoryManager {
                         namespace,
                         push_id,
                         pod_id,
-                        RepositoryPushState::Failed(bounded_git_error(&report)),
+                        RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                     )
                     .await;
             }
@@ -1535,7 +1539,7 @@ impl HostRepositoryManager {
                     namespace,
                     push_id,
                     pod_id,
-                    RepositoryPushState::Failed(bounded_git_error(&report)),
+                    RepositoryPushState::Failed(bounded_repository_diagnostic(&report)),
                 )
                 .await
             }
@@ -1843,7 +1847,7 @@ impl HostRepositoryManager {
         state: &mut RepositoryCacheState,
         report: &Report<HostRepositoryError>,
     ) {
-        state.failed(bounded_git_error(report));
+        state.failed(bounded_repository_diagnostic(report));
         if let Err(error) = state_store.write(state) {
             warn!(%error, "could not persist repository cache refresh failure");
         }
@@ -2160,7 +2164,10 @@ async fn reject_git_preparation(
     framed: &mut Framed<Channel>,
     report: Report<HostRepositoryError>,
 ) -> HostRepositoryResult<()> {
-    let message = format!("failed to prepare Git operation: {}", report.error());
+    let message = format!(
+        "failed to prepare Git operation: {}",
+        bounded_repository_diagnostic(&report)
+    );
     framed
         .write(&GitOpenResponse::Error {
             error: RemoteError::new(ErrorCode::ExecutionFailed, message),
@@ -2179,10 +2186,11 @@ fn helper_search_path(root: &Path) -> HostRepositoryResult<std::ffi::OsString> {
     })
 }
 
-fn bounded_git_error(error: &impl std::fmt::Display) -> String {
+/// Renders one safe repository failure for durable state or a remote peer.
+fn bounded_repository_diagnostic(error: &impl std::fmt::Display) -> String {
     const MAX_CHARS: usize = 2048;
 
-    error.to_string().chars().take(MAX_CHARS).collect()
+    format!("{error:#}").chars().take(MAX_CHARS).collect()
 }
 
 fn repository_approval_update(update: &ReceivedReferenceUpdate) -> RepositoryApprovalUpdate {
@@ -2356,13 +2364,26 @@ fn ensure_remote_helper(root: &Path) -> HostRepositoryResult<()> {
     }
     let executable = std::env::current_exe()
         .map_err(|error| io_report("resolve Tascarrel executable", error))?;
-    symlink(executable, &helper).map_err(|error| {
-        io_report(
+    match symlink(executable, &helper) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match fs::symlink_metadata(&helper) {
+                Ok(metadata) if metadata.file_type().is_symlink() => Ok(()),
+                Ok(_) => Err(unsafe_state(format!(
+                    "Git remote helper path is unsafe: {}",
+                    helper.display()
+                ))),
+                Err(error) => Err(io_report(
+                    format!("inspect Git remote helper {}", helper.display()),
+                    error,
+                )),
+            }
+        }
+        Err(error) => Err(io_report(
             format!("create Git remote helper {}", helper.display()),
             error,
-        )
-    })?;
-    Ok(())
+        )),
+    }
 }
 
 fn create_private_directory(path: &Path) -> HostRepositoryResult<()> {
@@ -2398,8 +2419,49 @@ fn create_private_directory(path: &Path) -> HostRepositoryResult<()> {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::Barrier;
+    use std::thread;
 
     use super::*;
+
+    /// Verifies concurrent manager initialization publishes one shared remote
+    /// helper idempotently.
+    #[test]
+    fn concurrent_remote_helper_initialization_is_idempotent() {
+        const THREADS: usize = 64;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Arc::new(temporary.path().to_owned());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let tasks = (0..THREADS)
+            .map(|_| {
+                let root = Arc::clone(&root);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ensure_remote_helper(&root)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for task in tasks {
+            task.join().unwrap().unwrap();
+        }
+    }
+
+    /// Verifies retained repository failures include their safe underlying
+    /// diagnostic rather than only the broad error category.
+    #[test]
+    fn bounded_repository_error_preserves_diagnostic_context() {
+        let report = Report::new(GitError::Io {
+            action: "read managed repository",
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
+        });
+
+        let message = bounded_repository_diagnostic(&report);
+        assert!(message.contains("failed to read managed repository"));
+        assert!(message.contains("access denied"));
+    }
 
     /// Verifies repository sources shown to users omit embedded credentials.
     #[test]
@@ -2598,9 +2660,15 @@ mod tests {
             ));
         };
         assert_eq!(error.code, ErrorCode::ExecutionFailed);
-        assert_eq!(
-            error.message,
-            "failed to prepare Git operation: failed to load repository configuration"
+        assert!(
+            error
+                .message
+                .starts_with("failed to prepare Git operation:")
+        );
+        assert!(
+            error
+                .message
+                .contains("config.toml contains unknown fields")
         );
         let service_error = service
             .await

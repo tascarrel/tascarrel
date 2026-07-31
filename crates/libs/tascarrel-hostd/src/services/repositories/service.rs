@@ -40,6 +40,7 @@ use super::RepositoryApprovalReviewOutcome;
 use super::RepositoryApprovalUpdateReview;
 use super::RepositoryPushState;
 use super::RepositoryPushStatusStore;
+use super::RepositoryPushStatusStoreError;
 
 /// Host-owned repository inventory and publication approval service.
 #[derive(Clone, Debug)]
@@ -162,11 +163,10 @@ impl RepositoryService {
     ) -> Result<api::PrepareRepositorySnapshotOutput, Report<RepositoryServiceError>> {
         let workspace = parse_workspace(&input.workspace)?;
         let manager = self.manager(&workspace)?;
-        let repositories = manager.prepare_versions().await.map_err(|error| {
-            RepositoryServiceError::Unavailable(bounded_error(&error))
-                .report()
-                .message("prepare repository snapshot")
-        })?;
+        let repositories = manager
+            .prepare_versions()
+            .await
+            .map_err(|report| repository_operation_report(report, "prepare repository snapshot"))?;
         Ok(api::PrepareRepositorySnapshotOutput {
             repositories: api_versions(repositories).into(),
         })
@@ -205,11 +205,7 @@ impl RepositoryService {
         let repositories = manager
             .refresh_versions(input.path.as_deref())
             .await
-            .map_err(|error| {
-                RepositoryServiceError::Unavailable(bounded_error(&error))
-                    .report()
-                    .message("refresh repository snapshot")
-            })?;
+            .map_err(|report| repository_operation_report(report, "refresh repository snapshot"))?;
         Ok(api::RefreshRepositorySnapshotOutput {
             repositories: api_versions(repositories).into(),
         })
@@ -238,7 +234,7 @@ impl RepositoryService {
             .approval_review(&input.approval_id)
             .await
             .map_err(|report| {
-                approval_inspection_report(report, "inspect repository approval commits")
+                repository_operation_report(report, "inspect repository approval commits")
             })?;
         let result = match result {
             RepositoryApprovalReviewOutcome::Review(review) => {
@@ -288,7 +284,7 @@ impl RepositoryService {
             .approval_commit_diff(&input.approval_id, input.reference.as_ref(), &commit)
             .await
             .map_err(|report| {
-                approval_inspection_report(report, "inspect repository approval commit changes")
+                repository_operation_report(report, "inspect repository approval commit changes")
             })?;
         let result = match result {
             RepositoryApprovalCommitDiffOutcome::Diff(diff) => {
@@ -331,10 +327,8 @@ impl RepositoryService {
             api::RepositoryApprovalDecision::Approve => {
                 let approval = manager
                     .claim_approval(&input.approval_id)
-                    .map_err(|error| {
-                        RepositoryServiceError::Unavailable(bounded_error(&error))
-                            .report()
-                            .message("claim repository approval")
+                    .map_err(|report| {
+                        repository_operation_report(report, "claim repository approval")
                     })?;
                 if let Some(approval) = approval {
                     Self::spawn_approval_publication(manager, approval.id);
@@ -344,19 +338,15 @@ impl RepositoryService {
                 manager
                     .reject_approval(&input.approval_id)
                     .await
-                    .map_err(|error| {
-                        RepositoryServiceError::Unavailable(bounded_error(&error))
-                            .report()
-                            .message("reject repository approval")
+                    .map_err(|report| {
+                        repository_operation_report(report, "reject repository approval")
                     })?;
             }
             api::RepositoryApprovalDecision::Postpone => {
                 manager
                     .postpone_approval(&input.approval_id)
-                    .map_err(|error| {
-                        RepositoryServiceError::Unavailable(bounded_error(&error))
-                            .report()
-                            .message("postpone repository approval")
+                    .map_err(|report| {
+                        repository_operation_report(report, "postpone repository approval")
                     })?;
             }
         }
@@ -403,11 +393,7 @@ impl RepositoryService {
         let manager = self.manager(workspace)?;
         let requests = manager
             .approvals()
-            .map_err(|error| {
-                RepositoryServiceError::Internal(bounded_error(&error))
-                    .report()
-                    .message("load repository approvals")
-            })?
+            .map_err(|report| repository_operation_report(report, "load repository approvals"))?
             .into_iter()
             .map(api_approval)
             .collect::<Result<Vec<_>, _>>()?;
@@ -439,16 +425,10 @@ impl RepositoryService {
                 .join("workspaces")
                 .join(workspace.as_str()),
         )
-        .map_err(|error| {
-            RepositoryServiceError::Internal(bounded_error(&error))
-                .report()
-                .message("open repository push status store")
-        })?;
-        let status = store.read(push_id, pod_id.0.as_ref()).map_err(|error| {
-            RepositoryServiceError::InvalidRequest(bounded_error(&error))
-                .report()
-                .message("load repository push status")
-        })?;
+        .map_err(|report| push_status_report(report, "open repository push status store"))?;
+        let status = store
+            .read(push_id, pod_id.0.as_ref())
+            .map_err(|report| push_status_report(report, "load repository push status"))?;
         let value = api_push_status(status.state);
         let revision = snapshot_revision(&value)?;
         Ok(api::RepositoryPushStatusChangedEvent { revision, value })
@@ -460,7 +440,7 @@ impl RepositoryService {
     ) {
         std::mem::drop(tokio::spawn(async move {
             if let Err(error) = manager.publish_claimed_approval(&approval_id).await {
-                let diagnostic = bounded_error(&error);
+                let diagnostic = bounded_repository_diagnostic(&error);
                 warn!(approval_id = %approval_id.0, %error, "background repository publication failed");
                 if let Err(release) = manager.fail_approval_publication(&approval_id, diagnostic) {
                     warn!(approval_id = %approval_id.0, error = %release, "could not release failed repository publication");
@@ -473,16 +453,24 @@ impl RepositoryService {
         let mut directories = tokio::fs::read_dir(&self.config.workspaces_directory)
             .await
             .map_err(|error| {
+                let message = format!(
+                    "could not enumerate repository workspaces at {}: {error}",
+                    self.config.workspaces_directory.display()
+                );
                 error
                     .escalate(RepositoryServiceError::Internal(
-                        "could not enumerate workspaces for approval recovery".to_owned(),
+                        bounded_repository_diagnostic(&message),
                     ))
                     .message("list repository workspaces")
             })?;
         while let Some(entry) = directories.next_entry().await.map_err(|error| {
+            let message = format!(
+                "could not read a repository workspace entry below {}: {error}",
+                self.config.workspaces_directory.display()
+            );
             error
                 .escalate(RepositoryServiceError::Internal(
-                    "could not enumerate workspaces for approval recovery".to_owned(),
+                    bounded_repository_diagnostic(&message),
                 ))
                 .message("read repository workspace entry")
         })? {
@@ -536,11 +524,7 @@ impl RepositoryService {
                 .join(workspace.as_str()),
             &workspace_directory.join("config.toml"),
         )
-        .map_err(|error| {
-            RepositoryServiceError::Internal(bounded_error(&error))
-                .report()
-                .message("load repository manager")
-        })
+        .map_err(|report| repository_operation_report(report, "load repository manager"))
     }
 
     fn workspace_directory(
@@ -549,16 +533,21 @@ impl RepositoryService {
     ) -> Result<PathBuf, Report<RepositoryServiceError>> {
         let workspace_directory = self.config.workspaces_directory.join(workspace.as_str());
         let metadata = fs::symlink_metadata(&workspace_directory).map_err(|error| {
+            let message = format!(
+                "workspace configuration directory {} is unavailable: {error}",
+                workspace_directory.display()
+            );
             error
                 .escalate(RepositoryServiceError::Unavailable(
-                    "workspace configuration is unavailable".to_owned(),
+                    bounded_repository_diagnostic(&message),
                 ))
                 .message("inspect repository workspace directory")
         })?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(RepositoryServiceError::Unavailable(
-                "workspace configuration is not a safe directory".to_owned(),
-            )
+            return Err(RepositoryServiceError::Unavailable(format!(
+                "workspace configuration is not a safe directory: {}",
+                workspace_directory.display()
+            ))
             .report());
         }
         Ok(workspace_directory)
@@ -568,16 +557,24 @@ impl RepositoryService {
         let mut directories = tokio::fs::read_dir(&self.config.workspaces_directory)
             .await
             .map_err(|error| {
+                let message = format!(
+                    "could not enumerate repository workspaces at {}: {error}",
+                    self.config.workspaces_directory.display()
+                );
                 error
                     .escalate(RepositoryServiceError::Internal(
-                        "could not enumerate workspaces for repository refresh".to_owned(),
+                        bounded_repository_diagnostic(&message),
                     ))
                     .message("list repository workspaces")
             })?;
         while let Some(entry) = directories.next_entry().await.map_err(|error| {
+            let message = format!(
+                "could not read a repository workspace entry below {}: {error}",
+                self.config.workspaces_directory.display()
+            );
             error
                 .escalate(RepositoryServiceError::Internal(
-                    "could not enumerate workspaces for repository refresh".to_owned(),
+                    bounded_repository_diagnostic(&message),
                 ))
                 .message("read repository workspace entry")
         })? {
@@ -646,13 +643,35 @@ impl RepositoryServiceConfig {
     }
 
     fn validate(&self) -> Result<(), Report<RepositoryServiceError>> {
-        if !self.git.is_absolute()
-            || !self.workspaces_directory.is_absolute()
-            || !self.cache_directory.is_absolute()
-            || self.poll_interval.is_zero()
-            || self.refresh_interval.is_zero()
-        {
-            return Err(RepositoryServiceError::InvalidConfiguration.report());
+        if !self.git.is_absolute() {
+            return Err(RepositoryServiceError::InvalidConfiguration(
+                "Git executable path must be absolute".to_owned(),
+            )
+            .report());
+        }
+        if !self.workspaces_directory.is_absolute() {
+            return Err(RepositoryServiceError::InvalidConfiguration(
+                "workspace configuration directory must be absolute".to_owned(),
+            )
+            .report());
+        }
+        if !self.cache_directory.is_absolute() {
+            return Err(RepositoryServiceError::InvalidConfiguration(
+                "repository cache directory must be absolute".to_owned(),
+            )
+            .report());
+        }
+        if self.poll_interval.is_zero() {
+            return Err(RepositoryServiceError::InvalidConfiguration(
+                "repository polling interval must be greater than zero".to_owned(),
+            )
+            .report());
+        }
+        if self.refresh_interval.is_zero() {
+            return Err(RepositoryServiceError::InvalidConfiguration(
+                "repository refresh interval must be greater than zero".to_owned(),
+            )
+            .report());
         }
         Ok(())
     }
@@ -774,8 +793,8 @@ impl RepositoryPushStatusSubscription {
 #[derive(Debug, Error)]
 pub enum RepositoryServiceError {
     /// The service was constructed with invalid paths or polling policy.
-    #[error("repository service configuration is invalid")]
-    InvalidConfiguration,
+    #[error("repository service configuration is invalid: {0}")]
+    InvalidConfiguration(String),
     /// A caller supplied an invalid repository request.
     #[error("invalid repository request: {0}")]
     InvalidRequest(String),
@@ -935,18 +954,19 @@ fn api_push_status(state: RepositoryPushState) -> api::RepositoryPushStatus {
     }
 }
 
-fn bounded_error(error: &impl std::fmt::Display) -> String {
+/// Renders one safe repository failure for a service or control-plane error.
+fn bounded_repository_diagnostic(error: &impl std::fmt::Display) -> String {
     const MAX_CHARS: usize = 2048;
 
-    error.to_string().chars().take(MAX_CHARS).collect()
+    format!("{error:#}").chars().take(MAX_CHARS).collect()
 }
 
-/// Preserves approval inspection reports while classifying caller errors.
-fn approval_inspection_report(
+/// Preserves repository reports while classifying caller-relevant failures.
+fn repository_operation_report(
     report: Report<HostRepositoryError>,
     action: &'static str,
 ) -> Report<RepositoryServiceError> {
-    let message = bounded_error(&report);
+    let message = bounded_repository_diagnostic(&report);
     let error = match report.error() {
         HostRepositoryError::InvalidRequest => RepositoryServiceError::InvalidRequest(message),
         HostRepositoryError::InvalidConfiguration
@@ -958,6 +978,20 @@ fn approval_inspection_report(
         | HostRepositoryError::Approval
         | HostRepositoryError::PushStatus
         | HostRepositoryError::CacheState => RepositoryServiceError::Unavailable(message),
+    };
+    report.escalate(error).message(action)
+}
+
+/// Preserves push-status reports and exposes absence as a caller error.
+fn push_status_report(
+    report: Report<RepositoryPushStatusStoreError>,
+    action: &'static str,
+) -> Report<RepositoryServiceError> {
+    let message = bounded_repository_diagnostic(&report);
+    let error = if matches!(report.error(), RepositoryPushStatusStoreError::NotFound) {
+        RepositoryServiceError::InvalidRequest(message)
+    } else {
+        RepositoryServiceError::Unavailable(message)
     };
     report.escalate(error).message(action)
 }
@@ -1029,6 +1063,7 @@ fn usize_to_u64(value: usize) -> Result<u64, Report<RepositoryServiceError>> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
 
     use tascarrel_api::ids::PodId;
     use tascarrel_api::ids::RepositoryApprovalId;
@@ -1040,6 +1075,90 @@ mod tests {
     use crate::services::repositories::RepositoryApprovalUpdate;
     use crate::services::repositories::RepositoryPushStatus;
     use crate::services::repositories::RepositoryPushStatusStore;
+
+    /// A valid unrelated workspace configuration does not hide a specific
+    /// repository initialization failure.
+    #[test]
+    fn manager_surfaces_specific_failure_for_valid_workspace_config() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let workspaces = temporary.path().join("workspaces");
+        let workspace = workspaces.join("demo");
+        fs::create_dir_all(&workspace).expect("create workspace directory");
+        fs::write(
+            workspace.join("config.toml"),
+            r#"
+[nix]
+daemon = true
+
+[env]
+MISE_CONFIG_DIR = "/home/develop/.mise/config"
+MISE_CACHE_DIR = "/home/develop/.mise/cache"
+MISE_STATE_DIR = "/home/develop/.mise/state"
+MISE_DATA_DIR = "/home/develop/.mise/data"
+MISE_TRUSTED_CONFIG_PATHS = "/"
+
+[[caches]]
+name = "mise"
+path = "~/.mise"
+
+[shares.silitics]
+path = "~/Silitics"
+mode = "Overlay"
+"#,
+        )
+        .expect("write workspace configuration");
+        let cache = temporary.path().join("cache");
+        let workspace_cache = cache.join("workspaces/demo");
+        fs::create_dir_all(&workspace_cache).expect("create workspace cache");
+        fs::write(workspace_cache.join("git-remote-tascarrel"), "unsafe")
+            .expect("write unsafe remote helper");
+        let service = RepositoryService::new(RepositoryServiceConfig::new(
+            std::env::current_exe().expect("resolve test executable"),
+            workspaces,
+            cache,
+        ))
+        .expect("create repository service");
+
+        let report = service
+            .manager(&WorkspaceName::new("demo").expect("validate workspace name"))
+            .expect_err("unsafe remote helper must fail manager loading");
+        let RepositoryServiceError::Unavailable(message) = report.error() else {
+            panic!("manager failure was classified incorrectly: {report:#}");
+        };
+        assert!(message.contains("Git remote helper path is unsafe"));
+        assert!(
+            report
+                .to_string()
+                .contains("Git remote helper path is unsafe")
+        );
+        assert!(format!("{report:#}").contains("load repository manager"));
+    }
+
+    /// Push-status absence remains a caller error while storage failures keep
+    /// their actionable context.
+    #[test]
+    fn push_status_errors_are_classified_with_context() {
+        let missing = push_status_report(
+            RepositoryPushStatusStoreError::NotFound.report(),
+            "load repository push status",
+        );
+        assert!(matches!(
+            missing.error(),
+            RepositoryServiceError::InvalidRequest(message)
+                if message.contains("repository push status does not exist")
+        ));
+
+        let storage = io::Error::new(io::ErrorKind::PermissionDenied, "access denied")
+            .escalate(RepositoryPushStatusStoreError::Io)
+            .message("read repository push status record");
+        let storage = push_status_report(storage, "load repository push status");
+        assert!(matches!(
+            storage.error(),
+            RepositoryServiceError::Unavailable(message)
+                if message.contains("read repository push status record")
+                    && message.contains("access denied")
+        ));
+    }
 
     /// A subscription suppresses an unchanged resumed inventory and emits a
     /// new complete snapshot after repository configuration changes.

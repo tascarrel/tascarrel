@@ -438,3 +438,9 @@ and rebases are served from Tascarrel's prepared repository state. A push
 travels through `guestd` to `hostd`, where the proposed branch and tag updates
 are staged for explicit approval. When approved, `hostd` checks that the
 upstream repository has not changed unexpectedly before publishing them.
+
+Repository operations preserve a bounded, credential-safe diagnostic chain
+across the control plane. The chain identifies the failed operation and
+includes redacted Git diagnostics or filesystem causes. Missing caller-selected
+records are request errors, while cache, configuration, and storage failures
+are availability errors.

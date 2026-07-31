@@ -150,7 +150,7 @@ pub enum GitError {
         diagnostic: String,
     },
     /// A filesystem or subprocess operation failed.
-    #[error("failed to {action}")]
+    #[error("failed to {action}: {source}")]
     Io {
         /// Operation that failed.
         action: &'static str,

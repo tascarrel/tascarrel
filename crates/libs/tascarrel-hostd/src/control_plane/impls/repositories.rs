@@ -309,7 +309,7 @@ fn repository_error(report: Report<RepositoryServiceError>) -> Report<wire::Oper
     let error = match report.error() {
         RepositoryServiceError::InvalidRequest(_) => wire::OperationError::InvalidRequest(details),
         RepositoryServiceError::Unavailable(_) => wire::OperationError::Unavailable(details),
-        RepositoryServiceError::InvalidConfiguration | RepositoryServiceError::Internal(_) => {
+        RepositoryServiceError::InvalidConfiguration(_) | RepositoryServiceError::Internal(_) => {
             wire::OperationError::Internal(details)
         }
     };
