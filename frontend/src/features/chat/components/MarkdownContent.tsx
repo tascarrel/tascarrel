@@ -1,10 +1,11 @@
-import { Link as RouterLink, useParams } from "@tanstack/react-router";
+import { useParams } from "@tanstack/react-router";
 import { Check, Clipboard } from "lucide-react";
 import {
   Children,
   createContext,
   isValidElement,
   memo,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useContext,
   useEffect,
@@ -14,11 +15,25 @@ import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markd
 import remarkGfm from "remark-gfm";
 import { remarkAlert } from "remark-github-blockquote-alert";
 
-import { localFileDownloadUrl } from "../../../api/localState.ts";
+import { workspaceFileUrl } from "../../../api/files.ts";
+import type { files, pods, workspaces } from "../../../api/generated/index.ts";
 import { Button } from "../../../components/ui/Button.tsx";
 import { DiffViewer } from "../../../components/ui/DiffViewer.tsx";
+import {
+  workspaceFilePath,
+  workspaceFileTarget,
+  type WorkspaceFileTarget,
+} from "../model/workspaceFileLinks.ts";
+import { WorkspaceFilePreviewDialog } from "./WorkspaceFilePreviewDialog.tsx";
 
-const WorkspaceMarkdownPathContext = createContext<string | undefined>(undefined);
+type WorkspaceMarkdownContextValue = {
+  workspacePath?: string;
+  workspace?: workspaces.WorkspaceName;
+  podId?: pods.PodId;
+  openFile?: (target: WorkspaceFileTarget) => void;
+};
+
+const WorkspaceMarkdownContext = createContext<WorkspaceMarkdownContextValue>({});
 
 export const MarkdownContent = memo(function MarkdownContent({
   content,
@@ -29,8 +44,15 @@ export const MarkdownContent = memo(function MarkdownContent({
   density?: "default" | "compact";
   workspacePath?: string;
 }) {
+  const params = useParams({ strict: false }) as { workspace?: string; pod?: string };
+  const workspace = params.workspace as workspaces.WorkspaceName | undefined;
+  const podId = params.pod as pods.PodId | undefined;
+  const [previewTarget, setPreviewTarget] = useState<WorkspaceFileTarget>();
+
   return (
-    <WorkspaceMarkdownPathContext.Provider value={workspacePath}>
+    <WorkspaceMarkdownContext.Provider
+      value={{ workspacePath, workspace, podId, openFile: setPreviewTarget }}
+    >
       <div
         className={
           density === "compact"
@@ -47,7 +69,17 @@ export const MarkdownContent = memo(function MarkdownContent({
           {content}
         </ReactMarkdown>
       </div>
-    </WorkspaceMarkdownPathContext.Provider>
+      {previewTarget && workspace && podId ? (
+        <WorkspaceFilePreviewDialog
+          key={previewTarget.path}
+          podId={podId}
+          renderMarkdown={renderWorkspaceMarkdown}
+          target={previewTarget}
+          workspace={workspace}
+          onClose={() => setPreviewTarget(undefined)}
+        />
+      ) : null}
+    </WorkspaceMarkdownContext.Provider>
   );
 });
 
@@ -104,20 +136,24 @@ const markdownComponents: Components = {
 };
 
 function WorkspaceMarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
-  const workspacePath = useContext(WorkspaceMarkdownPathContext);
-  const params = useParams({ strict: false }) as { workspace?: string; pod?: string };
-  const file = workspaceFileTarget(href, workspacePath);
+  const context = useContext(WorkspaceMarkdownContext);
+  const file = workspaceFileTarget(href, context.workspacePath);
+  const openFile = context.openFile;
   const className = "font-medium text-accent-text underline decoration-accent/35 underline-offset-4 hover:text-accent";
-  return file && params.workspace && params.pod ? (
-    <RouterLink
+  return file && context.workspace && context.podId && openFile ? (
+    <a
       className={className}
-      hash={file.line ? `L${file.line}` : ""}
-      params={{ workspace: params.workspace, pod: params.pod }}
-      search={{ path: file.path }}
-      to="/workspaces/$workspace/pods/$pod/files"
+      href={workspaceFileUrl(
+        context.workspace,
+        context.podId,
+        file.path as files.FilePath,
+      )}
+      rel="noreferrer"
+      target="_blank"
+      onClick={(event) => openFilePreview(event, file, openFile)}
     >
       {children}
-    </RouterLink>
+    </a>
   ) : (
     <a className={className} href={href} rel="noreferrer" target="_blank">
       {children}
@@ -134,15 +170,14 @@ function WorkspaceMarkdownImage({
   src?: string;
   title?: string;
 }) {
-  const workspacePath = useContext(WorkspaceMarkdownPathContext);
-  const params = useParams({ strict: false }) as { workspace?: string; pod?: string };
-  const filePath = workspaceFilePath(src, workspacePath);
+  const context = useContext(WorkspaceMarkdownContext);
+  const filePath = workspaceFilePath(src, context.workspacePath);
   return (
     <img
       alt={alt ?? ""}
       loading="lazy"
-      src={filePath && params.workspace && params.pod
-        ? localFileDownloadUrl(params.workspace, params.pod, filePath)
+      src={filePath && context.workspace && context.podId
+        ? workspaceFileUrl(context.workspace, context.podId, filePath as files.FilePath)
         : src}
       title={title}
     />
@@ -233,105 +268,16 @@ function markdownUrlTransform(value: string): string {
   return workspaceFileTarget(value) ? value : defaultUrlTransform(value);
 }
 
-type WorkspaceFileTarget = {
-  path: string;
-  line?: number;
-};
-
-function workspaceFileTarget(
-  href?: string,
-  workspacePath?: string,
-): WorkspaceFileTarget | undefined {
-  const value = href?.trim();
-  if (!value || value.startsWith("#")) return undefined;
-
-  if (value.startsWith("file://")) {
-    try {
-      const url = new URL(value);
-      if (url.hostname && url.hostname !== "localhost") return undefined;
-      return normalizeLinkedFileTarget(
-        decodeURIComponent(url.pathname),
-        undefined,
-        sourceLineFromHash(url.hash),
-      );
-    } catch {
-      return undefined;
-    }
-  }
-  if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^[a-z]:[\\/]/i.test(value)) {
-    return undefined;
-  }
-  if (value.startsWith("//")) return undefined;
-
-  const hashIndex = value.indexOf("#");
-  const hash = hashIndex >= 0 ? value.slice(hashIndex) : "";
-  const path = value.slice(0, hashIndex >= 0 ? hashIndex : undefined).split("?", 1)[0];
-  if (!path) return undefined;
-  try {
-    return normalizeLinkedFileTarget(
-      decodeURIComponent(path),
-      workspacePath,
-      sourceLineFromHash(hash),
-    );
-  } catch {
-    return normalizeLinkedFileTarget(path, workspacePath, sourceLineFromHash(hash));
-  }
+function openFilePreview(
+  event: ReactMouseEvent<HTMLAnchorElement>,
+  target: WorkspaceFileTarget,
+  openFile: (target: WorkspaceFileTarget) => void,
+): void {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  openFile(target);
 }
 
-function workspaceFilePath(href?: string, workspacePath?: string): string | undefined {
-  return workspaceFileTarget(href, workspacePath)?.path;
-}
-
-function normalizeLinkedFileTarget(
-  path: string,
-  workspacePath?: string,
-  hashLine?: number,
-): WorkspaceFileTarget | undefined {
-  let normalized = path;
-  const suffix = normalized.match(/:(\d+)(?::\d+)?$/);
-  const suffixLine = positiveLineNumber(suffix?.[1]);
-  if (suffix) normalized = normalized.slice(0, -suffix[0].length);
-  if (/^\/[a-z]:[\\/]/i.test(normalized)) normalized = normalized.slice(1);
-  if (!normalized || normalized.endsWith("/")) return undefined;
-  const name = normalized.split(/[\\/]/).at(-1) ?? normalized;
-  const likelyFile = normalized.startsWith("/")
-    || normalized.startsWith("./")
-    || normalized.startsWith("../")
-    || normalized.includes("/")
-    || normalized.includes("\\")
-    || name.includes(".")
-    || /^(?:copying|dockerfile|justfile|license|makefile|procfile|readme)$/i.test(name);
-  if (!likelyFile) return undefined;
-  const line = hashLine ?? suffixLine;
-  if (!workspacePath) {
-    return { path: normalized.replace(/^\.\//, ""), ...(line ? { line } : {}) };
-  }
-  if (/^[a-z]:[\\/]/i.test(normalized)) {
-    return { path: normalized, ...(line ? { line } : {}) };
-  }
-  if (normalized.startsWith("/")) {
-    return { path: normalized.slice(1), ...(line ? { line } : {}) };
-  }
-
-  const resolved = workspacePath.split("/").slice(0, -1);
-  for (const component of normalized.replace(/\\/g, "/").split("/")) {
-    if (!component || component === ".") continue;
-    if (component === "..") {
-      if (!resolved.pop()) return undefined;
-    } else {
-      resolved.push(component);
-    }
-  }
-  const resolvedPath = resolved.join("/");
-  return resolvedPath ? { path: resolvedPath, ...(line ? { line } : {}) } : undefined;
-}
-
-function sourceLineFromHash(hash: string): number | undefined {
-  return positiveLineNumber(hash.match(/^#?L(\d+)$/i)?.[1]);
-}
-
-function positiveLineNumber(value?: string): number | undefined {
-  if (!value) return undefined;
-  const line = Number(value);
-  return Number.isSafeInteger(line) && line > 0 ? line : undefined;
+function renderWorkspaceMarkdown(content: string, workspacePath: string): ReactNode {
+  return <MarkdownContent content={content} workspacePath={workspacePath} />;
 }

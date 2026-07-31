@@ -15,9 +15,11 @@ const fileOptions = {
 export function SyntaxHighlightedFile({
   contents,
   name,
+  line,
 }: {
   contents: string;
   name: string;
+  line?: number;
 }) {
   const file = useMemo(() => ({ contents, name }), [contents, name]);
 
@@ -27,6 +29,7 @@ export function SyntaxHighlightedFile({
       disableWorkerPool
       file={file}
       options={fileOptions}
+      selectedLines={line ? { start: line, end: line } : undefined}
     />
   );
 }

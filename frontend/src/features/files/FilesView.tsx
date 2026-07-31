@@ -9,31 +9,23 @@ import {
   LoaderCircle,
   RefreshCw,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { guestApi } from "../../api/client.ts";
 import { workspaceFileUrl } from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import { SegmentedControl } from "../../components/ui/SegmentedControl.tsx";
-
-const SyntaxHighlightedFile = lazy(() =>
-  import("../../components/ui/SyntaxHighlightedFile.tsx").then((module) => ({
-    default: module.SyntaxHighlightedFile,
-  })),
-);
+import {
+  isMarkdownPath,
+  MARKDOWN_REPRESENTATIONS,
+  type MarkdownRepresentation,
+  WorkspaceFileViewer,
+} from "./WorkspaceFileViewer.tsx";
 
 const MarkdownContent = lazy(() =>
   import("../chat/index.ts").then((module) => ({ default: module.MarkdownContent })),
 );
-
-const DEFAULT_PREVIEW_BYTES = 2 * 1024 * 1024;
-const MARKDOWN_REPRESENTATIONS = [
-  { value: "source", label: "Source" },
-  { value: "rendered", label: "Rendered" },
-] as const;
-
-type MarkdownRepresentation = typeof MARKDOWN_REPRESENTATIONS[number]["value"];
 
 type DirectoryLoad = {
   entries?: readonly files.FileEntry[];
@@ -268,32 +260,17 @@ function FilePreview({
   revision: number;
   size?: files.FileEntry["size"];
 }) {
-  const [preview, setPreview] = useState<Preview>({ status: "loading" });
   const [markdownRepresentation, setMarkdownRepresentation] =
     useState<MarkdownRepresentation>("source");
-  const url = workspaceFileUrl(workspace, podId, path);
   const markdown = isMarkdownPath(String(path));
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setPreview({ status: "loading" });
-    void loadPreview(url, String(path), controller.signal).then(setPreview, (cause) => {
-      if (!controller.signal.aborted) setPreview({ status: "error", message: errorMessage(cause) });
-    });
-    return () => controller.abort();
-  }, [path, revision, url]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden" aria-label={`Preview ${path}`}>
       <header className="flex items-center justify-between gap-3 border-b border-ui-border px-4 py-2.5">
         <div className="min-w-0">
           <h2 className="truncate font-mono text-xs font-medium">{path}</h2>
-          {size !== undefined || (preview.status === "text" && preview.truncated) ? (
-            <p className={`mt-0.5 text-[10px] ${preview.status === "text" && preview.truncated ? "text-amber-300" : "text-subtle"}`}>
-              {size !== undefined ? formatBytes(size) : null}
-              {size !== undefined && preview.status === "text" && preview.truncated ? " · " : null}
-              {preview.status === "text" && preview.truncated ? "Preview truncated at 2 MiB" : null}
-            </p>
+          {size !== undefined ? (
+            <p className="mt-0.5 text-[10px] text-subtle">{formatBytes(size)}</p>
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -314,94 +291,20 @@ function FilePreview({
           </a>
         </div>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {preview.status === "loading" ? (
-          <p className="flex items-center gap-2 p-4 text-xs text-subtle">
-            <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" /> Loading preview…
-          </p>
-        ) : preview.status === "error" ? (
-          <p className="m-4 rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-200" role="alert">
-            {preview.message}
-          </p>
-        ) : preview.status === "image" ? (
-          <div className="flex h-full min-h-0 items-center justify-center overflow-hidden p-6">
-            <img className="max-h-full max-w-full object-contain" src={url} alt={String(path)} />
-          </div>
-        ) : preview.status === "binary" ? (
-          <div className="flex min-h-full flex-col items-center justify-center gap-3 p-8 text-center text-xs text-subtle">
-            <FileQuestion aria-hidden="true" className="size-8" />
-            This file does not have a text preview. Download it to inspect its contents.
-          </div>
-        ) : markdown && markdownRepresentation === "rendered" ? (
-          <Suspense fallback={<p className="p-4 text-xs text-subtle">Rendering Markdown…</p>}>
-            <div className="min-h-full px-6 py-4">
-              <MarkdownContent content={preview.text} workspacePath={String(path)} />
-            </div>
-          </Suspense>
-        ) : (
-          <Suspense fallback={<FilePreviewFallback text={preview.text} />}>
-            <SyntaxHighlightedFile contents={preview.text} name={String(path)} />
-          </Suspense>
-        )}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <WorkspaceFileViewer
+          markdownRepresentation={markdownRepresentation}
+          path={path}
+          podId={podId}
+          renderMarkdown={(content, workspacePath) => (
+            <MarkdownContent content={content} workspacePath={workspacePath} />
+          )}
+          revision={revision}
+          workspace={workspace}
+        />
       </div>
     </section>
   );
-}
-
-function FilePreviewFallback({ text }: { text: string }) {
-  return <pre className="m-0 min-w-max p-4 font-mono text-[11px] leading-5 text-muted">{text}</pre>;
-}
-
-type Preview =
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "image" }
-  | { status: "binary" }
-  | { status: "text"; text: string; truncated: boolean };
-
-async function loadPreview(url: string, path: string, signal: AbortSignal): Promise<Preview> {
-  const response = await fetch(url, { signal });
-  if (!response.ok) throw new Error(await responseError(response));
-  if (response.headers.get("content-type")?.startsWith("image/")) {
-    await response.body?.cancel();
-    return { status: "image" };
-  }
-  const reader = response.body?.getReader();
-  if (!reader) return { status: "text", text: "", truncated: false };
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  let truncated = false;
-  while (length <= DEFAULT_PREVIEW_BYTES) {
-    const result = await reader.read();
-    if (result.done) break;
-    chunks.push(result.value);
-    length += result.value.byteLength;
-    if (length > DEFAULT_PREVIEW_BYTES) {
-      truncated = true;
-      await reader.cancel();
-      break;
-    }
-  }
-  const bytes = new Uint8Array(Math.min(length, DEFAULT_PREVIEW_BYTES));
-  let offset = 0;
-  for (const chunk of chunks) {
-    const available = Math.min(chunk.byteLength, bytes.byteLength - offset);
-    bytes.set(chunk.subarray(0, available), offset);
-    offset += available;
-    if (offset === bytes.byteLength) break;
-  }
-  if (looksBinary(bytes, path)) return { status: "binary" };
-  return { status: "text", text: new TextDecoder().decode(bytes), truncated };
-}
-
-function looksBinary(bytes: Uint8Array, path: string): boolean {
-  if (/\.(?:pdf|zip|gz|xz|zst|tar|wasm|woff2?|ttf|exe|bin)$/i.test(path)) return true;
-  const sample = bytes.subarray(0, Math.min(bytes.length, 8 * 1024));
-  return sample.includes(0);
-}
-
-function isMarkdownPath(path: string): boolean {
-  return /\.(?:md|markdown|mdown|mkd)$/i.test(path);
 }
 
 function fileIcon(kind: files.FileKind) {
@@ -448,17 +351,6 @@ function formatBytes(value: string | number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${String(bytes)} B`;
-}
-
-async function responseError(response: Response): Promise<string> {
-  const body = (await response.text()).trim();
-  try {
-    const parsed = JSON.parse(body) as { message?: unknown };
-    if (typeof parsed.message === "string") return parsed.message;
-  } catch {
-    // Plain-text gateway diagnostics are suitable for display.
-  }
-  return body || `File read failed with status ${response.status}`;
 }
 
 function errorMessage(cause: unknown): string {
