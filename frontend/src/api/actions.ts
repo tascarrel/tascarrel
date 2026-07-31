@@ -35,6 +35,9 @@ export type HostActions = {
   "hostOperations_Cancel": { input: types.host_operations.CancelHostOperationAction; output: types.host_operations.CancelHostOperationOutput };
   "shares_Inspect": { input: types.shares.InspectShareOverlayAction; output: types.shares.InspectShareOverlayOutput };
   "shares_Apply": { input: types.shares.ApplyShareOverlayAction; output: types.shares.ApplyShareOverlayOutput };
+  "shares_RequestApproval": { input: types.shares.RequestShareOverlayApprovalAction; output: types.shares.RequestShareOverlayApprovalOutput };
+  "shares_CancelApproval": { input: types.shares.CancelShareOverlayApprovalAction; output: types.shares.CancelShareOverlayApprovalOutput };
+  "shares_ResolveApproval": { input: types.shares.ResolveShareOverlayApprovalAction; output: types.shares.ResolveShareOverlayApprovalOutput };
   "workspaces_Create": { input: types.workspaces.CreateWorkspaceAction; output: types.workspaces.CreateWorkspaceOutput };
   "workspaces_Start": { input: types.workspaces.StartWorkspaceAction; output: types.workspaces.StartWorkspaceOutput };
   "workspaces_Stop": { input: types.workspaces.StopWorkspaceAction; output: types.workspaces.StopWorkspaceOutput };
@@ -108,6 +111,7 @@ export type HostSubscriptions = {
   "hostOperations_Changed": { input: types.host_operations.HostOperationListChangedSubscription; output: types.host_operations.HostOperationListChangedEvent };
   "hostOperations_Audit": { input: types.host_operations.HostOperationAuditSubscription; output: types.host_operations.HostOperationAuditEvent };
   "hostOperations_Output": { input: types.host_operations.HostOperationOutputSubscription; output: types.host_operations.HostOperationOutputEvent };
+  "shares_ApprovalRequestsChanged": { input: types.shares.ShareOverlayApprovalRequestListChangedSubscription; output: types.shares.ShareOverlayApprovalRequestListChangedEvent };
   "workspaces_Changed": { input: types.workspaces.WorkspaceListChangedSubscription; output: types.workspaces.WorkspaceListChangedEvent };
   "workspaces_VmLog": { input: types.workspaces.WorkspaceVmLogSubscription; output: types.workspaces.WorkspaceVmLogEvent };
   "workspaces_UsbDevicesChanged": { input: types.workspaces.UsbDevicesChangedSubscription; output: types.workspaces.UsbDevicesChangedEvent };

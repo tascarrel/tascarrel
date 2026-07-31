@@ -1,8 +1,10 @@
-import type { changes, pods } from "../../api/generated/index.ts";
+import type { changes, pods, shares } from "../../api/generated/index.ts";
 
 export type PodChangeSummary = Readonly<{
   changedFileCount: number;
   dirtyRepositoryCount: number;
+  overlayChangeCount: number;
+  overlayApprovalCount: number;
   conflictCount: number;
   unpushedCommitCount: number;
   repositoryWithoutUpstreamCount: number;
@@ -11,6 +13,7 @@ export type PodChangeSummary = Readonly<{
 
 export function summarizePodChanges(
   repositories: readonly changes.RepositoryStatusEntry[],
+  overlayApprovals: readonly shares.ShareOverlayApprovalRequest[] = [],
 ): ReadonlyMap<pods.PodId, PodChangeSummary> {
   const summaries = new Map<pods.PodId, PodChangeSummary>();
 
@@ -61,13 +64,28 @@ export function summarizePodChanges(
     });
   }
 
+  for (const approval of overlayApprovals) {
+    const current = summaries.get(approval.podId);
+    summaries.set(approval.podId, {
+      ...emptySummary(current),
+      overlayChangeCount: (current?.overlayChangeCount ?? 0) + approval.changes.length,
+      overlayApprovalCount: (current?.overlayApprovalCount ?? 0) + 1,
+    });
+  }
+
   return summaries;
+}
+
+export function totalPodChangeCount(summary: PodChangeSummary): number {
+  return summary.changedFileCount + summary.overlayChangeCount;
 }
 
 function emptySummary(summary: PodChangeSummary | undefined): PodChangeSummary {
   return summary ?? {
     changedFileCount: 0,
     dirtyRepositoryCount: 0,
+    overlayChangeCount: 0,
+    overlayApprovalCount: 0,
     conflictCount: 0,
     unpushedCommitCount: 0,
     repositoryWithoutUpstreamCount: 0,

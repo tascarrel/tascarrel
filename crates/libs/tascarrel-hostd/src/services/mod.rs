@@ -9,8 +9,9 @@
 //! [`network::NetworkService`] owns host HTTP routes and TCP forwards.
 //! [`repositories::RepositoryService`] exposes configured repositories and
 //! workspace Git cache statistics. [`secrets::SecretsService`] resolves and
-//! resolves and mutates host-owned secret providers. Share overlay approvals
-//! inspect and apply guest-proposed filesystem changes.
+//! mutates host-owned secret providers.
+//! [`share_overlays::ShareOverlayService`] owns durable guest-proposed
+//! filesystem approvals and applies exact reviewed revisions.
 //! [`workspaces::WorkspaceService`] owns workspace lifecycle state, resumable
 //! inventory, and VM-instance logs.
 

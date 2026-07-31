@@ -1,9 +1,13 @@
-//! Host application of exact, guest-snapshotted `ShareFS` revisions.
+//! Durable approval and host application of exact, guest-snapshotted `ShareFS`
+//! revisions.
 //!
 //! The service validates every untrusted guest path and content value, checks
 //! all captured lower leases before mutation, and anchors traversal to the
 //! host directory with no-follow directory file descriptors.
 
+mod storage;
+
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -14,7 +18,10 @@ use std::os::fd::AsFd as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::ffi::OsStringExt as _;
+use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr as _;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -28,6 +35,8 @@ use rustix::fs::Stat;
 use sha2::Digest as _;
 use sha2::Sha256;
 use similar::TextDiff;
+use tascarrel_api::ids::ShareOverlayApprovalId;
+use tascarrel_api::types::pods::PodId;
 use tascarrel_api::types::shares as api;
 use tascarrel_mux::Channel;
 use tascarrel_protocol::Framed;
@@ -46,12 +55,347 @@ use tascarrel_protocol::ShareOverlayPrepareResponse;
 use tascarrel_protocol::ShareOverlayRequest;
 use tascarrel_protocol::ShareOverlaySnapshot;
 use thiserror::Error;
+use tokio::sync::Mutex;
+use tokio::sync::watch;
 
+use self::storage::ShareOverlayApprovalStorage;
+use self::storage::ShareOverlayApprovalStorageError;
+use self::storage::StoredShareOverlayApproval;
 use super::workspaces::WorkspaceOverlayShare;
 use super::workspaces::WorkspaceService;
 
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TEXT_DIFF_BYTES: usize = 256 * 1024;
+const MAX_REVIEW_TEXT_DIFF_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Durable host-owned overlay approval coordinator.
+#[derive(Clone)]
+pub struct ShareOverlayService {
+    inner: Arc<ShareOverlayServiceInner>,
+}
+
+struct ShareOverlayServiceInner {
+    storage: ShareOverlayApprovalStorage,
+    approvals: Mutex<BTreeMap<ShareOverlayApprovalId, StoredShareOverlayApproval>>,
+    generation: watch::Sender<u64>,
+    transitions: Mutex<()>,
+}
+
+impl ShareOverlayService {
+    /// Opens the durable approval store and restores every pending request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the private state directory or a retained record
+    /// is unsafe or invalid.
+    pub fn open(
+        state_directory: impl AsRef<Path>,
+    ) -> Result<Self, Report<ShareOverlayServiceError>> {
+        let storage =
+            ShareOverlayApprovalStorage::open(state_directory.as_ref()).map_err(storage_error)?;
+        let approvals = storage
+            .load()
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|approval| (approval.id.clone(), approval))
+            .collect();
+        let (generation, _) = watch::channel(0);
+        Ok(Self {
+            inner: Arc::new(ShareOverlayServiceInner {
+                storage,
+                approvals: Mutex::new(approvals),
+                generation,
+                transitions: Mutex::new(()),
+            }),
+        })
+    }
+
+    /// Inspects one pod's current exact overlay revision without mutating it.
+    pub async fn inspect(
+        &self,
+        workspaces: &WorkspaceService,
+        input: api::InspectShareOverlayAction,
+    ) -> Result<api::InspectShareOverlayOutput, Report<ShareOverlayServiceError>> {
+        inspect_revision(workspaces, input).await
+    }
+
+    /// Applies one exact host-reviewed revision and clears matching requests.
+    pub async fn apply(
+        &self,
+        workspaces: &WorkspaceService,
+        input: api::ApplyShareOverlayAction,
+    ) -> Result<api::ApplyShareOverlayOutput, Report<ShareOverlayServiceError>> {
+        let _transition = self.inner.transitions.lock().await;
+        let output = apply_revision(workspaces, input.clone()).await?;
+        if matches!(output.result, api::ShareOverlayApplyResult::Applied) {
+            self.remove_matching(
+                &input.workspace,
+                &input.pod_id,
+                input.share.as_ref(),
+                &input.revision,
+            )
+            .await?;
+        }
+        Ok(output)
+    }
+
+    /// Captures and durably submits one pod's current overlay revision.
+    pub async fn request_approval(
+        &self,
+        workspaces: &WorkspaceService,
+        input: api::RequestShareOverlayApprovalAction,
+    ) -> Result<api::RequestShareOverlayApprovalOutput, Report<ShareOverlayServiceError>> {
+        let _transition = self.inner.transitions.lock().await;
+        let inspected = inspect_revision(
+            workspaces,
+            api::InspectShareOverlayAction {
+                workspace: input.workspace.clone(),
+                pod_id: input.pod_id.clone(),
+                share: input.share.clone(),
+            },
+        )
+        .await?;
+        if inspected.changes.is_empty() {
+            return Err(invalid("overlay share has no changes to submit"));
+        }
+
+        let mut approvals = self.inner.approvals.lock().await;
+        if let Some(existing) = approvals.values().find(|approval| {
+            approval.workspace == input.workspace.as_str()
+                && approval.pod_id == input.pod_id.0.as_ref()
+                && approval.share == input.share.as_ref()
+        }) {
+            if existing.revision == inspected.revision.as_str() {
+                return Ok(api::RequestShareOverlayApprovalOutput {
+                    request: api_approval(existing.clone())?,
+                });
+            }
+            return Err(invalid(
+                "a different revision of this overlay share is already awaiting approval",
+            ));
+        }
+
+        let approval = StoredShareOverlayApproval::new(
+            ShareOverlayApprovalId::generate(),
+            input.workspace.to_string(),
+            input.pod_id.0.to_string(),
+            input.share.to_string(),
+            inspected.revision.as_str().to_owned(),
+            inspected.changes.iter().cloned().collect(),
+        );
+        self.inner
+            .storage
+            .create(&approval)
+            .map_err(storage_error)?;
+        let request = api_approval(approval.clone())?;
+        approvals.insert(approval.id.clone(), approval);
+        drop(approvals);
+        self.publish();
+        Ok(api::RequestShareOverlayApprovalOutput { request })
+    }
+
+    /// Withdraws one pending request while retaining every upper change.
+    pub async fn cancel_approval(
+        &self,
+        input: api::CancelShareOverlayApprovalAction,
+    ) -> Result<api::CancelShareOverlayApprovalOutput, Report<ShareOverlayServiceError>> {
+        let _transition = self.inner.transitions.lock().await;
+        let mut approvals = self.inner.approvals.lock().await;
+        let approval = approvals
+            .get(&input.approval_id)
+            .ok_or_else(|| invalid("overlay approval request does not exist"))?;
+        if approval.workspace != input.workspace.as_str()
+            || approval.pod_id != input.pod_id.0.as_ref()
+        {
+            return Err(invalid("overlay approval request does not exist"));
+        }
+        self.inner
+            .storage
+            .remove(&input.approval_id)
+            .map_err(storage_error)?;
+        approvals.remove(&input.approval_id);
+        drop(approvals);
+        self.publish();
+        Ok(api::CancelShareOverlayApprovalOutput {})
+    }
+
+    /// Applies or rejects one exact submitted overlay revision.
+    pub async fn resolve_approval(
+        &self,
+        workspaces: &WorkspaceService,
+        input: api::ResolveShareOverlayApprovalAction,
+    ) -> Result<api::ResolveShareOverlayApprovalOutput, Report<ShareOverlayServiceError>> {
+        let _transition = self.inner.transitions.lock().await;
+        let approval = self
+            .inner
+            .approvals
+            .lock()
+            .await
+            .get(&input.approval_id)
+            .cloned()
+            .ok_or_else(|| invalid("overlay approval request does not exist"))?;
+        if approval.workspace != input.workspace.as_str() {
+            return Err(invalid("overlay approval request does not exist"));
+        }
+
+        let result = match input.decision {
+            api::ShareOverlayApprovalDecision::Reject => {
+                self.remove(&input.approval_id).await?;
+                api::ShareOverlayApprovalResolution::Rejected
+            }
+            api::ShareOverlayApprovalDecision::Approve => {
+                let output = apply_revision(
+                    workspaces,
+                    api::ApplyShareOverlayAction {
+                        workspace: input.workspace,
+                        pod_id: PodId::from_str(&approval.pod_id).map_err(|error| {
+                            internal(format!(
+                                "stored overlay approval has an invalid pod identifier: {error}"
+                            ))
+                        })?,
+                        share: approval.share.into(),
+                        revision: api::ShareOverlayRevision::new(approval.revision),
+                    },
+                )
+                .await?;
+                match output.result {
+                    api::ShareOverlayApplyResult::Applied => {
+                        self.remove(&input.approval_id).await?;
+                        api::ShareOverlayApprovalResolution::Applied
+                    }
+                    api::ShareOverlayApplyResult::RevisionChanged(changed) => {
+                        api::ShareOverlayApprovalResolution::RevisionChanged(changed)
+                    }
+                    api::ShareOverlayApplyResult::Conflicts(conflicts) => {
+                        api::ShareOverlayApprovalResolution::Conflicts(conflicts)
+                    }
+                }
+            }
+        };
+        Ok(api::ResolveShareOverlayApprovalOutput { result })
+    }
+
+    /// Opens a latest-value subscription for pending approval requests.
+    #[must_use]
+    pub fn subscribe(
+        &self,
+        input: api::ShareOverlayApprovalRequestListChangedSubscription,
+    ) -> ShareOverlayApprovalSubscription {
+        ShareOverlayApprovalSubscription {
+            service: self.clone(),
+            workspace: input.workspace,
+            pod_id: input.pod_id,
+            cursor: input.cursor,
+            generation: self.inner.generation.subscribe(),
+            current_pending: true,
+        }
+    }
+
+    async fn remove_matching(
+        &self,
+        workspace: &tascarrel_api::types::workspaces::WorkspaceName,
+        pod_id: &PodId,
+        share: &str,
+        revision: &api::ShareOverlayRevision,
+    ) -> Result<(), Report<ShareOverlayServiceError>> {
+        let approvals = self.inner.approvals.lock().await;
+        let matching = approvals
+            .values()
+            .filter(|approval| {
+                approval.workspace == workspace.as_str()
+                    && approval.pod_id == pod_id.0.as_ref()
+                    && approval.share == share
+                    && approval.revision == revision.as_str()
+            })
+            .map(|approval| approval.id.clone())
+            .collect::<Vec<_>>();
+        drop(approvals);
+        for id in &matching {
+            self.remove(id).await?;
+        }
+        Ok(())
+    }
+
+    async fn remove(
+        &self,
+        id: &ShareOverlayApprovalId,
+    ) -> Result<(), Report<ShareOverlayServiceError>> {
+        self.inner.storage.remove(id).map_err(storage_error)?;
+        self.inner.approvals.lock().await.remove(id);
+        self.publish();
+        Ok(())
+    }
+
+    fn publish(&self) {
+        let next = self.inner.generation.borrow().wrapping_add(1);
+        self.inner.generation.send_replace(next);
+    }
+}
+
+impl std::fmt::Debug for ShareOverlayService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShareOverlayService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Latest-value pending overlay approval inventory.
+pub struct ShareOverlayApprovalSubscription {
+    service: ShareOverlayService,
+    workspace: tascarrel_api::types::workspaces::WorkspaceName,
+    pod_id: Option<PodId>,
+    cursor: Option<api::ShareOverlayApprovalListRevision>,
+    generation: watch::Receiver<u64>,
+    current_pending: bool,
+}
+
+impl ShareOverlayApprovalSubscription {
+    /// Receives the current state and each later changed state.
+    pub async fn recv(
+        &mut self,
+    ) -> Result<api::ShareOverlayApprovalRequestListChangedEvent, Report<ShareOverlayServiceError>>
+    {
+        loop {
+            if self.current_pending {
+                self.current_pending = false;
+            } else {
+                self.generation
+                    .changed()
+                    .await
+                    .map_err(|_| unavailable("overlay approval service stopped"))?;
+            }
+            let approvals = self.service.inner.approvals.lock().await;
+            let mut requests = approvals
+                .values()
+                .filter(|approval| {
+                    approval.workspace == self.workspace.as_str()
+                        && self
+                            .pod_id
+                            .as_ref()
+                            .is_none_or(|pod_id| approval.pod_id == pod_id.0.as_ref())
+                })
+                .cloned()
+                .map(api_approval)
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(approvals);
+            requests.sort_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let value = api::ShareOverlayApprovalRequestList {
+                requests: requests.into(),
+            };
+            let revision = approval_list_revision(&value)?;
+            if self.cursor.as_ref() == Some(&revision) {
+                continue;
+            }
+            self.cursor = Some(revision.clone());
+            return Ok(api::ShareOverlayApprovalRequestListChangedEvent { revision, value });
+        }
+    }
+}
 
 /// Applies no mutation and returns one exact revision for explicit review.
 #[tracing::instrument(
@@ -64,7 +408,7 @@ const MAX_TEXT_DIFF_BYTES: usize = 256 * 1024;
     ),
     err
 )]
-pub(crate) async fn inspect(
+async fn inspect_revision(
     workspaces: &WorkspaceService,
     input: api::InspectShareOverlayAction,
 ) -> Result<api::InspectShareOverlayOutput, Report<ShareOverlayServiceError>> {
@@ -83,9 +427,16 @@ pub(crate) async fn inspect(
     )
     .await?;
     let validated = validate_snapshot(snapshot)?;
+    let root = connection.host_root;
+    let (revision, changes) = tokio::task::spawn_blocking(move || {
+        let changes = review_summaries(&root, &validated)?;
+        Ok::<_, Report<ShareOverlayServiceError>>((validated.revision, changes))
+    })
+    .await
+    .map_err(|error| internal(format!("ShareFS review task failed: {error}")))??;
     Ok(api::InspectShareOverlayOutput {
-        revision: api::ShareOverlayRevision::new(validated.revision.clone()),
-        changes: summaries(&validated),
+        revision: api::ShareOverlayRevision::new(revision),
+        changes,
     })
 }
 
@@ -101,7 +452,7 @@ pub(crate) async fn inspect(
     ),
     err
 )]
-pub(crate) async fn apply(
+async fn apply_revision(
     workspaces: &WorkspaceService,
     input: api::ApplyShareOverlayAction,
 ) -> Result<api::ApplyShareOverlayOutput, Report<ShareOverlayServiceError>> {
@@ -181,7 +532,7 @@ pub(crate) async fn apply(
 
 /// Host-side overlay approval failure.
 #[derive(Debug, Error)]
-pub(crate) enum ShareOverlayServiceError {
+pub enum ShareOverlayServiceError {
     /// Request or untrusted guest data violated the contract.
     #[error("invalid share overlay request: {0}")]
     InvalidRequest(String),
@@ -445,6 +796,7 @@ fn validate_contents(
     ))
 }
 
+/// Produces metadata-only summaries for revision-change responses.
 fn summaries(snapshot: &ValidatedSnapshot) -> tascarrel_api::ArcVec<api::ShareOverlayChange> {
     snapshot
         .changes
@@ -459,9 +811,119 @@ fn summaries(snapshot: &ValidatedSnapshot) -> tascarrel_api::ArcVec<api::ShareOv
             proposed_size: change.proposed.as_ref().and_then(|entry| {
                 (entry.version.kind == ShareOverlayEntryKind::File).then_some(entry.version.size)
             }),
+            text_diff: None,
         })
         .collect::<Vec<_>>()
         .into()
+}
+
+/// Produces bounded review summaries without allowing host content reads to
+/// escape the pinned share root.
+fn review_summaries(
+    root: &File,
+    snapshot: &ValidatedSnapshot,
+) -> Result<tascarrel_api::ArcVec<api::ShareOverlayChange>, Report<ShareOverlayServiceError>> {
+    let root = duplicate_root(root)?;
+    let mut total_diff_bytes = 0_usize;
+    let mut summaries = Vec::with_capacity(snapshot.changes.len());
+    for change in &snapshot.changes {
+        let text_diff = review_text_diff(&root, change)?.filter(|diff| {
+            let Some(total) = total_diff_bytes.checked_add(diff.len()) else {
+                return false;
+            };
+            if total > MAX_REVIEW_TEXT_DIFF_TOTAL_BYTES {
+                return false;
+            }
+            total_diff_bytes = total;
+            true
+        });
+        summaries.push(api::ShareOverlayChange {
+            path: change.path.to_string_lossy().into_owned().into(),
+            base_kind: change.base.as_ref().map(|base| api_kind(base.version.kind)),
+            proposed_kind: change
+                .proposed
+                .as_ref()
+                .map(|entry| api_kind(entry.version.kind)),
+            proposed_size: change.proposed.as_ref().and_then(|entry| {
+                (entry.version.kind == ShareOverlayEntryKind::File).then_some(entry.version.size)
+            }),
+            text_diff: text_diff.map(Into::into),
+        });
+    }
+    Ok(summaries.into())
+}
+
+/// Returns an exact lower-to-proposed patch only for bounded regular-file text.
+fn review_text_diff(
+    root: &OwnedFd,
+    change: &ValidatedChange,
+) -> Result<Option<String>, Report<ShareOverlayServiceError>> {
+    let proposed = match &change.proposed {
+        None if change
+            .base
+            .as_ref()
+            .is_some_and(|base| base.version.kind == ShareOverlayEntryKind::File) =>
+        {
+            &[][..]
+        }
+        Some(entry) if entry.version.kind == ShareOverlayEntryKind::File => {
+            let Some(contents) = entry.contents.as_deref() else {
+                return Ok(None);
+            };
+            contents
+        }
+        _ => return Ok(None),
+    };
+    let Some(base) = &change.base else {
+        return Ok(text_diff(&[], proposed));
+    };
+    if base.version.kind != ShareOverlayEntryKind::File {
+        return Ok(None);
+    }
+    let CurrentEntryLookup::Entry(Some(current)) = current_entry(root, &change.components)? else {
+        return Ok(None);
+    };
+    if !matches_base(base, &current) {
+        return Ok(None);
+    }
+    let Some(contents) = current.contents.as_deref() else {
+        return Ok(None);
+    };
+    Ok(text_diff(contents, proposed))
+}
+
+fn api_approval(
+    approval: StoredShareOverlayApproval,
+) -> Result<api::ShareOverlayApprovalRequest, Report<ShareOverlayServiceError>> {
+    let pod_id = PodId::from_str(&approval.pod_id).map_err(|error| {
+        internal(format!(
+            "stored overlay approval has an invalid pod identifier: {error}"
+        ))
+    })?;
+    Ok(api::ShareOverlayApprovalRequest {
+        id: approval.id,
+        pod_id,
+        share: approval.share.into(),
+        created_at: approval.created_at,
+        revision: api::ShareOverlayRevision::new(approval.revision),
+        changes: approval.changes.into(),
+    })
+}
+
+fn approval_list_revision(
+    value: &api::ShareOverlayApprovalRequestList,
+) -> Result<api::ShareOverlayApprovalListRevision, Report<ShareOverlayServiceError>> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        error
+            .escalate(ShareOverlayServiceError::Internal(
+                "could not derive overlay approval list revision".to_owned(),
+            ))
+            .message("encode overlay approval list revision")
+    })?;
+    Ok(api::ShareOverlayApprovalListRevision::new(format!(
+        "{:x}",
+        Sha256::digest(encoded)
+    )))
 }
 
 fn api_kind(kind: ShareOverlayEntryKind) -> api::ShareOverlayEntryKind {
@@ -804,14 +1266,16 @@ fn same_stat_fingerprint(left: &Stat, right: &Stat) -> bool {
 }
 
 fn text_diff(current: &[u8], proposed: &[u8]) -> Option<String> {
+    if current.len() > MAX_TEXT_DIFF_BYTES || proposed.len() > MAX_TEXT_DIFF_BYTES {
+        return None;
+    }
     let current = std::str::from_utf8(current).ok()?;
     let proposed = std::str::from_utf8(proposed).ok()?;
-    Some(
-        TextDiff::from_lines(current, proposed)
-            .unified_diff()
-            .header("current", "proposed")
-            .to_string(),
-    )
+    let diff = TextDiff::from_lines(current, proposed)
+        .unified_diff()
+        .header("current", "proposed")
+        .to_string();
+    (diff.len() <= MAX_TEXT_DIFF_BYTES).then_some(diff)
 }
 
 fn apply_changes(
@@ -1111,6 +1575,13 @@ fn internal(message: impl Into<String>) -> Report<ShareOverlayServiceError> {
     ShareOverlayServiceError::Internal(message.into()).report()
 }
 
+fn storage_error(
+    report: Report<ShareOverlayApprovalStorageError>,
+) -> Report<ShareOverlayServiceError> {
+    let message = report.to_string();
+    report.escalate(ShareOverlayServiceError::Internal(message))
+}
+
 fn io_error(operation: &'static str, error: rustix::io::Errno) -> Report<ShareOverlayServiceError> {
     internal(format!("{operation}: {error}"))
 }
@@ -1286,6 +1757,35 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         let diff = conflicts[0].text_diff.as_ref().unwrap();
         assert!(diff.contains("-host"));
+        assert!(diff.contains("+pod"));
+    }
+
+    /// Verifies a pending approval retains the exact captured-lower to
+    /// proposed text patch for host-side review.
+    #[test]
+    fn summarizes_reviewable_text_change_with_diff() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fs::write(root.join("document"), b"base\n").unwrap();
+        let descriptor = open_root(root).unwrap();
+        let current = present_current(&duplicate_root(&descriptor).unwrap(), "document");
+        let mut proposed = change("document", Some(file_entry(b"pod\n")));
+        proposed.base = Some(ShareOverlayBase {
+            version: current.version,
+            modified_seconds: current.modified_seconds,
+            modified_nanoseconds: current.modified_nanoseconds,
+            changed_seconds: current.changed_seconds,
+            changed_nanoseconds: current.changed_nanoseconds,
+        });
+        let snapshot = ValidatedSnapshot {
+            revision: "0".repeat(64),
+            changes: vec![proposed],
+        };
+
+        let changes = review_summaries(&descriptor, &snapshot).unwrap();
+
+        let diff = changes[0].text_diff.as_ref().unwrap();
+        assert!(diff.contains("-base"));
         assert!(diff.contains("+pod"));
     }
 

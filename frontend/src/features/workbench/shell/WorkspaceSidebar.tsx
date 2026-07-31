@@ -20,7 +20,10 @@ import { Badge } from "../../../components/ui/Badge.tsx";
 import { CountBadge } from "../../../components/ui/CountBadge.tsx";
 import { IconButtonGroup } from "../../../components/ui/IconButtonGroup.tsx";
 import { TascarrelLogo } from "../../../components/ui/TascarrelLogo.tsx";
-import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
+import {
+  totalPodChangeCount,
+  type PodChangeSummary,
+} from "../../changes/podChangeSummary.ts";
 import { PodDestructionDialog } from "../../pods/PodDestructionDialog.tsx";
 import {
   WorkspaceSwitcher,
@@ -261,11 +264,11 @@ export function WorkspaceSidebar({
                       <span>{pod.title || "Untitled pod"}</span>
                     </span>
                   </span>
-                  {changeSummary && changeSummary.changedFileCount > 0 && !attention ? (
+                  {changeSummary && totalPodChangeCount(changeSummary) > 0 && !attention ? (
                     <CountBadge
                       aria-hidden="true"
                       className="pod-change-count"
-                      count={changeSummary.changedFileCount}
+                      count={totalPodChangeCount(changeSummary)}
                       size="xs"
                       tone={changeSummary.conflictCount > 0 ? "danger" : "muted"}
                       title={changesLabel}
@@ -419,6 +422,11 @@ function podChangesLabel(summary: PodChangeSummary): string {
       ? `, including ${summary.conflictCount} ${summary.conflictCount === 1 ? "conflict" : "conflicts"}`
       : "";
     details.push(`${files} in ${repositories}${conflicts}`);
+  }
+  if (summary.overlayChangeCount > 0) {
+    const changes = `${summary.overlayChangeCount} overlay ${summary.overlayChangeCount === 1 ? "change" : "changes"}`;
+    const requests = `${summary.overlayApprovalCount} ${summary.overlayApprovalCount === 1 ? "request" : "requests"}`;
+    details.push(`${changes} awaiting approval in ${requests}`);
   }
   if (summary.unpushedCommitCount > 0) {
     details.push(

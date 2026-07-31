@@ -24,6 +24,7 @@ use crate::services::host_operations::HostOperationService;
 use crate::services::network::NetworkService;
 use crate::services::repositories::RepositoryService;
 use crate::services::secrets::SecretsService;
+use crate::services::share_overlays::ShareOverlayService;
 use crate::services::workspaces::WorkspaceService;
 
 /// Services and state shared by every host control-plane connection.
@@ -37,6 +38,7 @@ pub struct HostState {
     network: NetworkService,
     repositories: RepositoryService,
     secrets: SecretsService,
+    share_overlays: ShareOverlayService,
 }
 
 impl HostState {
@@ -55,6 +57,7 @@ impl HostState {
         network: NetworkService,
         repositories: RepositoryService,
         secrets: SecretsService,
+        share_overlays: ShareOverlayService,
     ) -> Self {
         Self {
             auth,
@@ -65,6 +68,7 @@ impl HostState {
             network,
             repositories,
             secrets,
+            share_overlays,
         }
     }
 
@@ -106,6 +110,11 @@ impl HostState {
     /// Returns the host-owned secret-provider service.
     pub(crate) fn secrets(&self) -> &SecretsService {
         &self.secrets
+    }
+
+    /// Returns the durable overlay-share approval service.
+    pub(crate) fn share_overlays(&self) -> &ShareOverlayService {
+        &self.share_overlays
     }
 }
 

@@ -1,5 +1,6 @@
 //! Explicit inspection and approval API for per-pod overlay host shares.
 
+import common::Timestamp
 import pods::PodId
 import workspaces::WorkspaceName
 
@@ -15,7 +16,7 @@ record InspectShareOverlayAction {
     share: string,
 }
 
-/// Exact current revision and display-safe change summary.
+/// Exact current revision and bounded review summary.
 record InspectShareOverlayOutput {
     /// Revision which must be supplied to the apply action.
     revision: ShareOverlayRevision,
@@ -41,15 +42,130 @@ record ApplyShareOverlayOutput {
     result: ShareOverlayApplyResult,
 }
 
+/// Submits one pod's current overlay revision for host approval.
+record RequestShareOverlayApprovalAction {
+    /// Workspace whose VM owns the requesting pod.
+    workspace: WorkspaceName,
+    /// Pod whose isolated upper state is submitted.
+    pod_id: PodId,
+    /// Configured overlay share name.
+    share: string,
+}
+
+/// Durable approval request created for the submitted revision.
+record RequestShareOverlayApprovalOutput {
+    /// Exact pending request, or the existing request for the same revision.
+    request: ShareOverlayApprovalRequest,
+}
+
+/// Withdraws one pending overlay approval request.
+record CancelShareOverlayApprovalAction {
+    /// Workspace which owns the pending request.
+    workspace: WorkspaceName,
+    /// Pod which submitted the pending request.
+    pod_id: PodId,
+    /// Pending request to withdraw.
+    approval_id: ShareOverlayApprovalId,
+}
+
+/// Acknowledges that the pending request was withdrawn.
+record CancelShareOverlayApprovalOutput { }
+
+/// Approves or rejects one exact submitted overlay revision.
+record ResolveShareOverlayApprovalAction {
+    /// Workspace which owns the pending request.
+    workspace: WorkspaceName,
+    /// Pending request to resolve.
+    approval_id: ShareOverlayApprovalId,
+    /// Decision applied to the exact submitted revision.
+    decision: ShareOverlayApprovalDecision,
+}
+
+/// Result of resolving one pending overlay request.
+record ResolveShareOverlayApprovalOutput {
+    /// Terminal result or retained condition requiring another decision.
+    result: ShareOverlayApprovalResolution,
+}
+
 // Subscriptions
 
+/// Subscribes to pending overlay approvals for one workspace.
+record ShareOverlayApprovalRequestListChangedSubscription {
+    /// Workspace whose pending overlay approvals are observed.
+    workspace: WorkspaceName,
+    /// Restricts results to approvals submitted by one pod when supplied.
+    pod_id?: PodId,
+    /// Last complete approval-list revision observed by the consumer, when resuming.
+    cursor?: ShareOverlayApprovalListRevision,
+}
+
+/// Complete pending overlay approval list emitted when its revision changes.
+record ShareOverlayApprovalRequestListChangedEvent {
+    /// Revision derived from the complete emitted approval list.
+    revision: ShareOverlayApprovalListRevision,
+    /// Current pending overlay approvals.
+    value: ShareOverlayApprovalRequestList,
+}
+
 // Domain Types
+
+/// Identifies one host-owned overlay approval request.
+#[json(type = "string")]
+#[rust(type = "crate::ids::ShareOverlayApprovalId")]
+opaque ShareOverlayApprovalId
+
+/// SHA-256 revision derived from one complete overlay approval list.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+wrapper ShareOverlayApprovalListRevision: string
 
 /// SHA-256 identity of one canonical upper change set.
 #[rust(derive(Eq, Hash, Ord, PartialOrd))]
 wrapper ShareOverlayRevision: string
 
-/// Display-safe summary of one changed path.
+/// Complete pending overlay approval inventory.
+record ShareOverlayApprovalRequestList {
+    /// Pending requests ordered by creation time and identifier.
+    requests: [ShareOverlayApprovalRequest],
+}
+
+/// One exact pod overlay revision awaiting a host decision.
+record ShareOverlayApprovalRequest {
+    /// Stable request identifier.
+    id: ShareOverlayApprovalId,
+    /// Pod which submitted the proposed filesystem changes.
+    pod_id: PodId,
+    /// Configured overlay share name.
+    share: string,
+    /// Time at which hostd captured the exact revision.
+    created_at: Timestamp,
+    /// Exact submitted revision protected by the approval decision.
+    revision: ShareOverlayRevision,
+    /// Bounded review summary of the submitted changes.
+    changes: [ShareOverlayChange],
+}
+
+/// Decision available for one pending overlay approval.
+variant ShareOverlayApprovalDecision {
+    /// Applies the exact submitted revision to the host share.
+    Approve,
+    /// Discards the request while retaining the pod's upper changes.
+    Reject,
+}
+
+/// Result of resolving one pending overlay approval.
+#[json(tag = "result")]
+variant ShareOverlayApprovalResolution {
+    /// The submitted revision was applied and removed from the pending list.
+    Applied,
+    /// The request was rejected while the pod's upper changes were retained.
+    Rejected,
+    /// The upper changed after submission; the pod must submit it again.
+    RevisionChanged: ShareOverlayRevisionChanged,
+    /// Current host entries conflict with the submitted lower versions.
+    Conflicts: ShareOverlayConflictList,
+}
+
+/// Bounded review summary of one changed path.
 record ShareOverlayChange {
     /// Lossy Unix path display; the exact raw path remains bound to the revision.
     path: string,
@@ -59,10 +175,13 @@ record ShareOverlayChange {
     proposed_kind?: ShareOverlayEntryKind,
     /// Proposed regular-file byte length when applicable.
     proposed_size?: u64,
+    /// Unified text diff from the captured lower file to the proposal when
+    /// both sides are bounded UTF-8 regular-file contents.
+    text_diff?: string,
 }
 
 /// Result of applying one reviewed revision.
-#[json(tag = "status")]
+#[json(tag = "result")]
 variant ShareOverlayApplyResult {
     /// Every change was applied and the guest upper was cleared.
     Applied,
@@ -76,7 +195,7 @@ variant ShareOverlayApplyResult {
 record ShareOverlayRevisionChanged {
     /// New revision to inspect.
     revision: ShareOverlayRevision,
-    /// Current display-safe change summary.
+    /// Current bounded review summary.
     changes: [ShareOverlayChange],
 }
 

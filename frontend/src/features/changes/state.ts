@@ -1,11 +1,43 @@
-import { guestApi } from "../../api/client.ts";
-import type { changes, store, workspaces } from "../../api/generated/index.ts";
+import { guestApi, hostApi } from "../../api/client.ts";
+import type { changes, shares, store, workspaces } from "../../api/generated/index.ts";
 import type { BackendStateDefinition } from "../../shared/state/BackendStateCache.ts";
 import { useBackendState } from "../../shared/state/StateCacheProvider.tsx";
 import { applyStoreEvent } from "../../shared/state/storeEvents.ts";
 
 export function useRepositoryStatuses(workspace: workspaces.WorkspaceName) {
   return useBackendState(repositoryStatusDefinition(workspace));
+}
+
+export function useShareOverlayApprovals(workspace: workspaces.WorkspaceName) {
+  return useBackendState(shareOverlayApprovalDefinition(workspace));
+}
+
+function shareOverlayApprovalDefinition(
+  workspace: workspaces.WorkspaceName,
+): BackendStateDefinition<
+  shares.ShareOverlayApprovalRequestList,
+  shares.ShareOverlayApprovalRequestListChangedEvent,
+  shares.ShareOverlayApprovalListRevision
+> {
+  return {
+    key: `host/shares/${workspace}/approvals`,
+    connect: (cursor, handlers) => hostApi.subscribe(
+      "shares_ApprovalRequestsChanged",
+      () => {
+        const revision = cursor();
+        return { workspace, ...(revision === undefined ? {} : { cursor: revision }) };
+      },
+      {
+        onEvent: handlers.onEvent,
+        onState: handlers.onConnection,
+        onError: handlers.onError,
+      },
+    ),
+    applyEvent: (_current, event) => ({
+      value: event.value,
+      cursor: event.revision,
+    }),
+  };
 }
 
 function repositoryStatusDefinition(

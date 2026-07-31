@@ -1,20 +1,21 @@
 import {
-  AlertTriangle,
   CheckCircle2,
-  ChevronRight,
   FileDiff,
   GitBranch,
   GitCommitHorizontal,
+  Layers3,
   LoaderCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { guestApi } from "../../api/client.ts";
-import type { changes, pods, workspaces } from "../../api/generated/index.ts";
+import type { changes, pods, shares, workspaces } from "../../api/generated/index.ts";
 import { Badge } from "../../components/ui/Badge.tsx";
 import { Button } from "../../components/ui/Button.tsx";
 import { DiffViewer } from "../../components/ui/DiffViewer.tsx";
-import { useRepositoryStatuses } from "./state.ts";
+import { ChangedFileRow, ChangeSourceRow } from "./changePresentation.tsx";
+import { OverlayChangesReview } from "./OverlayChangesReview.tsx";
+import { useRepositoryStatuses, useShareOverlayApprovals } from "./state.ts";
 
 type ChangeSetLoad =
   | { status: "loading" }
@@ -26,6 +27,10 @@ type DivergenceLoad =
   | { status: "error"; message: string }
   | { status: "ready"; result: changes.DivergentCommitsResult };
 
+type ChangeSource =
+  | { type: "repository"; id: string; entry: changes.RepositoryStatusEntry }
+  | { type: "overlay"; id: string; approval: shares.ShareOverlayApprovalRequest };
+
 export function ChangesView({
   workspace,
   pod,
@@ -34,6 +39,7 @@ export function ChangesView({
   pod: pods.Pod;
 }) {
   const statusState = useRepositoryStatuses(workspace);
+  const overlayState = useShareOverlayApprovals(workspace);
   const repositories = useMemo(
     () => (statusState.value?.repositories ?? []).filter((entry) =>
       entry.target.podId === pod.id
@@ -42,89 +48,88 @@ export function ChangesView({
     ),
     [pod.id, statusState.value?.repositories],
   );
-  const [selectedPath, setSelectedPath] = useState<string>();
-  const selected = repositories.find((entry) => entry.target.path === selectedPath)
-    ?? repositories[0];
+  const overlays = useMemo(
+    () => (overlayState.value?.requests ?? []).filter((request) => request.podId === pod.id),
+    [overlayState.value?.requests, pod.id],
+  );
+  const sources = useMemo<ChangeSource[]>(() => [
+    ...overlays.map((approval) => ({
+      type: "overlay" as const,
+      id: `overlay:${String(approval.id)}`,
+      approval,
+    })),
+    ...repositories.map((entry) => ({
+      type: "repository" as const,
+      id: `repository:${String(entry.target.path)}`,
+      entry,
+    })),
+  ], [overlays, repositories]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string>();
+  const selected = sources.find((source) => source.id === selectedSourceId) ?? sources[0];
 
   useEffect(() => {
-    if (selectedPath && repositories.some((entry) => entry.target.path === selectedPath)) return;
-    setSelectedPath(repositories[0]?.target.path);
-  }, [repositories, selectedPath]);
+    if (selectedSourceId && sources.some((source) => source.id === selectedSourceId)) return;
+    setSelectedSourceId(sources[0]?.id);
+  }, [selectedSourceId, sources]);
+
+  const ready = statusState.ready && overlayState.ready;
 
   return (
     <div className="grid h-full min-h-0 grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)] overflow-hidden bg-canvas text-foreground">
-      <section className="flex min-h-0 flex-col border-r border-ui-border" aria-label="Pod repositories">
-        {statusState.error ? (
+      <section className="flex min-h-0 flex-col border-r border-ui-border" aria-label="Pod change sources">
+        {statusState.error || overlayState.error ? (
           <p className="border-b border-red-500/20 bg-red-500/5 px-3 py-2 text-[10px] text-red-200" role="alert">
-            {statusState.error.message}
+            {statusState.error?.message ?? overlayState.error?.message}
           </p>
         ) : null}
         <div className="min-h-0 flex-1 overflow-auto p-2">
-          {repositories.map((entry) => (
-            <RepositoryRow
-              entry={entry}
-              key={String(entry.target.path)}
-              selected={entry.target.path === selected?.target.path}
-              onSelect={() => setSelectedPath(entry.target.path)}
+          {sources.map((source) => source.type === "repository" ? (
+            <ChangeSourceRow
+              count={source.entry.state.status === "Ready"
+                ? Number(source.entry.state.working.fileCount)
+                : 0}
+              countTone={source.entry.state.status === "Ready"
+                  && positiveCount(source.entry.state.working.conflictCount)
+                ? "danger"
+                : "warning"}
+              icon={<GitBranch aria-hidden="true" className="size-3.5" />}
+              key={source.id}
+              selected={source.id === selected?.id}
+              subtitle={source.entry.state.status === "Ready"
+                ? source.entry.state.branch ?? "Detached HEAD"
+                : "Inspection failed"}
+              title={`/workspace/${source.entry.target.path}`}
+              onSelect={() => setSelectedSourceId(source.id)}
+            />
+          ) : (
+            <ChangeSourceRow
+              count={source.approval.changes.length}
+              icon={<Layers3 aria-hidden="true" className="size-3.5" />}
+              key={source.id}
+              selected={source.id === selected?.id}
+              subtitle="Overlay share · awaiting approval"
+              title={`/mnt/${source.approval.share}`}
+              onSelect={() => setSelectedSourceId(source.id)}
             />
           ))}
-          {!repositories.length ? (
+          {!sources.length ? (
             <div className="rounded-lg border border-dashed border-ui-border p-4 text-center text-[11px] leading-5 text-subtle">
-              {statusState.ready ? "No repositories have changes." : "Loading repository changes…"}
+              {ready ? "This pod has no changes awaiting review." : "Loading changes…"}
             </div>
           ) : null}
         </div>
       </section>
 
-      {selected ? (
-        <RepositoryChanges workspace={workspace} entry={selected} />
+      {selected?.type === "repository" ? (
+        <RepositoryChanges workspace={workspace} entry={selected.entry} />
+      ) : selected?.type === "overlay" ? (
+        <OverlayChangesReview workspace={workspace} approval={selected.approval} />
       ) : (
         <div className="flex min-h-0 items-center justify-center p-8 text-center text-xs text-subtle">
-          {statusState.ready ? "No repository changes to inspect." : "Loading repository changes…"}
+          {ready ? "No changes to inspect." : "Loading changes…"}
         </div>
       )}
     </div>
-  );
-}
-
-function RepositoryRow({
-  entry,
-  selected,
-  onSelect,
-}: {
-  entry: changes.RepositoryStatusEntry;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const ready = entry.state.status === "Ready" ? entry.state : undefined;
-  return (
-    <button
-      aria-pressed={selected}
-      className="mb-1 flex w-full min-w-0 items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-left outline-none transition hover:border-ui-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-accent data-[selected=true]:border-ui-border-strong data-[selected=true]:bg-surface-raised"
-      data-selected={selected}
-      type="button"
-      onClick={onSelect}
-    >
-      <GitBranch aria-hidden="true" className="size-3.5 shrink-0 text-subtle" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-mono text-[11px] text-foreground">
-          /workspace/{entry.target.path}
-        </span>
-        <span className="mt-0.5 block truncate text-[10px] text-subtle">
-          {ready ? ready.branch ?? "Detached HEAD" : "Inspection failed"}
-        </span>
-      </span>
-      {ready?.working.dirty ? (
-        <Badge size="xs" tone={positiveCount(ready.working.conflictCount) ? "danger" : "warning"}>
-          {String(ready.working.fileCount)}
-        </Badge>
-      ) : ready ? (
-        <CheckCircle2 aria-label="Clean" className="size-3.5 shrink-0 text-emerald-400/70" />
-      ) : (
-        <AlertTriangle aria-label="Failed" className="size-3.5 shrink-0 text-red-300" />
-      )}
-      <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-subtle" />
-    </button>
   );
 }
 
@@ -282,24 +287,19 @@ function RepositoryChanges({
             {overviewSet?.files.map((file) => {
               const path = displayPath(file);
               return (
-                <button
-                  aria-pressed={selectedFile === path}
-                  className="mb-0.5 flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[11px] text-muted hover:bg-surface data-[selected=true]:bg-accent/10 data-[selected=true]:text-accent-text"
-                  data-selected={selectedFile === path}
-                  title={path}
-                  type="button"
+                <ChangedFileRow
+                  kind={file.kind.tag}
                   key={`${file.kind.tag}:${file.oldPath ?? ""}:${file.newPath ?? ""}`}
-                  onClick={() => setSelectedFile(path)}
-                >
-                  <ChangeKind kind={file.kind} />
-                  <span className="min-w-0 flex-1 truncate">{path}</span>
-                  {file.binary ? <span className="text-[9px] text-subtle">BIN</span> : (
+                  metadata={file.binary ? <span className="text-[9px] text-subtle">BIN</span> : (
                     <span className="shrink-0 font-mono text-[9px]">
                       <span className="text-emerald-300">+{String(file.lines.additions)}</span>{" "}
                       <span className="text-red-300">−{String(file.lines.deletions)}</span>
                     </span>
                   )}
-                </button>
+                  path={path}
+                  selected={selectedFile === path}
+                  onSelect={() => setSelectedFile(path)}
+                />
               );
             })}
           </aside>
@@ -369,16 +369,6 @@ function CommitList({ title, commits }: { title: string; commits: readonly chang
       ) : <p className="mt-1 text-subtle">None</p>}
     </div>
   );
-}
-
-function ChangeKind({ kind }: { kind: changes.FileChange["kind"] }) {
-  const label = kind.tag === "Untracked" ? "U" : kind.tag.slice(0, 1);
-  const tone = kind.tag === "Deleted" || kind.tag === "Unmerged"
-    ? "text-red-300"
-    : kind.tag === "Added" || kind.tag === "Untracked"
-      ? "text-emerald-300"
-      : "text-amber-300";
-  return <span aria-label={kind.tag} className={`w-3 shrink-0 font-mono text-[10px] ${tone}`} title={kind.tag}>{label}</span>;
 }
 
 function ErrorMessage({ message, compact = false }: { message: string; compact?: boolean }) {

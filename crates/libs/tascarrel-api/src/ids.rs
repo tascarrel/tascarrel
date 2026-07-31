@@ -113,6 +113,11 @@ crate::ids::define_ids! {
         "Identifier for one host-owned repository push operation."
     ),
     (
+        ShareOverlayApprovalId,
+        "share_overlay_approval_",
+        "Identifier for one host-owned overlay share approval request."
+    ),
+    (
         HostOperationId,
         "host_operation_",
         "Identifier for one durable approval-gated process executed by the host daemon."

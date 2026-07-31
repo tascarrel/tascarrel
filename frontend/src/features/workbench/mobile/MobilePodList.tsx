@@ -9,7 +9,10 @@ import {
 import type { chats, pods } from "../../../api/generated/index.ts";
 import { CountBadge } from "../../../components/ui/CountBadge.tsx";
 import { relativeTime } from "../../chat/model/format.ts";
-import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
+import {
+  totalPodChangeCount,
+  type PodChangeSummary,
+} from "../../changes/podChangeSummary.ts";
 
 export type MobileChatSummary = {
   id: chats.ChatId;
@@ -102,8 +105,8 @@ export function MobilePodRow({
         </span>
         <span className="mt-1 block truncate text-[11px] text-subtle">
           {pod.status.status}
-          {changeSummary?.changedFileCount
-            ? ` · ${changeSummary.changedFileCount} changed`
+          {changeSummary && totalPodChangeCount(changeSummary) > 0
+            ? ` · ${totalPodChangeCount(changeSummary)} changed`
             : changeSummary?.unpushedCommitCount
               ? ` · ${changeSummary.unpushedCommitCount} unpushed`
               : ""}

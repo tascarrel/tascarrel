@@ -47,7 +47,7 @@ import {
   summarizePodChanges,
   type PodChangeSummary,
 } from "../changes/podChangeSummary.ts";
-import { useRepositoryStatuses } from "../changes/state.ts";
+import { useRepositoryStatuses, useShareOverlayApprovals } from "../changes/state.ts";
 import { useHttpRoutes } from "../network/state.ts";
 import { isPodStarting, PodStartupScreen } from "../pods/PodStartupScreen.tsx";
 import { usePods } from "../pods/state.ts";
@@ -177,6 +177,7 @@ export function WorkspaceWorkbench({
   const automationExecutionState = useAutomationExecutions(workspace);
   const hostOperationState = useHostOperations(workspace);
   const repositoryStatusState = useRepositoryStatuses(workspace);
+  const shareOverlayApprovalState = useShareOverlayApprovals(workspace);
   const pods = podState.value?.pods ?? [];
   const currentWorkspace = allWorkspaces.find((candidate) => candidate.name === workspace);
   const workspacePanelOpen = route.creatingPod === true
@@ -202,8 +203,11 @@ export function WorkspaceWorkbench({
     [httpRouteState.value?.httpRoutes],
   );
   const podChangeSummaries = useMemo(
-    () => summarizePodChanges(repositoryStatusState.value?.repositories ?? []),
-    [repositoryStatusState.value?.repositories],
+    () => summarizePodChanges(
+      repositoryStatusState.value?.repositories ?? [],
+      shareOverlayApprovalState.value?.requests ?? [],
+    ),
+    [repositoryStatusState.value?.repositories, shareOverlayApprovalState.value?.requests],
   );
   const [startingChat, setStartingChat] = useState(false);
   const [error, setError] = useState<string>();
@@ -625,7 +629,9 @@ export function WorkspaceWorkbench({
           pods={pods}
           podChangeSummaries={podChangeSummaries}
           podChangeSummariesVerified={repositoryStatusState.ready
-            && !repositoryStatusState.error}
+            && !repositoryStatusState.error
+            && shareOverlayApprovalState.ready
+            && !shareOverlayApprovalState.error}
           selectedPodId={selectedPodId}
           selectedChatId={startingChat ? undefined : selectedSummary?.chatId}
           route={route}
@@ -704,7 +710,9 @@ export function WorkspaceWorkbench({
             pods={pods}
             podChangeSummaries={podChangeSummaries}
             podChangeSummariesVerified={repositoryStatusState.ready
-              && !repositoryStatusState.error}
+              && !repositoryStatusState.error
+              && shareOverlayApprovalState.ready
+              && !shareOverlayApprovalState.error}
             selectedPodId={selectedPodId}
             view={route.view}
             workspaceScreen={podCreationScreen ?? podStartupScreen}

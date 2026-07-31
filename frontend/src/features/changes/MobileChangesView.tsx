@@ -3,22 +3,27 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
-  GitBranch,
+  FileDiff,
   LoaderCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { guestApi } from "../../api/client.ts";
-import type { changes, pods, workspaces } from "../../api/generated/index.ts";
+import type { changes, pods, shares, workspaces } from "../../api/generated/index.ts";
 import { Badge } from "../../components/ui/Badge.tsx";
 import { DiffViewer } from "../../components/ui/DiffViewer.tsx";
-import { useRepositoryStatuses } from "./state.ts";
+import { ChangedFileRow } from "./changePresentation.tsx";
+import { MobileOverlayChangesReview } from "./MobileOverlayChangesReview.tsx";
+import { useRepositoryStatuses, useShareOverlayApprovals } from "./state.ts";
 
 type ChangeSetLoad =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; result: changes.ChangeSetResult };
+
+type MobileChangeSource =
+  | { type: "repository"; id: string; entry: changes.RepositoryStatusEntry }
+  | { type: "overlay"; id: string; approval: shares.ShareOverlayApprovalRequest };
 
 export function MobileChangesView({
   workspace,
@@ -34,6 +39,7 @@ export function MobileChangesView({
   };
 }) {
   const statusState = useRepositoryStatuses(workspace);
+  const overlayState = useShareOverlayApprovals(workspace);
   const repositories = useMemo(
     () => (statusState.value?.repositories ?? []).filter((entry) =>
       entry.target.podId === pod.id
@@ -47,76 +53,143 @@ export function MobileChangesView({
     ),
     [pod.id, review?.repository, statusState.value?.repositories],
   );
-  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<string>();
-  const selectedRepository = repositories.find(
-    (entry) => entry.target.path === selectedRepositoryPath,
-  ) ?? repositories[0];
+  const overlays = useMemo(
+    () => (overlayState.value?.requests ?? []).filter((request) => request.podId === pod.id),
+    [overlayState.value?.requests, pod.id],
+  );
+  const sources = useMemo<MobileChangeSource[]>(() => [
+    ...overlays.map((approval) => ({
+      type: "overlay" as const,
+      id: `overlay:${String(approval.id)}`,
+      approval,
+    })),
+    ...repositories.map((entry) => ({
+      type: "repository" as const,
+      id: `repository:${String(entry.target.path)}`,
+      entry,
+    })),
+  ], [overlays, repositories]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string>();
+  const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? sources[0];
 
   useEffect(() => {
-    const reviewedRepository = repositories.find(
-      (entry) => entry.target.path === review?.repository,
+    const reviewedSource = sources.find(
+      (source) => source.type === "repository"
+        && source.entry.target.path === review?.repository,
     );
-    if (
-      reviewedRepository
-      && selectedRepositoryPath !== reviewedRepository.target.path
-    ) {
-      setSelectedRepositoryPath(reviewedRepository.target.path);
+    if (reviewedSource && selectedSourceId !== reviewedSource.id) {
+      setSelectedSourceId(reviewedSource.id);
       return;
     }
-    if (
-      selectedRepositoryPath
-      && repositories.some((entry) => entry.target.path === selectedRepositoryPath)
-    ) return;
-    setSelectedRepositoryPath(reviewedRepository?.target.path ?? repositories[0]?.target.path);
-  }, [repositories, review?.repository, selectedRepositoryPath]);
+    if (selectedSourceId && sources.some((source) => source.id === selectedSourceId)) return;
+    setSelectedSourceId(reviewedSource?.id ?? sources[0]?.id);
+  }, [review?.repository, selectedSourceId, sources]);
 
-  if (statusState.error) {
-    return <MobileChangeError message={statusState.error.message} />;
+  if (!selectedSource && (statusState.error || overlayState.error)) {
+    return <MobileChangeError message={statusState.error?.message ?? overlayState.error?.message ?? "Changes are unavailable."} />;
   }
-  if (!selectedRepository) {
+  if (!selectedSource) {
+    const ready = statusState.ready && overlayState.ready;
     return (
       <div className="flex h-full items-center justify-center p-6 text-center">
         <div>
-          {statusState.ready ? (
+          {ready ? (
             <CheckCircle2 aria-hidden="true" className="mx-auto size-8 text-emerald-400/60" />
           ) : (
             <LoaderCircle aria-hidden="true" className="mx-auto size-6 animate-spin text-accent-text" />
           )}
           <p className="mt-3 text-sm text-subtle">
-            {statusState.ready ? "This pod has no changed files." : "Loading changed files…"}
+            {ready ? "This pod has no changes awaiting review." : "Loading changes…"}
           </p>
         </div>
       </div>
     );
   }
 
-  return (
-    <MobileRepositoryChanges
-      entry={selectedRepository}
-      repositories={repositories}
-      review={review}
-      workspace={workspace}
-      onSelectRepository={setSelectedRepositoryPath}
+  const sourcePicker = sources.length > 1 ? (
+    <MobileChangeSourcePicker
+      selectedSourceId={selectedSource.id}
+      sources={sources}
+      onSelect={setSelectedSourceId}
     />
+  ) : undefined;
+  const sourceNotice = statusState.error || overlayState.error ? (
+    <MobileChangeError
+      message={statusState.error?.message ?? overlayState.error?.message ?? "Some changes are unavailable."}
+    />
+  ) : undefined;
+
+  return selectedSource.type === "repository" ? (
+    <MobileRepositoryChanges
+      entry={selectedSource.entry}
+      review={review}
+      sourceNotice={sourceNotice}
+      sourcePicker={sourcePicker}
+      workspace={workspace}
+    />
+  ) : (
+    <MobileOverlayChangesReview
+      approval={selectedSource.approval}
+      sourceNotice={sourceNotice}
+      sourcePicker={sourcePicker}
+      workspace={workspace}
+    />
+  );
+}
+
+function MobileChangeSourcePicker({
+  sources,
+  selectedSourceId,
+  onSelect,
+}: {
+  sources: readonly MobileChangeSource[];
+  selectedSourceId: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <label className="relative block">
+      <span className="sr-only">Change source</span>
+      <FileDiff
+        aria-hidden="true"
+        className="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-subtle"
+      />
+      <select
+        className="h-12 w-full min-w-0 max-w-full appearance-none rounded-xl border border-ui-border-strong bg-surface pl-10 pr-10 text-sm text-foreground outline-none focus:border-accent/50"
+        value={selectedSourceId}
+        onChange={(event) => onSelect(event.target.value)}
+      >
+        {sources.map((source) => (
+          <option key={source.id} value={source.id}>
+            {source.type === "repository"
+              ? `/workspace/${source.entry.target.path}`
+              : `/mnt/${source.approval.share} · Overlay`}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        aria-hidden="true"
+        className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-subtle"
+      />
+    </label>
   );
 }
 
 function MobileRepositoryChanges({
   entry,
-  repositories,
   review,
+  sourceNotice,
+  sourcePicker,
   workspace,
-  onSelectRepository,
 }: {
   entry: changes.RepositoryStatusEntry;
-  repositories: readonly changes.RepositoryStatusEntry[];
   review?: {
     repository: string;
     base: changes.GitObjectId;
     head: changes.GitObjectId;
   };
+  sourceNotice?: ReactNode;
+  sourcePicker?: ReactNode;
   workspace: workspaces.WorkspaceName;
-  onSelectRepository: (path: string) => void;
 }) {
   const [overview, setOverview] = useState<ChangeSetLoad>({ status: "loading" });
   const [selectedFile, setSelectedFile] = useState<string>();
@@ -207,36 +280,14 @@ function MobileRepositoryChanges({
   return (
     <div className="mobile-client-content h-full min-h-0 overflow-y-auto pt-4">
       <div className="mx-auto w-full min-w-0 max-w-2xl">
-        {repositories.length > 1 ? (
-          <label className="relative block">
-            <span className="sr-only">Repository</span>
-            <GitBranch
-              aria-hidden="true"
-              className="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-subtle"
-            />
-            <select
-              className="h-12 w-full min-w-0 max-w-full appearance-none rounded-xl border border-ui-border-strong bg-surface pl-10 pr-10 text-sm text-foreground outline-none focus:border-accent/50"
-              value={entry.target.path}
-              onChange={(event) => onSelectRepository(event.target.value)}
-            >
-              {repositories.map((repository) => (
-                <option key={String(repository.target.path)} value={repository.target.path}>
-                  /workspace/{repository.target.path}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              aria-hidden="true"
-              className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-subtle"
-            />
-          </label>
-        ) : (
+        {sourcePicker ?? (
           <div className="rounded-xl border border-ui-border bg-surface/70 p-3">
             <p className="truncate font-mono text-xs font-semibold text-foreground">
               /workspace/{entry.target.path}
             </p>
           </div>
         )}
+        {sourceNotice}
 
         {ready ? (
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -268,17 +319,10 @@ function MobileRepositoryChanges({
             overviewSet?.files.map((file) => {
               const path = displayPath(file);
               return (
-                <button
-                  className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-ui-border bg-surface/70 p-3 text-left active:bg-surface-raised"
-                  type="button"
+                <ChangedFileRow
+                  kind={file.kind.tag}
                   key={`${file.kind.tag}:${file.oldPath ?? ""}:${file.newPath ?? ""}`}
-                  onClick={() => setSelectedFile(path)}
-                >
-                  <ChangeKind kind={file.kind} />
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
-                    {path}
-                  </span>
-                  {file.binary ? (
+                  metadata={file.binary ? (
                     <Badge size="xs">Binary</Badge>
                   ) : (
                     <span className="shrink-0 font-mono text-[10px]">
@@ -286,8 +330,10 @@ function MobileRepositoryChanges({
                       <span className="text-red-300">−{String(file.lines.deletions)}</span>
                     </span>
                   )}
-                  <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-subtle" />
-                </button>
+                  mobile
+                  path={path}
+                  onSelect={() => setSelectedFile(path)}
+                />
               );
             })
           )}
@@ -336,24 +382,6 @@ function MobileChangeError({ message }: { message: string }) {
         {message}
       </p>
     </div>
-  );
-}
-
-function ChangeKind({ kind }: { kind: changes.FileChange["kind"] }) {
-  const label = kind.tag === "Untracked" ? "U" : kind.tag.slice(0, 1);
-  const tone = kind.tag === "Deleted" || kind.tag === "Unmerged"
-    ? "text-red-300"
-    : kind.tag === "Added" || kind.tag === "Untracked"
-      ? "text-emerald-300"
-      : "text-amber-300";
-  return (
-    <span
-      aria-label={kind.tag}
-      className={`grid size-7 shrink-0 place-items-center rounded-lg bg-surface-raised font-mono text-[10px] ${tone}`}
-      title={kind.tag}
-    >
-      {label}
-    </span>
   );
 }
 

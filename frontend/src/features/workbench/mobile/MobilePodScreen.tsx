@@ -3,7 +3,10 @@ import { FileDiff, LoaderCircle, Plus, Square, Trash2 } from "lucide-react";
 import type { chats, pods } from "../../../api/generated/index.ts";
 import { Badge, type BadgeTone } from "../../../components/ui/Badge.tsx";
 import { Button } from "../../../components/ui/Button.tsx";
-import type { PodChangeSummary } from "../../changes/podChangeSummary.ts";
+import {
+  totalPodChangeCount,
+  type PodChangeSummary,
+} from "../../changes/podChangeSummary.ts";
 import {
   MobileChatRow,
   MobileSectionHeading,
@@ -130,19 +133,22 @@ export function MobilePodScreen({
         </section>
 
         {changeSummary
-          && (changeSummary.changedFileCount > 0 || changeSummary.unpushedCommitCount > 0) ? (
+          && (totalPodChangeCount(changeSummary) > 0 || changeSummary.unpushedCommitCount > 0) ? (
           <Button
             className="min-h-16 w-full min-w-0 max-w-full overflow-hidden justify-start rounded-2xl p-4 text-left"
             onClick={onOpenChanges}
           >
             <FileDiff aria-hidden="true" className="size-5 shrink-0 text-accent-text" />
             <span className="min-w-0 flex-1">
-              <span className="block text-sm font-medium text-foreground">Review Changed Files</span>
+              <span className="block text-sm font-medium text-foreground">Review Changes</span>
               <span className="mt-0.5 block text-xs font-normal text-subtle">
-                {changeSummary.changedFileCount > 0
-                  ? `${changeSummary.changedFileCount} changed`
+                {totalPodChangeCount(changeSummary) > 0
+                  ? `${totalPodChangeCount(changeSummary)} changed`
                   : `${changeSummary.unpushedCommitCount} unpushed commits`}
                 {changeSummary.conflictCount > 0 ? ` · ${changeSummary.conflictCount} conflicts` : ""}
+                {changeSummary.overlayApprovalCount > 0
+                  ? ` · ${changeSummary.overlayApprovalCount} overlay ${changeSummary.overlayApprovalCount === 1 ? "approval" : "approvals"}`
+                  : ""}
               </span>
             </span>
           </Button>

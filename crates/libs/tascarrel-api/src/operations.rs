@@ -184,6 +184,9 @@ macro_rules! with_hostd_operations {
             ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
             ("shares_Inspect", shares::InspectShareOverlayAction, shares::InspectShareOverlayOutput),
             ("shares_Apply", shares::ApplyShareOverlayAction, shares::ApplyShareOverlayOutput),
+            ("shares_RequestApproval", shares::RequestShareOverlayApprovalAction, shares::RequestShareOverlayApprovalOutput),
+            ("shares_CancelApproval", shares::CancelShareOverlayApprovalAction, shares::CancelShareOverlayApprovalOutput),
+            ("shares_ResolveApproval", shares::ResolveShareOverlayApprovalAction, shares::ResolveShareOverlayApprovalOutput),
             ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
             ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
             ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -213,6 +216,7 @@ macro_rules! with_hostd_operations {
             ("hostOperations_Changed", host_operations::HostOperationListChangedSubscription, host_operations::HostOperationListChangedEvent),
             ("hostOperations_Audit", host_operations::HostOperationAuditSubscription, host_operations::HostOperationAuditEvent),
             ("hostOperations_Output", host_operations::HostOperationOutputSubscription, host_operations::HostOperationOutputEvent),
+            ("shares_ApprovalRequestsChanged", shares::ShareOverlayApprovalRequestListChangedSubscription, shares::ShareOverlayApprovalRequestListChangedEvent),
             ("workspaces_Changed", workspaces::WorkspaceListChangedSubscription, workspaces::WorkspaceListChangedEvent),
             ("workspaces_VmLog", workspaces::WorkspaceVmLogSubscription, workspaces::WorkspaceVmLogEvent),
             ("workspaces_UsbDevicesChanged", workspaces::UsbDevicesChangedSubscription, workspaces::UsbDevicesChangedEvent),
@@ -257,6 +261,9 @@ macro_rules! with_all_actions {
                 ("hostOperations_Cancel", host_operations::CancelHostOperationAction, host_operations::CancelHostOperationOutput),
                 ("shares_Inspect", shares::InspectShareOverlayAction, shares::InspectShareOverlayOutput),
                 ("shares_Apply", shares::ApplyShareOverlayAction, shares::ApplyShareOverlayOutput),
+                ("shares_RequestApproval", shares::RequestShareOverlayApprovalAction, shares::RequestShareOverlayApprovalOutput),
+                ("shares_CancelApproval", shares::CancelShareOverlayApprovalAction, shares::CancelShareOverlayApprovalOutput),
+                ("shares_ResolveApproval", shares::ResolveShareOverlayApprovalAction, shares::ResolveShareOverlayApprovalOutput),
                 ("workspaces_Create", workspaces::CreateWorkspaceAction, workspaces::CreateWorkspaceOutput),
                 ("workspaces_Start", workspaces::StartWorkspaceAction, workspaces::StartWorkspaceOutput),
                 ("workspaces_Stop", workspaces::StopWorkspaceAction, workspaces::StopWorkspaceOutput),
@@ -293,6 +300,7 @@ macro_rules! with_all_subscriptions {
                 ("hostOperations_Changed", host_operations::HostOperationListChangedSubscription, host_operations::HostOperationListChangedEvent),
                 ("hostOperations_Audit", host_operations::HostOperationAuditSubscription, host_operations::HostOperationAuditEvent),
                 ("hostOperations_Output", host_operations::HostOperationOutputSubscription, host_operations::HostOperationOutputEvent),
+                ("shares_ApprovalRequestsChanged", shares::ShareOverlayApprovalRequestListChangedSubscription, shares::ShareOverlayApprovalRequestListChangedEvent),
                 ("workspaces_Changed", workspaces::WorkspaceListChangedSubscription, workspaces::WorkspaceListChangedEvent),
                 ("workspaces_VmLog", workspaces::WorkspaceVmLogSubscription, workspaces::WorkspaceVmLogEvent),
                 ("workspaces_UsbDevicesChanged", workspaces::UsbDevicesChangedSubscription, workspaces::UsbDevicesChangedEvent),
@@ -419,6 +427,7 @@ mod subscription_impls {
     use crate::types::processes;
     use crate::types::repositories;
     use crate::types::secrets;
+    use crate::types::shares;
     use crate::types::workspaces;
 
     macro_rules! implement {

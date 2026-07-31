@@ -11,6 +11,7 @@ mod error;
 mod git;
 mod host_operations;
 mod repository_import;
+mod share_overlays;
 
 use std::io;
 use std::io::Write as _;
@@ -29,6 +30,7 @@ use tascarrel_api::types::host_operations as host_operations_api;
 use tascarrel_api::types::network;
 use tascarrel_api::types::pods;
 use tascarrel_api::types::processes;
+use tascarrel_api::types::shares;
 use tascarrel_api::types::store;
 
 use crate::client::PodClient;
@@ -76,6 +78,11 @@ enum Command {
     Http {
         #[command(subcommand)]
         command: HttpCommand,
+    },
+    /// Submit and manage this pod's overlay-share approval requests.
+    Shares {
+        #[command(subcommand)]
+        command: ShareCommand,
     },
     /// Control host-owned features available to this pod.
     Host {
@@ -223,6 +230,18 @@ enum HttpCommand {
     Unpublish { route: String },
 }
 
+#[derive(Debug, Subcommand)]
+enum ShareCommand {
+    /// Submit one overlay share's exact current revision for host approval.
+    Submit { share: String },
+    /// List pending overlay approvals submitted by this pod.
+    List,
+    /// Withdraw one pending request while retaining the overlay changes.
+    Cancel {
+        approval_id: shares::ShareOverlayApprovalId,
+    },
+}
+
 fn main() -> PodctlResult<()> {
     tracing_subscriber::fmt()
         .with_ansi(false)
@@ -303,6 +322,17 @@ async fn run_cli() -> PodctlResult<()> {
         Command::Chats { command } => run_chat_command(&client, command).await?,
         Command::Ports { command } => run_port_command(&client, command).await?,
         Command::Http { command } => run_http_command(&client, command).await?,
+        Command::Shares { command } => match command {
+            ShareCommand::Submit { share } => {
+                print_json(&share_overlays::submit(&client, share).await?)?;
+            }
+            ShareCommand::List => {
+                print_json(&share_overlays::list(&client).await?)?;
+            }
+            ShareCommand::Cancel { approval_id } => {
+                share_overlays::cancel(&client, approval_id).await?;
+            }
+        },
         Command::Host {
             command: HostCommand::Operations { command },
         } => match command {

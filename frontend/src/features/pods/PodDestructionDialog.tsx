@@ -81,7 +81,7 @@ function PodDestructionWarning({
   error?: string;
 }) {
   const hasLocalWork = Boolean(
-    summary?.changedFileCount || summary?.unpushedCommitCount,
+    summary?.changedFileCount || summary?.overlayChangeCount || summary?.unpushedCommitCount,
   );
   const statusWarnings = repositoryStatusWarnings(summary, verified);
   return (
@@ -114,6 +114,16 @@ function PodDestructionWarning({
                 </strong>
                 <span className="mt-1.5 block text-[11px] leading-4 text-amber-200/75">
                   unpushed {summary.unpushedCommitCount === 1 ? "commit" : "commits"}
+                </span>
+              </span>
+            ) : null}
+            {summary?.overlayChangeCount ? (
+              <span className="block">
+                <strong className="block text-xl font-semibold leading-none tabular-nums text-amber-100">
+                  {summary.overlayChangeCount}
+                </strong>
+                <span className="mt-1.5 block text-[11px] leading-4 text-amber-200/75">
+                  overlay {summary.overlayChangeCount === 1 ? "change" : "changes"} awaiting approval
                 </span>
               </span>
             ) : null}

@@ -61,6 +61,7 @@ use crate::services::repositories::RepositoryService;
 use crate::services::repositories::RepositoryServiceConfig;
 use crate::services::secrets::SecretsService;
 use crate::services::secrets::SecretsServiceConfig;
+use crate::services::share_overlays::ShareOverlayService;
 use crate::services::workspaces::create_private_directory;
 use crate::services::workspaces::lock_file;
 use crate::startup::StartupFailure;
@@ -702,6 +703,10 @@ impl Initialized {
             AutomationService::open(AutomationServiceConfig::new(&prepared.automations_dir))
                 .map_err(|error| anyhow!(error.to_string()))
                 .context("start Automation service")?;
+        let share_overlay_service =
+            ShareOverlayService::open(&prepared.share_overlay_approvals_dir)
+                .map_err(|error| anyhow!(error.to_string()))
+                .context("start overlay share approval service")?;
         let network_service = NetworkService::new(NetworkServiceConfig {
             dns_resolver: args.dns_resolver,
             host_port_host: args.host_port_host,
@@ -725,6 +730,7 @@ impl Initialized {
             network_service,
             repository_service.clone(),
             secrets_service,
+            share_overlay_service,
         );
         let host_control = HostControlService::new(state.clone());
         Ok(Self {
@@ -742,6 +748,7 @@ struct Prepared {
     repository_cache_dir: PathBuf,
     host_operations_dir: PathBuf,
     automations_dir: PathBuf,
+    share_overlay_approvals_dir: PathBuf,
     sops: PathBuf,
     workspace_service: WorkspaceServiceConfig,
     ui_root: Option<PathBuf>,
@@ -787,6 +794,7 @@ impl Prepared {
         let repository_cache_dir = state_dir.join("repos");
         let host_operations_dir = state_dir.join("host-operations");
         let automations_dir = state_dir.join("automations");
+        let share_overlay_approvals_dir = state_dir.join("share-overlay-approvals");
 
         let mode = if let Some(guest_socket) = args.guest_socket.clone() {
             let workspace = args
@@ -848,6 +856,7 @@ impl Prepared {
             repository_cache_dir,
             host_operations_dir,
             automations_dir,
+            share_overlay_approvals_dir,
             sops,
             workspace_service: WorkspaceServiceConfig {
                 runtime_dir,

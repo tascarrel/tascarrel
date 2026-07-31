@@ -37,7 +37,7 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "share": __sidex_types.builtins.String };
 /**
- * Exact current revision and display-safe change summary.
+ * Exact current revision and bounded review summary.
  */
  export type InspectShareOverlayOutput = { /**
                                             * Revision which must be supplied to the apply action.
@@ -70,11 +70,136 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "result": ShareOverlayApplyResult };
 /**
+ * Submits one pod's current overlay revision for host approval.
+ */
+ export type RequestShareOverlayApprovalAction = { /**
+                                            * Workspace whose VM owns the requesting pod.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Pod whose isolated upper state is submitted.
+                                            */
+                                                        "podId": __schema_pods.PodId, /**
+                                            * Configured overlay share name.
+                                            */
+                                                        "share": __sidex_types.builtins.String };
+/**
+ * Durable approval request created for the submitted revision.
+ */
+ export type RequestShareOverlayApprovalOutput = { /**
+                                            * Exact pending request, or the existing request for the same revision.
+                                            */
+                                                        "request": ShareOverlayApprovalRequest };
+/**
+ * Withdraws one pending overlay approval request.
+ */
+ export type CancelShareOverlayApprovalAction = { /**
+                                            * Workspace which owns the pending request.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Pod which submitted the pending request.
+                                            */
+                                                        "podId": __schema_pods.PodId, /**
+                                            * Pending request to withdraw.
+                                            */
+                                                        "approvalId": ShareOverlayApprovalId };
+/**
+ * Acknowledges that the pending request was withdrawn.
+ */
+ export type CancelShareOverlayApprovalOutput = Record<string, never>;
+/**
+ * Approves or rejects one exact submitted overlay revision.
+ */
+ export type ResolveShareOverlayApprovalAction = { /**
+                                            * Workspace which owns the pending request.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Pending request to resolve.
+                                            */
+                                                        "approvalId": ShareOverlayApprovalId, /**
+                                            * Decision applied to the exact submitted revision.
+                                            */
+                                                        "decision": ShareOverlayApprovalDecision };
+/**
+ * Result of resolving one pending overlay request.
+ */
+ export type ResolveShareOverlayApprovalOutput = { /**
+                                            * Terminal result or retained condition requiring another decision.
+                                            */
+                                                        "result": ShareOverlayApprovalResolution };
+/**
+ * Subscribes to pending overlay approvals for one workspace.
+ */
+ export type ShareOverlayApprovalRequestListChangedSubscription = { /**
+                                            * Workspace whose pending overlay approvals are observed.
+                                            */
+                                                        "workspace": __schema_workspaces.WorkspaceName, /**
+                                            * Restricts results to approvals submitted by one pod when supplied.
+                                            */
+                                                        "podId"?: __schema_pods.PodId, /**
+                                            * Last complete approval-list revision observed by the consumer, when resuming.
+                                            */
+                                                        "cursor"?: ShareOverlayApprovalListRevision };
+/**
+ * Complete pending overlay approval list emitted when its revision changes.
+ */
+ export type ShareOverlayApprovalRequestListChangedEvent = { /**
+                                            * Revision derived from the complete emitted approval list.
+                                            */
+                                                        "revision": ShareOverlayApprovalListRevision, /**
+                                            * Current pending overlay approvals.
+                                            */
+                                                        "value": ShareOverlayApprovalRequestList };
+/**
+ * Identifies one host-owned overlay approval request.
+ */
+ export type ShareOverlayApprovalId = __sidex_types.Nominal<(string), "::tascarrel_api::shares::ShareOverlayApprovalId">;
+/**
+ * SHA-256 revision derived from one complete overlay approval list.
+ */
+ export type ShareOverlayApprovalListRevision = __sidex_types.Nominal<__sidex_types.builtins.String, "::tascarrel_api::shares::ShareOverlayApprovalListRevision">;
+/**
  * SHA-256 identity of one canonical upper change set.
  */
  export type ShareOverlayRevision = __sidex_types.Nominal<__sidex_types.builtins.String, "::tascarrel_api::shares::ShareOverlayRevision">;
 /**
- * Display-safe summary of one changed path.
+ * Complete pending overlay approval inventory.
+ */
+ export type ShareOverlayApprovalRequestList = { /**
+                                            * Pending requests ordered by creation time and identifier.
+                                            */
+                                                        "requests": __sidex_types.builtins.Sequence<ShareOverlayApprovalRequest> };
+/**
+ * One exact pod overlay revision awaiting a host decision.
+ */
+ export type ShareOverlayApprovalRequest = { /**
+                                            * Stable request identifier.
+                                            */
+                                                        "id": ShareOverlayApprovalId, /**
+                                            * Pod which submitted the proposed filesystem changes.
+                                            */
+                                                        "podId": __schema_pods.PodId, /**
+                                            * Configured overlay share name.
+                                            */
+                                                        "share": __sidex_types.builtins.String, /**
+                                            * Time at which hostd captured the exact revision.
+                                            */
+                                                        "createdAt": __schema_common.Timestamp, /**
+                                            * Exact submitted revision protected by the approval decision.
+                                            */
+                                                        "revision": ShareOverlayRevision, /**
+                                            * Bounded review summary of the submitted changes.
+                                            */
+                                                        "changes": __sidex_types.builtins.Sequence<ShareOverlayChange> };
+/**
+ * Decision available for one pending overlay approval.
+ */
+ export type ShareOverlayApprovalDecision = ({ "tag": "Approve" } | { "tag": "Reject" });
+/**
+ * Result of resolving one pending overlay approval.
+ */
+ export type ShareOverlayApprovalResolution = ({ "result": "Applied" } | { "result": "Rejected" } | ({ "result": "RevisionChanged" } & ShareOverlayRevisionChanged) | ({ "result": "Conflicts" } & ShareOverlayConflictList));
+/**
+ * Bounded review summary of one changed path.
  */
  export type ShareOverlayChange = { /**
                                             * Lossy Unix path display; the exact raw path remains bound to the revision.
@@ -88,11 +213,15 @@ import * as __schema_workspaces from "./workspaces";
                                                         "proposedKind"?: ShareOverlayEntryKind, /**
                                             * Proposed regular-file byte length when applicable.
                                             */
-                                                        "proposedSize"?: __sidex_types.builtins.U64 };
+                                                        "proposedSize"?: __sidex_types.builtins.U64, /**
+                                            * Unified text diff from the captured lower file to the proposal when
+                                            * both sides are bounded UTF-8 regular-file contents.
+                                            */
+                                                        "textDiff"?: __sidex_types.builtins.String };
 /**
  * Result of applying one reviewed revision.
  */
- export type ShareOverlayApplyResult = ({ "status": "Applied" } | ({ "status": "RevisionChanged" } & ShareOverlayRevisionChanged) | ({ "status": "Conflicts" } & ShareOverlayConflictList));
+ export type ShareOverlayApplyResult = ({ "result": "Applied" } | ({ "result": "RevisionChanged" } & ShareOverlayRevisionChanged) | ({ "result": "Conflicts" } & ShareOverlayConflictList));
 /**
  * Current revision returned after a stale approval attempt.
  */
@@ -100,7 +229,7 @@ import * as __schema_workspaces from "./workspaces";
                                             * New revision to inspect.
                                             */
                                                         "revision": ShareOverlayRevision, /**
-                                            * Current display-safe change summary.
+                                            * Current bounded review summary.
                                             */
                                                         "changes": __sidex_types.builtins.Sequence<ShareOverlayChange> };
 /**
