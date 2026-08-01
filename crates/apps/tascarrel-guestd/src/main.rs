@@ -51,6 +51,7 @@ use tascarrel_guest::CodeServiceConfig;
 use tascarrel_guest::DEFAULT_DEVICE_PATH;
 use tascarrel_guest::Executor;
 use tascarrel_guest::FilesService;
+use tascarrel_guest::FilesServiceConfig;
 use tascarrel_guest::FilesServiceError;
 use tascarrel_guest::GuestControlService;
 use tascarrel_guest::GuestNetworkService;
@@ -104,14 +105,16 @@ use tascarrel_protocol::MUX_CHAT_ATTACHMENT_READ_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
 use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
 use tascarrel_protocol::MUX_HOST_OPERATION_INPUT_ENDPOINT;
+use tascarrel_protocol::MUX_POD_FILE_READ_ENDPOINT;
 use tascarrel_protocol::MUX_POD_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_PUBLISH_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_SHARE_OVERLAY_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_ENVIRONMENT_HOST_ENDPOINT;
-use tascarrel_protocol::MUX_WORKSPACE_FILE_READ_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_HOST_ENDPOINT;
 use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
 use tascarrel_protocol::Pod;
+use tascarrel_protocol::PodFileReadRequest;
+use tascarrel_protocol::PodFileReadResponse;
 use tascarrel_protocol::PodHostOperationInputRequest;
 use tascarrel_protocol::PodId;
 use tascarrel_protocol::PublishedPortConnect;
@@ -123,8 +126,6 @@ use tascarrel_protocol::ShareOverlayOperation;
 use tascarrel_protocol::ShareOverlayPrepareResponse;
 use tascarrel_protocol::ShareOverlayRequest;
 use tascarrel_protocol::WorkspaceEnvironmentResponse;
-use tascarrel_protocol::WorkspaceFileReadRequest;
-use tascarrel_protocol::WorkspaceFileReadResponse;
 use tascarrel_protocol::WorkspaceHostShareMode;
 use tascarrel_protocol::WorkspaceHostSharesResponse;
 use tascarrel_protocol::workspace_snapshot;
@@ -1162,7 +1163,21 @@ async fn main() -> Result<()> {
             repository_config.clone(),
         )
         .await;
-    let files = FilesService::new();
+    let mut files_config = FilesServiceConfig::default();
+    for share in &host_share_manifest.shares {
+        let configured = if share.mode == WorkspaceHostShareMode::Overlay {
+            files_config.add_overlay_share(share.name.clone())
+        } else {
+            files_config.add_directory_share(
+                share.name.clone(),
+                Path::new(host_shares::HOST_SHARES_DIRECTORY).join(&share.name),
+            )
+        };
+        configured
+            .map_err(|error| anyhow!(error.to_string()))
+            .with_context(|| format!("configure file access for host share {:?}", share.name))?;
+    }
+    let files = FilesService::new(files_config);
     let image_input: Arc<dyn ImageInputRefresh> = input;
     let control_plane = GuestControlService::new(
         GuestState::new(
@@ -1170,7 +1185,7 @@ async fn main() -> Result<()> {
                 chats: chats.clone(),
                 changes,
                 code: code.clone(),
-                files,
+                files: files.clone(),
                 guest,
                 images: images.clone(),
                 network: Arc::clone(&network_service),
@@ -1895,18 +1910,18 @@ fn accept_mux_request(
         }
         return;
     }
-    if request.endpoint() == MUX_WORKSPACE_FILE_READ_ENDPOINT {
+    if request.endpoint() == MUX_POD_FILE_READ_ENDPOINT {
         match request.accept() {
             Ok(channel) => {
-                let files = control.files;
+                let files = control.files.clone();
                 let pods = control.pods.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_workspace_file_read(channel, files, &pods).await {
-                        warn!(%error, "logical workspace file read ended with an error");
+                    if let Err(error) = serve_pod_file_read(channel, files, &pods).await {
+                        warn!(%error, "logical pod file read ended with an error");
                     }
                 });
             }
-            Err(error) => warn!(%error, "could not accept workspace file read"),
+            Err(error) => warn!(%error, "could not accept pod file read"),
         }
         return;
     }
@@ -2158,36 +2173,36 @@ async fn serve_chat_attachment_read(channel: Channel, chats: &ChatService) -> Re
     }
 }
 
-/// Returns one result frame followed by raw bytes from a safely opened
-/// workspace file.
-async fn serve_workspace_file_read(
+/// Returns one result frame followed by raw bytes from a safely opened pod
+/// file.
+async fn serve_pod_file_read(
     channel: Channel,
     files: FilesService,
     pods: &tascarrel_guest::PodService,
-) -> std::result::Result<(), Report<WorkspaceFileStreamError>> {
+) -> std::result::Result<(), Report<PodFileStreamError>> {
     let mut framed = Framed::new(channel);
     let request = framed
-        .read::<WorkspaceFileReadRequest>()
+        .read::<PodFileReadRequest>()
         .await
-        .map_err(|error| stream_failed("failed to read workspace file request", error))?
-        .ok_or_else(|| stream_failed("workspace file read closed before its request", "EOF"))?;
+        .map_err(|error| stream_failed("failed to read pod file request", error))?
+        .ok_or_else(|| stream_failed("pod file read closed before its request", "EOF"))?;
     match files
-        .open_file(&request.pod_id, request.path.as_str(), pods)
+        .open_file(&request.pod_id, &request.root, request.path.as_str(), pods)
         .await
     {
         Ok(mut opened) => {
             framed
-                .write(&WorkspaceFileReadResponse::Found { size: opened.size })
+                .write(&PodFileReadResponse::Found { size: opened.size })
                 .await
-                .map_err(|error| stream_failed("failed to write workspace file response", error))?;
+                .map_err(|error| stream_failed("failed to write pod file response", error))?;
             let mut channel = framed.into_inner();
             tokio::io::copy(&mut opened.file, &mut channel)
                 .await
-                .map_err(|error| stream_failed("failed to stream workspace file", error))?;
+                .map_err(|error| stream_failed("failed to stream pod file", error))?;
             channel
                 .shutdown()
                 .await
-                .map_err(|error| stream_failed("failed to finish workspace file stream", error))
+                .map_err(|error| stream_failed("failed to finish pod file stream", error))
         }
         Err(error) => {
             let code = match error.error() {
@@ -2196,27 +2211,25 @@ async fn serve_workspace_file_read(
                 FilesServiceError::Internal(_) => "internal",
             };
             framed
-                .write(&WorkspaceFileReadResponse::Rejected {
+                .write(&PodFileReadResponse::Rejected {
                     code: code.to_owned(),
                     message: error.to_string(),
                 })
                 .await
-                .map_err(|error| {
-                    stream_failed("failed to write rejected workspace file response", error)
-                })
+                .map_err(|error| stream_failed("failed to write rejected pod file response", error))
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("workspace file stream failed: {0}")]
-struct WorkspaceFileStreamError(String);
+#[error("pod file stream failed: {0}")]
+struct PodFileStreamError(String);
 
 fn stream_failed(
     message: impl Into<String>,
     source: impl std::fmt::Display,
-) -> Report<WorkspaceFileStreamError> {
-    WorkspaceFileStreamError(message.into())
+) -> Report<PodFileStreamError> {
+    PodFileStreamError(message.into())
         .report()
         .message(source.to_string())
 }

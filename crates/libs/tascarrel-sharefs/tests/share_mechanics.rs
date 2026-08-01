@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::fs::symlink;
@@ -156,6 +157,26 @@ fn copy_up_is_stable_across_lower_changes_and_reopening() {
         change_at(&reopened_changes, "file").base.as_ref(),
         Some(&first_lease)
     );
+}
+
+/// Verifies streaming descriptors resolve both live lower files and private
+/// upper objects.
+#[test]
+fn opens_merged_regular_files_for_streaming() {
+    let fixture = Fixture::new();
+    fs::write(fixture.lower.join("file"), b"lower").unwrap();
+    let filesystem = fixture.open();
+
+    let mut lower = filesystem.open_file("file").unwrap();
+    let mut lower_contents = Vec::new();
+    lower.read_to_end(&mut lower_contents).unwrap();
+    assert_eq!(lower_contents, b"lower");
+
+    filesystem.write_file("file", b"upper").unwrap();
+    let mut upper = filesystem.open_file("file").unwrap();
+    let mut upper_contents = Vec::new();
+    upper.read_to_end(&mut upper_contents).unwrap();
+    assert_eq!(upper_contents, b"upper");
 }
 
 /// Verifies a synchronized copy of the complete upper state is independently

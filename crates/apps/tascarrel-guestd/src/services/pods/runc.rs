@@ -24,6 +24,7 @@ use nix::unistd::Uid;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
+use tascarrel_sharefs::DirectoryEntry;
 
 use super::share_overlays::PreparedShareOverlay;
 use super::share_overlays::ShareOverlayRuntime;
@@ -382,6 +383,26 @@ impl Runc {
         share: &str,
     ) -> Result<PreparedShareOverlay, Report<RuntimeError>> {
         self.share_overlays.prepare_approval(pod, share)
+    }
+
+    /// Reads one directory from a pod's overlay host-share view.
+    pub(crate) fn read_share_overlay_directory(
+        &self,
+        pod: &RuntimePodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<Vec<DirectoryEntry>, Report<RuntimeError>> {
+        self.share_overlays.read_directory(pod, share, path)
+    }
+
+    /// Opens one regular file from a pod's overlay host-share view.
+    pub(crate) fn open_share_overlay_file(
+        &self,
+        pod: &RuntimePodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<fs::File, Report<RuntimeError>> {
+        self.share_overlays.open_file(pod, share, path)
     }
 
     /// Returns process execution coordinates without checking container state.

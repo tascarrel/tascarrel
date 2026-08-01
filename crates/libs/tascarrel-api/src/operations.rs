@@ -73,6 +73,7 @@ macro_rules! __with_guestd_actions {
         $macro! {
             $($entries)*
             ("guest_QueryInformation", guest::QueryGuestInformationAction, guest::QueryGuestInformationOutput),
+            ("files_ListRoots", files::ListRootsAction, files::ListRootsOutput),
             ("files_ReadDirectory", files::ReadDirectoryAction, files::ReadDirectoryOutput),
             ("changes_GetDivergentCommits", changes::GetDivergentCommitsAction, changes::GetDivergentCommitsOutput),
             ("changes_GetChangeSet", changes::GetChangeSetAction, changes::GetChangeSetOutput),

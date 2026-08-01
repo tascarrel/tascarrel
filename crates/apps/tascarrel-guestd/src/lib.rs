@@ -40,6 +40,7 @@ pub use services::code::CodeServiceConfig;
 pub use services::code::CodeServiceError;
 pub use services::files::FileRead;
 pub use services::files::FilesService;
+pub use services::files::FilesServiceConfig;
 pub use services::files::FilesServiceError;
 pub use services::guest::GuestService;
 pub use services::guest::GuestServiceConfig;

@@ -85,7 +85,7 @@ impl GuestState {
         &self.services.code
     }
 
-    /// Returns the pod workspace file inspection service.
+    /// Returns the pod file-root inspection service.
     pub(crate) fn files(&self) -> &FilesService {
         &self.services.files
     }
@@ -140,7 +140,7 @@ pub struct GuestServices {
     pub changes: ChangesService,
     /// Workspace Code editor lifecycle service.
     pub code: CodeService,
-    /// Pod workspace file inspection service.
+    /// Pod file-root inspection service.
     pub files: FilesService,
     /// Guest information and metrics service.
     pub guest: GuestService,

@@ -342,12 +342,13 @@ pub(crate) fn matches_lease_fingerprint(
             .is_ok_and(|value| value == lease.changed_at.nanoseconds)
 }
 
-pub(crate) fn open_lower_file(path: &Path) -> ShareFsResult<File> {
+/// Opens one share file for reading without following the final path component.
+pub(crate) fn open_read_only_file(path: &Path) -> ShareFsResult<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|source| io_error("open a lower share file", source))
+        .map_err(|source| io_error("open a share file", source))
 }
 
 pub(crate) fn digest_file(path: &Path) -> ShareFsResult<ContentDigest> {

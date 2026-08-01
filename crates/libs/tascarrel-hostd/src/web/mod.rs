@@ -44,6 +44,8 @@ use futures_util::stream;
 use reportify::ErrorExt as _;
 use serde::Deserialize;
 use serde::Serialize;
+use tascarrel_api::types::files::FileRoot;
+use tascarrel_api::types::files::ShareFileRoot;
 use tascarrel_api::types::host::ServerState;
 use tascarrel_api::types::host::ServerStatus;
 use tascarrel_api::types::protocol;
@@ -57,9 +59,9 @@ use tascarrel_protocol::Framed;
 use tascarrel_protocol::MAX_CHAT_ATTACHMENT_BYTES;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_READ_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
-use tascarrel_protocol::MUX_WORKSPACE_FILE_READ_ENDPOINT;
-use tascarrel_protocol::WorkspaceFileReadRequest;
-use tascarrel_protocol::WorkspaceFileReadResponse;
+use tascarrel_protocol::MUX_POD_FILE_READ_ENDPOINT;
+use tascarrel_protocol::PodFileReadRequest;
+use tascarrel_protocol::PodFileReadResponse;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_protocol::control_plane;
 use tokio::io::AsyncWriteExt as _;
@@ -831,6 +833,7 @@ fn chat_attachment_can_render_inline(media_type: &str) -> bool {
 struct RawFileQuery {
     workspace: String,
     pod_id: String,
+    share: Option<String>,
     path: String,
     #[serde(default)]
     download: bool,
@@ -839,7 +842,7 @@ struct RawFileQuery {
 #[tracing::instrument(
     level = "debug",
     skip_all,
-    fields(workspace = %input.workspace, pod_id = %input.pod_id, path = %input.path)
+    fields(workspace = %input.workspace, pod_id = %input.pod_id, share = ?input.share, path = %input.path)
 )]
 async fn raw_file(
     State(state): State<WebState>,
@@ -864,19 +867,20 @@ async fn raw_file(
             )
         })?;
     let channel = mux
-        .open(MUX_WORKSPACE_FILE_READ_ENDPOINT)
+        .open(MUX_POD_FILE_READ_ENDPOINT)
         .await
         .map_err(|error| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "file-read-unavailable",
-                format!("failed to open workspace file read: {error}"),
+                format!("failed to open pod file read: {error}"),
             )
         })?;
     let mut framed = Framed::new(channel);
     framed
-        .write(&WorkspaceFileReadRequest {
+        .write(&PodFileReadRequest {
             pod_id,
+            root: raw_file_root(input.share.as_deref()),
             path: tascarrel_api::types::files::FilePath::new(input.path.clone()),
         })
         .await
@@ -884,37 +888,37 @@ async fn raw_file(
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "file-read-failed",
-                format!("failed to send workspace file request: {error}"),
+                format!("failed to send pod file request: {error}"),
             )
         })?;
     framed.get_mut().shutdown().await.map_err(|error| {
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "file-read-failed",
-            format!("failed to finish workspace file request: {error}"),
+            format!("failed to finish pod file request: {error}"),
         )
     })?;
     let result = framed
-        .read::<WorkspaceFileReadResponse>()
+        .read::<PodFileReadResponse>()
         .await
         .map_err(|error| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "file-read-failed",
-                format!("failed to read workspace file response: {error}"),
+                format!("failed to read pod file response: {error}"),
             )
         })?
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "file-read-failed",
-                "workspace file read closed without a response",
+                "pod file read closed without a response",
             )
         })?;
     let size = match result {
-        WorkspaceFileReadResponse::Found { size } => size,
-        WorkspaceFileReadResponse::Rejected { code, message } => {
-            return Err(workspace_file_rejection(code, message));
+        PodFileReadResponse::Found { size } => size,
+        PodFileReadResponse::Rejected { code, message } => {
+            return Err(pod_file_rejection(code, message));
         }
     };
     let mut response = Response::new(Body::from_stream(ReaderStream::new(framed.into_inner())));
@@ -944,7 +948,16 @@ async fn raw_file(
     Ok(response)
 }
 
-fn workspace_file_rejection(code: String, message: String) -> ApiError {
+/// Converts the optional HTTP share selector into the Files API root.
+fn raw_file_root(share: Option<&str>) -> FileRoot {
+    share.map_or(FileRoot::Workspace, |name| {
+        FileRoot::Share(ShareFileRoot {
+            name: name.to_owned().into(),
+        })
+    })
+}
+
+fn pod_file_rejection(code: String, message: String) -> ApiError {
     let status = if code == "invalid_path" {
         StatusCode::BAD_REQUEST
     } else {

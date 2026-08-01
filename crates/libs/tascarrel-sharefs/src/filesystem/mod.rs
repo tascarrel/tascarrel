@@ -45,7 +45,7 @@ use support::metadata_value;
 use support::normalize_non_root_path;
 use support::normalize_path;
 use support::now;
-use support::open_lower_file;
+use support::open_read_only_file;
 use support::optional_symlink_metadata;
 use support::prepare_lower_directory;
 use support::prepare_state_directory;
@@ -140,27 +140,37 @@ impl Core {
         }
     }
 
-    fn read_file(&self, path: &Path) -> ShareFsResult<Vec<u8>> {
-        match self.resolve(path)? {
+    fn open_file(&self, path: &Path) -> ShareFsResult<File> {
+        let file = match self.resolve(path)? {
             ResolvedEntry::Lower(lower) => {
                 let metadata = symlink_metadata(&lower, "inspect a lower file")?;
                 if entry_kind(&metadata, path)? != EntryKind::File {
                     return Err(entry_type_error(path, &metadata));
                 }
-                let mut file = open_lower_file(&lower)?;
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents)
-                    .map_err(|source| io_error("read a lower share file", source))?;
-                Ok(contents)
+                open_read_only_file(&lower)
             }
             ResolvedEntry::Upper(node) => {
                 if node.kind != EntryKind::File {
                     return Err(entry_type_error_for_kind(path, node.kind));
                 }
-                fs::read(self.object_path(&node)?)
-                    .map_err(|source| io_error("read an upper share file", source))
+                open_read_only_file(&self.object_path(&node)?)
             }
+        }?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error("inspect an opened share file", source))?;
+        if entry_kind(&metadata, path)? != EntryKind::File {
+            return Err(entry_type_error(path, &metadata));
         }
+        Ok(file)
+    }
+
+    fn read_file(&self, path: &Path) -> ShareFsResult<Vec<u8>> {
+        let mut file = self.open_file(path)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .map_err(|source| io_error("read a share file", source))?;
+        Ok(contents)
     }
 
     fn write_file(&mut self, path: &Path, contents: &[u8]) -> ShareFsResult<()> {
@@ -730,7 +740,7 @@ impl Core {
         let kind = entry_kind(&before, path)?;
         let digest = match kind {
             EntryKind::File => {
-                let mut source = open_lower_file(&lower)?;
+                let mut source = open_read_only_file(&lower)?;
                 let opened_before = source
                     .metadata()
                     .map_err(|source| io_error("inspect an opened lower file", source))?;

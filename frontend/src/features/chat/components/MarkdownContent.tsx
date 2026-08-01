@@ -15,22 +15,21 @@ import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markd
 import remarkGfm from "remark-gfm";
 import { remarkAlert } from "remark-github-blockquote-alert";
 
-import { workspaceFileUrl } from "../../../api/files.ts";
+import { podFilePath, podFileUrl } from "../../../api/files.ts";
 import type { files, pods, workspaces } from "../../../api/generated/index.ts";
 import { Button } from "../../../components/ui/Button.tsx";
 import { DiffViewer } from "../../../components/ui/DiffViewer.tsx";
 import {
-  workspaceFilePath,
-  workspaceFileTarget,
-  type WorkspaceFileTarget,
-} from "../model/workspaceFileLinks.ts";
-import { WorkspaceFilePreviewDialog } from "./WorkspaceFilePreviewDialog.tsx";
+  podFileTarget,
+  type PodFileTarget,
+} from "../model/podFileLinks.ts";
+import { PodFilePreviewDialog } from "./PodFilePreviewDialog.tsx";
 
 type WorkspaceMarkdownContextValue = {
-  workspacePath?: string;
+  fileTarget?: PodFileTarget;
   workspace?: workspaces.WorkspaceName;
   podId?: pods.PodId;
-  openFile?: (target: WorkspaceFileTarget) => void;
+  openFile?: (target: PodFileTarget) => void;
 };
 
 const WorkspaceMarkdownContext = createContext<WorkspaceMarkdownContextValue>({});
@@ -38,20 +37,20 @@ const WorkspaceMarkdownContext = createContext<WorkspaceMarkdownContextValue>({}
 export const MarkdownContent = memo(function MarkdownContent({
   content,
   density = "default",
-  workspacePath,
+  fileTarget,
 }: {
   content: string;
   density?: "default" | "compact";
-  workspacePath?: string;
+  fileTarget?: PodFileTarget;
 }) {
   const params = useParams({ strict: false }) as { workspace?: string; pod?: string };
   const workspace = params.workspace as workspaces.WorkspaceName | undefined;
   const podId = params.pod as pods.PodId | undefined;
-  const [previewTarget, setPreviewTarget] = useState<WorkspaceFileTarget>();
+  const [previewTarget, setPreviewTarget] = useState<PodFileTarget>();
 
   return (
     <WorkspaceMarkdownContext.Provider
-      value={{ workspacePath, workspace, podId, openFile: setPreviewTarget }}
+      value={{ fileTarget, workspace, podId, openFile: setPreviewTarget }}
     >
       <div
         className={
@@ -70,10 +69,10 @@ export const MarkdownContent = memo(function MarkdownContent({
         </ReactMarkdown>
       </div>
       {previewTarget && workspace && podId ? (
-        <WorkspaceFilePreviewDialog
-          key={previewTarget.path}
+        <PodFilePreviewDialog
+          key={podFilePath(previewTarget.root, previewTarget.path)}
           podId={podId}
-          renderMarkdown={renderWorkspaceMarkdown}
+          renderMarkdown={renderPodMarkdown}
           target={previewTarget}
           workspace={workspace}
           onClose={() => setPreviewTarget(undefined)}
@@ -101,8 +100,8 @@ const markdownComponents: Components = {
       {children}
     </blockquote>
   ),
-  a: ({ children, href }) => <WorkspaceMarkdownLink href={href}>{children}</WorkspaceMarkdownLink>,
-  img: ({ alt, src, title }) => <WorkspaceMarkdownImage alt={alt} src={src} title={title} />,
+  a: ({ children, href }) => <PodMarkdownLink href={href}>{children}</PodMarkdownLink>,
+  img: ({ alt, src, title }) => <PodMarkdownImage alt={alt} src={src} title={title} />,
   hr: () => <hr className="my-4 border-ui-border" />,
   table: ({ children }) => (
     <div className="my-3 overflow-x-auto rounded-xl border border-ui-border">
@@ -135,17 +134,18 @@ const markdownComponents: Components = {
   },
 };
 
-function WorkspaceMarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
+function PodMarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
   const context = useContext(WorkspaceMarkdownContext);
-  const file = workspaceFileTarget(href, context.workspacePath);
+  const file = podFileTarget(href, context.fileTarget);
   const openFile = context.openFile;
   const className = "font-medium text-accent-text underline decoration-accent/35 underline-offset-4 hover:text-accent";
   return file && context.workspace && context.podId && openFile ? (
     <a
       className={className}
-      href={workspaceFileUrl(
+      href={podFileUrl(
         context.workspace,
         context.podId,
+        file.root,
         file.path as files.FilePath,
       )}
       rel="noreferrer"
@@ -161,7 +161,7 @@ function WorkspaceMarkdownLink({ children, href }: { children?: ReactNode; href?
   );
 }
 
-function WorkspaceMarkdownImage({
+function PodMarkdownImage({
   alt,
   src,
   title,
@@ -171,13 +171,18 @@ function WorkspaceMarkdownImage({
   title?: string;
 }) {
   const context = useContext(WorkspaceMarkdownContext);
-  const filePath = workspaceFilePath(src, context.workspacePath);
+  const file = podFileTarget(src, context.fileTarget);
   return (
     <img
       alt={alt ?? ""}
       loading="lazy"
-      src={filePath && context.workspace && context.podId
-        ? workspaceFileUrl(context.workspace, context.podId, filePath as files.FilePath)
+      src={file && context.workspace && context.podId
+        ? podFileUrl(
+            context.workspace,
+            context.podId,
+            file.root,
+            file.path as files.FilePath,
+          )
         : src}
       title={title}
     />
@@ -265,19 +270,23 @@ function normalizeLanguage(language: string): string {
 }
 
 function markdownUrlTransform(value: string): string {
-  return workspaceFileTarget(value) ? value : defaultUrlTransform(value);
+  return podFileTarget(value) ? value : defaultUrlTransform(value);
 }
 
 function openFilePreview(
   event: ReactMouseEvent<HTMLAnchorElement>,
-  target: WorkspaceFileTarget,
-  openFile: (target: WorkspaceFileTarget) => void,
+  target: PodFileTarget,
+  openFile: (target: PodFileTarget) => void,
 ): void {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   event.preventDefault();
   openFile(target);
 }
 
-function renderWorkspaceMarkdown(content: string, workspacePath: string): ReactNode {
-  return <MarkdownContent content={content} workspacePath={workspacePath} />;
+function renderPodMarkdown(
+  content: string,
+  root: files.FileRoot,
+  path: string,
+): ReactNode {
+  return <MarkdownContent content={content} fileTarget={{ root, path }} />;
 }

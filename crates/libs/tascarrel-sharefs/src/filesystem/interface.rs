@@ -3,6 +3,7 @@
 //! [`ShareFileSystem`] validates caller paths, serializes operations, and
 //! delegates durable namespace transitions to the internal filesystem core.
 
+use std::fs::File;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -131,6 +132,27 @@ impl ShareFileSystem {
     pub fn read_directory(&self, path: impl AsRef<Path>) -> ShareFsResult<Vec<DirectoryEntry>> {
         let path = normalize_path(path.as_ref())?;
         self.lock()?.read_directory(&path)
+    }
+
+    /// Opens one merged regular file for descriptor-based reading.
+    ///
+    /// The returned descriptor pins the selected lower inode or upper object
+    /// after the namespace operation completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is unsafe, absent, not a regular file,
+    /// or cannot be opened without following a symbolic link.
+    #[tracing::instrument(
+        name = "tascarrel_sharefs.open_file",
+        level = "trace",
+        skip_all,
+        fields(path = %path.as_ref().display()),
+        err
+    )]
+    pub fn open_file(&self, path: impl AsRef<Path>) -> ShareFsResult<File> {
+        let path = normalize_non_root_path(path.as_ref())?;
+        self.lock()?.open_file(&path)
     }
 
     /// Reads the complete contents of one merged regular file.

@@ -1,13 +1,16 @@
-export type WorkspaceFileTarget = {
+import type { files } from "../../../api/generated/index.ts";
+
+export type PodFileTarget = {
+  root: files.FileRoot;
   path: string;
   line?: number;
 };
 
-/** Resolves a Markdown URL to a normalized path inside the pod workspace. */
-export function workspaceFileTarget(
+/** Resolves a Markdown URL to a normalized path inside a pod file root. */
+export function podFileTarget(
   href?: string,
-  workspacePath?: string,
-): WorkspaceFileTarget | undefined {
+  baseTarget?: PodFileTarget,
+): PodFileTarget | undefined {
   const value = href?.trim();
   if (!value || value.startsWith("#")) return undefined;
 
@@ -17,7 +20,7 @@ export function workspaceFileTarget(
       if (url.hostname && url.hostname !== "localhost") return undefined;
       return normalizeLinkedFileTarget(
         decodePath(url.pathname),
-        undefined,
+        baseTarget,
         sourceLineFromHash(url.hash),
       );
     } catch {
@@ -31,40 +34,40 @@ export function workspaceFileTarget(
   const hash = hashIndex >= 0 ? value.slice(hashIndex) : "";
   const path = value.slice(0, hashIndex >= 0 ? hashIndex : undefined).split("?", 1)[0];
   return path
-    ? normalizeLinkedFileTarget(
-        decodePath(path),
-        workspacePath,
-        sourceLineFromHash(hash),
-      )
+    ? normalizeLinkedFileTarget(decodePath(path), baseTarget, sourceLineFromHash(hash))
     : undefined;
-}
-
-/** Resolves a Markdown URL to a normalized workspace path without source metadata. */
-export function workspaceFilePath(href?: string, workspacePath?: string): string | undefined {
-  return workspaceFileTarget(href, workspacePath)?.path;
 }
 
 function normalizeLinkedFileTarget(
   path: string,
-  workspacePath?: string,
+  baseTarget?: PodFileTarget,
   hashLine?: number,
-): WorkspaceFileTarget | undefined {
+): PodFileTarget | undefined {
   let normalized = path.replace(/\\/g, "/");
   const suffix = normalized.match(/:(\d+)(?::\d+)?$/);
   const suffixLine = positiveLineNumber(suffix?.[1]);
   if (suffix) normalized = normalized.slice(0, -suffix[0].length);
   if (!normalized || normalized.endsWith("/") || normalized.includes("\0")) return undefined;
 
-  let rootedInWorkspace = false;
+  let root = baseTarget?.root ?? WORKSPACE_ROOT;
+  if (root.tag === "Share" && !validShareName(root.name)) return undefined;
+  let rooted = false;
   if (normalized.startsWith("/workspace/")) {
     normalized = normalized.slice("/workspace/".length);
-    rootedInWorkspace = true;
+    root = WORKSPACE_ROOT;
+    rooted = true;
+  } else if (normalized.startsWith("/mnt/")) {
+    const [share, ...components] = normalized.slice("/mnt/".length).split("/");
+    if (!validShareName(share) || components.length === 0) return undefined;
+    root = { tag: "Share", name: share };
+    normalized = components.join("/");
+    rooted = true;
   } else if (normalized.startsWith("/")) {
     return undefined;
   }
 
   const name = normalized.split("/").at(-1) ?? normalized;
-  const likelyFile = rootedInWorkspace
+  const likelyFile = rooted
     || normalized.startsWith("./")
     || normalized.startsWith("../")
     || normalized.includes("/")
@@ -72,7 +75,7 @@ function normalizeLinkedFileTarget(
     || /^(?:copying|dockerfile|justfile|license|makefile|procfile|readme)$/i.test(name);
   if (!likelyFile) return undefined;
 
-  const base = rootedInWorkspace ? [] : workspaceDirectory(workspacePath);
+  const base = rooted ? [] : fileDirectory(baseTarget?.path);
   if (!base) return undefined;
   for (const component of normalized.split("/")) {
     if (!component || component === ".") continue;
@@ -86,23 +89,27 @@ function normalizeLinkedFileTarget(
   const resolvedPath = base.join("/");
   const line = hashLine ?? suffixLine;
   return resolvedPath
-    ? { path: resolvedPath, ...(line ? { line } : {}) }
+    ? { root, path: resolvedPath, ...(line ? { line } : {}) }
     : undefined;
 }
 
-function workspaceDirectory(workspacePath?: string): string[] | undefined {
-  if (!workspacePath) return [];
-  let normalized = workspacePath.replace(/\\/g, "/");
-  if (normalized.startsWith("/workspace/")) {
-    normalized = normalized.slice("/workspace/".length);
-  } else if (normalized.startsWith("/")) {
+const WORKSPACE_ROOT = { tag: "Workspace" } as const satisfies files.FileRoot;
+
+function fileDirectory(path?: string): string[] | undefined {
+  if (!path) return [];
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || normalized.endsWith("/") || normalized.includes("\0")) {
     return undefined;
   }
-  const components = normalized.split("/").filter(Boolean);
-  if (components.some((component) => component === "." || component === "..")) {
+  const components = normalized.split("/");
+  if (components.some((component) => !component || component === "." || component === "..")) {
     return undefined;
   }
   return components.slice(0, -1);
+}
+
+function validShareName(name: string | undefined): name is string {
+  return Boolean(name && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name));
 }
 
 function decodePath(path: string): string {

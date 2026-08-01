@@ -1,17 +1,22 @@
 import { FileQuestion, LoaderCircle } from "lucide-react";
 import { lazy, Suspense, type ReactNode, useEffect, useState } from "react";
 
-import { workspaceFileUrl } from "../../api/files.ts";
+import { podFileUrl } from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { PdfViewer } from "../../components/pdf/index.ts";
 
 export type MarkdownRepresentation = "rendered" | "source";
-export type WorkspaceMarkdownRenderer = (content: string, workspacePath: string) => ReactNode;
+export type PodMarkdownRenderer = (
+  content: string,
+  root: files.FileRoot,
+  path: string,
+) => ReactNode;
 
-/** Loads and renders one file from a pod workspace. */
-export function WorkspaceFileViewer({
+/** Loads and renders one file from a pod-visible file root. */
+export function PodFileViewer({
   workspace,
   podId,
+  root,
   path,
   markdownRepresentation,
   renderMarkdown,
@@ -20,15 +25,16 @@ export function WorkspaceFileViewer({
 }: {
   workspace: workspaces.WorkspaceName;
   podId: pods.PodId;
+  root: files.FileRoot;
   path: files.FilePath;
   markdownRepresentation: MarkdownRepresentation;
-  renderMarkdown: WorkspaceMarkdownRenderer;
+  renderMarkdown: PodMarkdownRenderer;
   line?: number;
   revision?: number;
 }) {
   const [preview, setPreview] = useState<Preview>({ status: "loading" });
   const [imageState, setImageState] = useState<ImageState>("loading");
-  const url = workspaceFileUrl(workspace, podId, path);
+  const url = podFileUrl(workspace, podId, root, path);
   const markdown = isMarkdownPath(String(path));
 
   useEffect(() => {
@@ -100,7 +106,7 @@ export function WorkspaceFileViewer({
         {markdown && markdownRepresentation === "rendered" ? (
           <Suspense fallback={<p className="p-4 text-xs text-subtle">Rendering Markdown…</p>}>
             <div className="min-h-full px-6 py-4">
-              {renderMarkdown(preview.text, String(path))}
+              {renderMarkdown(preview.text, root, String(path))}
             </div>
           </Suspense>
         ) : (
@@ -118,7 +124,7 @@ export const MARKDOWN_REPRESENTATIONS = [
   { value: "source", label: "Source" },
 ] as const satisfies ReadonlyArray<{ value: MarkdownRepresentation; label: string }>;
 
-/** Returns whether a workspace path should offer Markdown source and rendered views. */
+/** Returns whether a pod file path should offer Markdown source and rendered views. */
 export function isMarkdownPath(path: string): boolean {
   return /\.(?:md|markdown|mdown|mkd)$/i.test(path);
 }

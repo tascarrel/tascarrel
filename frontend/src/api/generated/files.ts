@@ -24,13 +24,30 @@ import * as __schema_shares from "./shares";
 import * as __schema_store from "./store";
 import * as __schema_workspaces from "./workspaces";
 /**
- * Reads the immediate children of one directory in a pod workspace.
+ * Lists the file roots available to one pod.
+ */
+ export type ListRootsAction = { /**
+                                            * Pod whose configured file roots are listed.
+                                            */
+                                                        "podId": __schema_pods.PodId };
+/**
+ * Configured file roots available to the pod.
+ */
+ export type ListRootsOutput = { /**
+                                            * Roots ordered with the workspace first and shares by name.
+                                            */
+                                                        "roots": __sidex_types.builtins.Sequence<FileRoot> };
+/**
+ * Reads the immediate children of one directory below a pod file root.
  */
  export type ReadDirectoryAction = { /**
-                                            * Pod whose workspace is inspected.
+                                            * Pod whose file root is inspected.
                                             */
                                                         "podId": __schema_pods.PodId, /**
-                                            * Directory to read, using the empty path for the workspace root.
+                                            * Logical root containing the directory, defaulting to the workspace when absent.
+                                            */
+                                                        "root"?: FileRoot, /**
+                                            * Directory to read, using the empty path for the selected root.
                                             */
                                                         "path": FilePath };
 /**
@@ -41,7 +58,18 @@ import * as __schema_workspaces from "./workspaces";
                                             */
                                                         "entries": __sidex_types.builtins.Sequence<FileEntry> };
 /**
- * Normalized UTF-8 path relative to a pod's `/workspace` directory.
+ * Logical root available in one pod.
+ */
+ export type FileRoot = ({ "tag": "Workspace" } | ({ "tag": "Share" } & ShareFileRoot));
+/**
+ * One configured host-share root.
+ */
+ export type ShareFileRoot = { /**
+                                            * Validated workspace-local share name.
+                                            */
+                                                        "name": __sidex_types.builtins.String };
+/**
+ * Normalized UTF-8 path relative to a pod file root.
  * 
  * The empty path identifies the root. Paths are at most 4,096 encoded bytes. Absolute paths,
  * empty components, trailing separators, and `.` or `..` components are invalid.

@@ -2,19 +2,19 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Download, X } from "lucide-react";
 import { useState } from "react";
 
-import { workspaceFileUrl } from "../../../api/files.ts";
+import { podFilePath, podFileUrl } from "../../../api/files.ts";
 import type { files, pods, workspaces } from "../../../api/generated/index.ts";
 import { SegmentedControl } from "../../../components/ui/SegmentedControl.tsx";
 import {
   isMarkdownPath,
   MARKDOWN_REPRESENTATIONS,
   type MarkdownRepresentation,
-  type WorkspaceMarkdownRenderer,
-  WorkspaceFileViewer,
-} from "../../files/WorkspaceFileViewer.tsx";
-import type { WorkspaceFileTarget } from "../model/workspaceFileLinks.ts";
+  type PodMarkdownRenderer,
+  PodFileViewer,
+} from "../../files/PodFileViewer.tsx";
+import type { PodFileTarget } from "../model/podFileLinks.ts";
 
-export function WorkspaceFilePreviewDialog({
+export function PodFilePreviewDialog({
   workspace,
   podId,
   target,
@@ -23,15 +23,15 @@ export function WorkspaceFilePreviewDialog({
 }: {
   workspace: workspaces.WorkspaceName;
   podId: pods.PodId;
-  target: WorkspaceFileTarget;
-  renderMarkdown: WorkspaceMarkdownRenderer;
+  target: PodFileTarget;
+  renderMarkdown: PodMarkdownRenderer;
   onClose: () => void;
 }) {
   const [markdownRepresentation, setMarkdownRepresentation] =
     useState<MarkdownRepresentation>(target.line ? "source" : "rendered");
   const path = target.path as files.FilePath;
   const markdown = isMarkdownPath(target.path);
-  const title = `/workspace/${target.path}${target.line ? `:${target.line}` : ""}`;
+  const title = `${podFilePath(target.root, target.path)}${target.line ? `:${target.line}` : ""}`;
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
@@ -58,7 +58,7 @@ export function WorkspaceFilePreviewDialog({
                 aria-label={`Download ${target.path}`}
                 className="grid size-8 shrink-0 place-items-center rounded-lg border border-ui-border/70 bg-surface text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
                 download={fileName(target.path)}
-                href={workspaceFileUrl(workspace, podId, path, true)}
+                href={podFileUrl(workspace, podId, target.root, path, true)}
                 title="Download file"
               >
                 <Download aria-hidden="true" className="size-3.5" />
@@ -74,12 +74,13 @@ export function WorkspaceFilePreviewDialog({
               Preview of {title}
             </Dialog.Description>
             <div className="min-h-0 flex-1 overflow-hidden">
-              <WorkspaceFileViewer
+              <PodFileViewer
                 line={target.line}
                 markdownRepresentation={markdownRepresentation}
                 path={path}
                 podId={podId}
                 renderMarkdown={renderMarkdown}
+                root={target.root}
                 workspace={workspace}
               />
             </div>

@@ -31,6 +31,7 @@ use tascarrel_protocol::ShareOverlayEntry;
 use tascarrel_protocol::ShareOverlayEntryKind;
 use tascarrel_protocol::ShareOverlayEntryVersion;
 use tascarrel_protocol::ShareOverlaySnapshot;
+use tascarrel_sharefs::DirectoryEntry;
 use tascarrel_sharefs::EntryKind;
 use tascarrel_sharefs::EntryVersion;
 use tascarrel_sharefs::FrozenShareFileSystem;
@@ -135,25 +136,13 @@ impl ShareOverlayRuntime {
         if sessions.contains_key(pod.as_str()) {
             return Err(RuntimeError::AlreadyPrepared(pod.clone()).report());
         }
-        let pod_storage = self.config.storage_root.join(pod.as_str());
         let pod_runtime = self.config.runtime_root.join(pod.as_str());
-        ensure_directory(&pod_storage, 0o700)?;
         ensure_directory(&pod_runtime, 0o700)?;
 
         let mut mounted = Vec::with_capacity(self.config.shares.len());
         let mut pod_shares = Vec::with_capacity(self.config.shares.len());
         for share in &self.config.shares {
-            let share_storage = pod_storage.join(&share.name);
-            ensure_directory(&share_storage, 0o700)?;
-            let active = share_storage.join("active");
-            if !active.exists() {
-                run_btrfs(
-                    &self.config.btrfs,
-                    "create ShareFS upper subvolume",
-                    &["subvolume", "create"],
-                    &active,
-                )?;
-            }
+            let active = provision_active_state(&self.config, pod, share)?;
             let mountpoint = pod_runtime.join(&share.name);
             ensure_directory(&mountpoint, 0o700)?;
             let session = match MountedShareFileSystem::mount(
@@ -197,6 +186,42 @@ impl ShareOverlayRuntime {
         }
         sessions.insert(pod.as_str().to_owned(), mounted);
         Ok(pod_shares)
+    }
+
+    /// Reads one directory from a pod's merged overlay-share view.
+    #[tracing::instrument(level = "debug", skip(self), fields(pod_id = %pod, share, path = %path.display()), err)]
+    pub(crate) fn read_directory(
+        &self,
+        pod: &PodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<Vec<DirectoryEntry>, Report<RuntimeError>> {
+        self.inspection_filesystem(pod, share)?
+            .read_directory(path)
+            .map_err(|error| {
+                RuntimeError::InvalidConfig(format!(
+                    "failed to read overlay host share {share:?}: {error}"
+                ))
+                .report()
+            })
+    }
+
+    /// Opens one regular file from a pod's merged overlay-share view.
+    #[tracing::instrument(level = "debug", skip(self), fields(pod_id = %pod, share, path = %path.display()), err)]
+    pub(crate) fn open_file(
+        &self,
+        pod: &PodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<fs::File, Report<RuntimeError>> {
+        self.inspection_filesystem(pod, share)?
+            .open_file(path)
+            .map_err(|error| {
+                RuntimeError::InvalidConfig(format!(
+                    "failed to open overlay host share file {share:?}: {error}"
+                ))
+                .report()
+            })
     }
 
     /// Unmounts every transient overlay for one stopped pod.
@@ -319,6 +344,47 @@ impl ShareOverlayRuntime {
         })
     }
 
+    /// Resolves the active mounted filesystem or opens its durable state for
+    /// inspection.
+    fn inspection_filesystem(
+        &self,
+        pod: &PodId,
+        share_name: &str,
+    ) -> Result<Arc<ShareFileSystem>, Report<RuntimeError>> {
+        let share = self
+            .config
+            .shares
+            .iter()
+            .find(|share| share.name == share_name)
+            .ok_or_else(|| {
+                RuntimeError::InvalidConfig(format!(
+                    "host share {share_name:?} is not configured in overlay mode"
+                ))
+                .report()
+            })?;
+        if let Some(filesystem) = self
+            .sessions
+            .lock()
+            .map_err(|_| RuntimeError::LockPoisoned)
+            .report()?
+            .get(pod.as_str())
+            .and_then(|mounted| mounted.iter().find(|mounted| mounted.name == share.name))
+            .map(|mounted| Arc::clone(mounted.session.filesystem()))
+        {
+            return Ok(filesystem);
+        }
+        let active = provision_active_state(&self.config, pod, share)?;
+        ShareFileSystem::open(&share.lower, active)
+            .map(Arc::new)
+            .map_err(|error| {
+                RuntimeError::InvalidConfig(format!(
+                    "failed to open stopped pod overlay share {:?}: {error}",
+                    share.name
+                ))
+                .report()
+            })
+    }
+
     /// Freezes one upper and captures a Btrfs snapshot for an approval round.
     #[tracing::instrument(
         level = "debug",
@@ -427,6 +493,27 @@ impl ShareOverlayRuntime {
             snapshot,
         })
     }
+}
+
+/// Provisions the durable empty upper used by mounts and stopped-pod
+/// inspection.
+fn provision_active_state(
+    config: &ShareOverlayRuntimeConfig,
+    pod: &PodId,
+    share: &ShareOverlay,
+) -> Result<PathBuf, Report<RuntimeError>> {
+    let share_storage = config.storage_root.join(pod.as_str()).join(&share.name);
+    ensure_directory(&share_storage, 0o700)?;
+    let active = share_storage.join("active");
+    if !active.exists() {
+        run_btrfs(
+            &config.btrfs,
+            "create ShareFS upper subvolume",
+            &["subvolume", "create"],
+            &active,
+        )?;
+    }
+    Ok(active)
 }
 
 impl std::fmt::Debug for ShareOverlayRuntime {

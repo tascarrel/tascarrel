@@ -31,6 +31,7 @@ use tascarrel_api::types::store as store_api;
 use tascarrel_protocol::Health;
 use tascarrel_protocol::Pod as NetworkPrincipal;
 use tascarrel_protocol::PodId as NetworkPodId;
+use tascarrel_sharefs::DirectoryEntry;
 use tascarrel_store::Store;
 use thiserror::Error;
 use tokio::io::AsyncReadExt as _;
@@ -186,6 +187,46 @@ impl PodService {
             prepared: Some(prepared),
             _operation: operation,
         })
+    }
+
+    /// Reads a directory from one pod's merged overlay host-share view.
+    pub(crate) async fn read_share_overlay_directory(
+        &self,
+        pod_id: &api::PodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<Vec<DirectoryEntry>, Report<PodServiceError>> {
+        let _operation = self.pod_operation(pod_id).lock_owned().await;
+        self.public_record(pod_id)?;
+        let runtime_id = runtime_id(pod_id)?;
+        let runc = Arc::clone(&self.inner.runc);
+        let share = share.to_owned();
+        let path = path.to_owned();
+        blocking("read pod ShareFS directory", move || {
+            runc.read_share_overlay_directory(&runtime_id, &share, &path)
+                .map_err(|error| internal(format!("failed to read pod ShareFS directory: {error}")))
+        })
+        .await
+    }
+
+    /// Opens a regular file from one pod's merged overlay host-share view.
+    pub(crate) async fn open_share_overlay_file(
+        &self,
+        pod_id: &api::PodId,
+        share: &str,
+        path: &Path,
+    ) -> Result<std::fs::File, Report<PodServiceError>> {
+        let _operation = self.pod_operation(pod_id).lock_owned().await;
+        self.public_record(pod_id)?;
+        let runtime_id = runtime_id(pod_id)?;
+        let runc = Arc::clone(&self.inner.runc);
+        let share = share.to_owned();
+        let path = path.to_owned();
+        blocking("open pod ShareFS file", move || {
+            runc.open_share_overlay_file(&runtime_id, &share, &path)
+                .map_err(|error| internal(format!("failed to open pod ShareFS file: {error}")))
+        })
+        .await
     }
 
     /// Creates a pod asynchronously and returns its observable identifier.

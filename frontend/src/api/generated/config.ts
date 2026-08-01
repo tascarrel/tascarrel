@@ -755,6 +755,10 @@ import * as __schema_workspaces from "./workspaces";
                                             * Requests using other methods are rejected by the host proxy.
                                             */
                                                         "methods": __sidex_types.builtins.Sequence<__sidex_types.builtins.String>, /**
+                                            * Optional GraphQL request policy applied before secret injection.
+                                            * Rules with this policy must admit exactly the `POST` method.
+                                            */
+                                                        "graphql"?: WorkspaceGraphQlPolicy, /**
                                             * Header inspected for the placeholder, or every eligible header when absent.
                                             */
                                                         "header"?: __sidex_types.builtins.String, /**
@@ -764,3 +768,7 @@ import * as __schema_workspaces from "./workspaces";
                                             * Provider-qualified secret reference such as `project.API_TOKEN`.
                                             */
                                                         "secret": __sidex_types.builtins.String };
+/**
+ * Admission policy for GraphQL requests carried in JSON HTTP bodies.
+ */
+ export type WorkspaceGraphQlPolicy = ("QueriesOnly");

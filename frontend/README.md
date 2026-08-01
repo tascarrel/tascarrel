@@ -23,10 +23,12 @@ starting a chat, with the most recently created pods listed first. Mobile pod sc
 the viewport, while intrinsically wide artifacts such as code and diffs scroll inside their dedicated
 viewers.
 
-Markdown file links in chat output resolve within the current pod's `/workspace` directory and open
-without leaving the conversation. The preview overlay syntax-highlights text, offers rendered and
-source representations for Markdown, and uses dedicated PDF and image viewers. Absolute links must
-start with `/workspace/`; relative links in rendered Markdown resolve from the containing file.
+Markdown file links in chat output resolve within the current pod's `/workspace` directory or one of
+its configured `/mnt/<share>` roots and open without leaving the conversation. The preview overlay
+syntax-highlights text, offers rendered and source representations for Markdown, and uses dedicated
+PDF and image viewers. Absolute links must start with `/workspace/` or `/mnt/<share>/`; relative
+links in rendered Markdown remain within the containing file's root. The desktop Files view uses the
+same roots and lets users browse the workspace or any attached share.
 
 Code editing, terminals, arbitrary file browsing, network configuration, image management, and
 advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless

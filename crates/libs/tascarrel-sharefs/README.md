@@ -11,6 +11,11 @@ The guest daemon (`guestd`) owns each kernel mount, assigns the pod image user's
 mapped UID and GID, snapshots the upper at a frozen revision boundary, and asks
 hostd to apply an explicitly approved revision.
 
+Merged regular files can be read into memory with `ShareFileSystem::read_file`
+or opened as pinned descriptors with `ShareFileSystem::open_file`. Guestd uses
+the descriptor interface when streaming previews and downloads so file size
+does not determine its memory use.
+
 ## Merge Model
 
 An absent upper entry delegates to the lower directory. A present upper entry

@@ -48,6 +48,7 @@ export type HostActions = {
 
 export type GuestActions = {
   "guest_QueryInformation": { input: types.guest.QueryGuestInformationAction; output: types.guest.QueryGuestInformationOutput };
+  "files_ListRoots": { input: types.files.ListRootsAction; output: types.files.ListRootsOutput };
   "files_ReadDirectory": { input: types.files.ReadDirectoryAction; output: types.files.ReadDirectoryOutput };
   "changes_GetDivergentCommits": { input: types.changes.GetDivergentCommitsAction; output: types.changes.GetDivergentCommitsOutput };
   "changes_GetChangeSet": { input: types.changes.GetChangeSetAction; output: types.changes.GetChangeSetOutput };

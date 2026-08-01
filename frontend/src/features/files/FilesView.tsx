@@ -12,16 +12,23 @@ import {
 import { lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { guestApi } from "../../api/client.ts";
-import { workspaceFileUrl } from "../../api/files.ts";
+import {
+  fileRootKey,
+  fileRootPath,
+  podFilePath,
+  podFileUrl,
+  WORKSPACE_FILE_ROOT,
+} from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
 import { SegmentedControl } from "../../components/ui/SegmentedControl.tsx";
+import { SelectControl } from "../../components/ui/SelectControl.tsx";
 import {
   isMarkdownPath,
   MARKDOWN_REPRESENTATIONS,
   type MarkdownRepresentation,
-  WorkspaceFileViewer,
-} from "./WorkspaceFileViewer.tsx";
+  PodFileViewer,
+} from "./PodFileViewer.tsx";
 
 const MarkdownContent = lazy(() =>
   import("../chat/index.ts").then((module) => ({ default: module.MarkdownContent })),
@@ -40,11 +47,27 @@ export function FilesView({
   workspace: workspaces.WorkspaceName;
   pod: pods.Pod;
 }) {
+  const [roots, setRoots] = useState<readonly files.FileRoot[]>([WORKSPACE_FILE_ROOT]);
+  const [selectedRoot, setSelectedRoot] = useState<files.FileRoot>(WORKSPACE_FILE_ROOT);
+  const [rootsError, setRootsError] = useState<string>();
   const [directories, setDirectories] = useState<Record<string, DirectoryLoad>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set([""]));
   const [selectedPath, setSelectedPath] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
   const requests = useRef(new Map<string, AbortController>());
+  const selectedRootKey = fileRootKey(selectedRoot);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setRoots([WORKSPACE_FILE_ROOT]);
+    setSelectedRoot(WORKSPACE_FILE_ROOT);
+    setRootsError(undefined);
+    void guestApi(workspace).execute("files_ListRoots", { podId: pod.id }, controller.signal)
+      .then((output) => setRoots(output.roots), (cause) => {
+        if (!controller.signal.aborted) setRootsError(errorMessage(cause));
+      });
+    return () => controller.abort();
+  }, [pod.id, workspace]);
 
   const readDirectory = useCallback(async (path: string, force = false) => {
     if (!force && directories[path]?.entries) return;
@@ -58,6 +81,7 @@ export function FilesView({
     try {
       const output = await guestApi(workspace).execute("files_ReadDirectory", {
         podId: pod.id,
+        root: selectedRoot,
         path: path as files.FilePath,
       }, controller.signal);
       setDirectories((current) => ({
@@ -73,7 +97,7 @@ export function FilesView({
     } finally {
       if (requests.current.get(path) === controller) requests.current.delete(path);
     }
-  }, [directories, pod.id, workspace]);
+  }, [directories, pod.id, selectedRoot, workspace]);
 
   useEffect(() => {
     setDirectories({});
@@ -82,7 +106,7 @@ export function FilesView({
     setPreviewRevision(0);
     for (const request of requests.current.values()) request.abort();
     requests.current.clear();
-  }, [pod.id, workspace]);
+  }, [pod.id, selectedRootKey, workspace]);
 
   useEffect(() => {
     if (!directories[""]?.entries && !directories[""]?.loading) {
@@ -116,17 +140,37 @@ export function FilesView({
 
   return (
     <div className="grid h-full min-h-0 grid-cols-[minmax(14rem,22rem)_minmax(0,1fr)] overflow-hidden bg-canvas text-foreground">
-      <section className="flex min-h-0 flex-col border-r border-ui-border" aria-label="Workspace files">
+      <section className="flex min-h-0 flex-col border-r border-ui-border" aria-label="Pod files">
         <header className="flex items-center justify-between gap-3 border-b border-ui-border px-3 py-2.5">
-          <div className="min-w-0">
-            <h1 className="truncate text-xs font-semibold">/workspace</h1>
-            <p className="mt-0.5 truncate text-[10px] text-subtle">{pod.title}</p>
+          <div className="min-w-0 flex-1">
+            <h1 className="sr-only">Pod files</h1>
+            <SelectControl
+              className="w-full"
+              label="File root"
+              options={roots.map((root) => ({
+                label: fileRootPath(root),
+                value: fileRootKey(root),
+              }))}
+              value={selectedRootKey}
+              variant="sidebar"
+              onChange={(value) => {
+                const root = roots.find((candidate) => fileRootKey(candidate) === value);
+                if (root) setSelectedRoot(root);
+              }}
+            />
+            {rootsError ? (
+              <p className="mt-0.5 truncate text-[10px] text-red-300" role="alert">
+                {rootsError}
+              </p>
+            ) : (
+              <p className="mt-0.5 truncate text-[10px] text-subtle">{pod.title}</p>
+            )}
           </div>
-          <Button aria-label="Refresh workspace files" size="icon" onClick={refresh}>
+          <Button aria-label={`Refresh ${fileRootPath(selectedRoot)} files`} size="icon" onClick={refresh}>
             <RefreshCw aria-hidden="true" className="size-3.5" />
           </Button>
         </header>
-        <div className="min-h-0 flex-1 overflow-auto py-1" role="region" aria-label="Workspace file tree">
+        <div className="min-h-0 flex-1 overflow-auto py-1" role="region" aria-label={`${fileRootPath(selectedRoot)} file tree`}>
           <DirectoryChildren
             directory=""
             depth={0}
@@ -144,6 +188,7 @@ export function FilesView({
         <FilePreview
           workspace={workspace}
           podId={pod.id}
+          root={selectedRoot}
           path={selectedPath as files.FilePath}
           revision={previewRevision}
           size={selectedSize}
@@ -250,12 +295,14 @@ function DirectoryChildren({
 function FilePreview({
   workspace,
   podId,
+  root,
   path,
   revision,
   size,
 }: {
   workspace: workspaces.WorkspaceName;
   podId: pods.PodId;
+  root: files.FileRoot;
   path: files.FilePath;
   revision: number;
   size?: files.FileEntry["size"];
@@ -263,12 +310,13 @@ function FilePreview({
   const [markdownRepresentation, setMarkdownRepresentation] =
     useState<MarkdownRepresentation>("source");
   const markdown = isMarkdownPath(String(path));
+  const absolutePath = podFilePath(root, String(path));
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden" aria-label={`Preview ${path}`}>
+    <section className="flex min-h-0 flex-col overflow-hidden" aria-label={`Preview ${absolutePath}`}>
       <header className="flex items-center justify-between gap-3 border-b border-ui-border px-4 py-2.5">
         <div className="min-w-0">
-          <h2 className="truncate font-mono text-xs font-medium">{path}</h2>
+          <h2 className="truncate font-mono text-xs font-medium">{absolutePath}</h2>
           {size !== undefined ? (
             <p className="mt-0.5 text-[10px] text-subtle">{formatBytes(size)}</p>
           ) : null}
@@ -285,21 +333,22 @@ function FilePreview({
           <a
             className="inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ui-border/70 bg-surface px-2.5 text-xs font-medium text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
             download={fileName(String(path))}
-            href={workspaceFileUrl(workspace, podId, path, true)}
+            href={podFileUrl(workspace, podId, root, path, true)}
           >
             <Download aria-hidden="true" className="size-3.5" /> Download
           </a>
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-hidden">
-        <WorkspaceFileViewer
+        <PodFileViewer
           markdownRepresentation={markdownRepresentation}
           path={path}
           podId={podId}
-          renderMarkdown={(content, workspacePath) => (
-            <MarkdownContent content={content} workspacePath={workspacePath} />
+          renderMarkdown={(content, markdownRoot, markdownPath) => (
+            <MarkdownContent content={content} fileTarget={{ root: markdownRoot, path: markdownPath }} />
           )}
           revision={revision}
+          root={root}
           workspace={workspace}
         />
       </div>

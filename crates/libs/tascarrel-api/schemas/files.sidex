@@ -1,8 +1,9 @@
-//! Pod workspace file inspection API implemented by the workspace guest daemon.
+//! Pod file inspection API implemented by the workspace guest daemon.
 //!
-//! Paths are normalized UTF-8 paths relative to `/workspace`; the empty path identifies the
-//! workspace root. Directory reads are point-in-time traversals and are deliberately not cached.
-//! Symbolic links are returned as entries but are never followed while resolving a request.
+//! A file root identifies either `/workspace` or one configured host share exposed below `/mnt`.
+//! Paths are normalized UTF-8 paths relative to that root; the empty path identifies the root
+//! itself. Directory reads are point-in-time traversals and are deliberately not cached. Symbolic
+//! links are returned as entries but are never followed while resolving a request.
 //!
 //! File bodies are read through a guest data-plane request and are not embedded in Sidex
 //! control-plane messages.
@@ -11,11 +12,25 @@ import pods::PodId
 
 // RPC
 
-/// Reads the immediate children of one directory in a pod workspace.
-record ReadDirectoryAction {
-    /// Pod whose workspace is inspected.
+/// Lists the file roots available to one pod.
+record ListRootsAction {
+    /// Pod whose configured file roots are listed.
     pod_id: PodId,
-    /// Directory to read, using the empty path for the workspace root.
+}
+
+/// Configured file roots available to the pod.
+record ListRootsOutput {
+    /// Roots ordered with the workspace first and shares by name.
+    roots: [FileRoot],
+}
+
+/// Reads the immediate children of one directory below a pod file root.
+record ReadDirectoryAction {
+    /// Pod whose file root is inspected.
+    pod_id: PodId,
+    /// Logical root containing the directory, defaulting to the workspace when absent.
+    root?: FileRoot,
+    /// Directory to read, using the empty path for the selected root.
     path: FilePath,
 }
 
@@ -29,7 +44,23 @@ record ReadDirectoryOutput {
 
 // Domain Types
 
-/// Normalized UTF-8 path relative to a pod's `/workspace` directory.
+/// Logical root available in one pod.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+variant FileRoot {
+    /// The pod's persistent `/workspace` directory.
+    Workspace,
+    /// One configured host share exposed at `/mnt/<name>`.
+    Share: ShareFileRoot,
+}
+
+/// One configured host-share root.
+#[rust(derive(Eq, Hash, Ord, PartialOrd))]
+record ShareFileRoot {
+    /// Validated workspace-local share name.
+    name: string,
+}
+
+/// Normalized UTF-8 path relative to a pod file root.
 ///
 /// The empty path identifies the root. Paths are at most 4,096 encoded bytes. Absolute paths,
 /// empty components, trailing separators, and `.` or `..` components are invalid.

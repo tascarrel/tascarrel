@@ -9,7 +9,7 @@
     "generate:schema": "cd ../crates/libs/tascarrel-api && nix run 'github:silitics/sidex/53f5e11480ebf471ba37a97fa2a683be1e2bf235' -- generate ts ../../../frontend/src/api/generated",
     "generate:actions": "cd ../crates/libs/tascarrel-api && cargo run -q --example generate-ts-bindings > ../../../frontend/src/api/actions.ts",
     "dev": "vite --host 127.0.0.1",
-    "test": "node --experimental-strip-types --test src/features/workspaces/creation/model.test.ts src/features/chat/model/modelPreferences.test.ts src/features/chat/model/workspaceFileLinks.test.ts",
+    "test": "node --experimental-strip-types --test src/features/workspaces/creation/model.test.ts src/features/chat/model/modelPreferences.test.ts src/features/chat/model/podFileLinks.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1"
