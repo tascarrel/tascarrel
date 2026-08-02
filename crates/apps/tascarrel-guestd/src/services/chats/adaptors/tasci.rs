@@ -833,11 +833,11 @@ fn finish_compaction_item(
         let mut state = lock(state);
         (
             state.active_turn.as_ref().map(|turn| turn.id.clone()),
-            state.compaction_item.take(),
+            state
+                .compaction_item
+                .take()
+                .unwrap_or_else(ChatItemId::generate),
         )
-    };
-    let Some(item) = item else {
-        return;
     };
     let state = if error.is_some() {
         ChatItemState::Failed
@@ -1651,6 +1651,52 @@ mod tests {
         assert_eq!(transitions[8].2, transitions[9].2);
         assert_ne!(transitions[0].2, transitions[6].2);
         assert_ne!(transitions[2].2, transitions[8].2);
+    }
+
+    /// Verifies a compaction failure remains visible when preparation failed
+    /// before Tasci could emit a compaction-started event.
+    #[test]
+    fn compaction_failure_without_started_event_is_presented() {
+        let turn_id = ChatTurnId::generate();
+        let state = Arc::new(Mutex::new(TasciSessionState {
+            active_turn: Some(ActiveTasciTurn {
+                id: turn_id.clone(),
+                user_item_id: ChatItemId::generate(),
+                user_content: Some(ArcVec::new()),
+                changed_model: None,
+                presentation_started: true,
+            }),
+            reasoning_item: None,
+            assistant_item: None,
+            tool_items: HashMap::new(),
+            compaction_item: None,
+            turn_usage: ModelUsage::default(),
+            current_model: selection("local-model"),
+            stopped: false,
+        }));
+        let (events, mut receiver) = mpsc::unbounded_channel();
+
+        project_agent_event(
+            AgentEvent::ContextCompactionFailed {
+                reason: CompactionReason::Threshold,
+                message: "the current session has no context that can be compacted".to_owned(),
+            },
+            &state,
+            &events,
+        );
+
+        let event = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(event.turn_id.as_ref(), Some(&turn_id));
+        assert!(event.item_id.is_some());
+        assert!(matches!(
+            event.payload,
+            HarnessEventPayload::ItemCompleted {
+                kind: ChatItemKind::ContextCompaction,
+                state: ChatItemState::Failed,
+                ..
+            }
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     fn selection(model: &str) -> ChatModelSelection {
