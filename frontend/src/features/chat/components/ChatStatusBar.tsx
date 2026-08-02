@@ -146,7 +146,7 @@ function ChatMetrics({
       {usage ? (
         <>
           <span><span className="text-subtle">Tokens </span>{usage.total}</span>
-          <span><span className="text-subtle">Cost </span>{usage.cost ?? "Not priced"}</span>
+          <span><span className="text-subtle">Cost </span>{usage.cost ?? "N/A"}</span>
         </>
       ) : null}
       {lineChanges ? (
