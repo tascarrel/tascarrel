@@ -34,6 +34,7 @@ use tascarrel_api::types::chats::ChatAgentStatus;
 use tascarrel_api::types::chats::ChatBinding;
 use tascarrel_api::types::chats::ChatBindingError;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatContextUsage;
 use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatItem;
 use tascarrel_api::types::chats::ChatItemCompleted;
@@ -244,6 +245,7 @@ impl ChatState {
                 harness: request.harness,
                 purpose: request.purpose,
                 model: request.model,
+                context_usage: None,
                 cost_center_id: request.cost_center_id,
                 title: request.title.into(),
                 created_at: now,
@@ -598,7 +600,23 @@ fn reconcile_harness_event(
         HarnessEventPayload::ModelChanged { model } => {
             let mut summary = snapshot.summary.clone();
             summary.model = Some(model);
+            summary.context_usage = None;
             summary.updated_at = occurred_at;
+            return Ok(ReconciledEvent {
+                update: Some(summary_update(summary)),
+                resume_cursor: None,
+                touch_summary: false,
+                attention_required: false,
+            });
+        }
+        HarnessEventPayload::ContextUsageUpdated { usage } => {
+            let mut summary = snapshot.summary.clone();
+            summary.context_usage = usage.map(|usage| ChatContextUsage {
+                used_tokens: usage.used_tokens,
+                context_window_tokens: usage.context_window_tokens,
+                accuracy: usage.accuracy,
+                observed_at: occurred_at,
+            });
             return Ok(ReconciledEvent {
                 update: Some(summary_update(summary)),
                 resume_cursor: None,
@@ -1052,6 +1070,7 @@ mod tests {
     use tascarrel_api::ids::ChatTurnId;
     use tascarrel_api::types::chats::ChatBinding;
     use tascarrel_api::types::chats::ChatBindingStatus;
+    use tascarrel_api::types::chats::ChatContextUsageAccuracy;
     use tascarrel_api::types::chats::ChatHarnessKind;
     use tascarrel_api::types::chats::ChatPrompt;
     use tascarrel_api::types::chats::ChatQueuedPrompt;
@@ -1060,6 +1079,7 @@ mod tests {
 
     use super::ChatState;
     use crate::Database;
+    use crate::services::chats::harness::protocol::HarnessContextUsage;
     use crate::services::chats::harness::protocol::HarnessEvent;
     use crate::services::chats::harness::protocol::HarnessEventPayload;
     use crate::services::chats::harness::protocol::ProviderEventReferences;
@@ -1167,6 +1187,129 @@ mod tests {
                 .summary
                 .attention_required
         );
+    }
+
+    /// Confirms context usage replaces durable chat metadata without changing
+    /// the chat's activity timestamp and can later be invalidated.
+    #[tokio::test]
+    async fn context_usage_is_durable_and_replaceable() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = Database::open(temporary.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let state = ChatState::new(database.connection().clone()).await.unwrap();
+        let chat_id = state
+            .create_chat(CreateChatRequest {
+                title: "Context usage test".into(),
+                pod_id: PodId::generate(),
+                cost_center_id: None,
+                harness: ChatHarnessKind::Tasci,
+                model: None,
+                purpose: None,
+            })
+            .await
+            .unwrap()
+            .chat_id;
+        let binding_id = ChatBindingId::generate();
+        state
+            .set_binding(
+                chat_id.clone(),
+                Some(ChatBinding {
+                    binding_id: binding_id.clone(),
+                    status: ChatBindingStatus::Attached,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let updated_at = state
+            .chat(chat_id.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .updated_at;
+        ingest_context_usage(
+            &state,
+            &chat_id,
+            &binding_id,
+            Some(HarnessContextUsage {
+                used_tokens: 12_345,
+                context_window_tokens: Some(128_000),
+                accuracy: ChatContextUsageAccuracy::Estimated,
+            }),
+        )
+        .await;
+        let summary = state.chat(chat_id.clone()).await.unwrap().unwrap().summary;
+        assert_eq!(summary.updated_at, updated_at);
+        assert!(matches!(
+            summary.context_usage,
+            Some(usage)
+                if usage.used_tokens == 12_345
+                    && usage.context_window_tokens == Some(128_000)
+                    && usage.accuracy == ChatContextUsageAccuracy::Estimated
+        ));
+        drop(state);
+
+        let reopened = ChatState::new(database.connection().clone()).await.unwrap();
+        assert_eq!(
+            reopened
+                .chat(chat_id.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .context_usage
+                .unwrap()
+                .used_tokens,
+            12_345
+        );
+        let replacement_binding_id = ChatBindingId::generate();
+        reopened
+            .set_binding(
+                chat_id.clone(),
+                Some(ChatBinding {
+                    binding_id: replacement_binding_id.clone(),
+                    status: ChatBindingStatus::Attached,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        ingest_context_usage(&reopened, &chat_id, &replacement_binding_id, None).await;
+        assert!(
+            reopened
+                .chat(chat_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .context_usage
+                .is_none()
+        );
+    }
+
+    async fn ingest_context_usage(
+        state: &ChatState,
+        chat_id: &ChatId,
+        binding_id: &ChatBindingId,
+        usage: Option<HarnessContextUsage>,
+    ) {
+        state
+            .ingest_harness_event(IngestHarnessEventRequest {
+                chat_id: chat_id.clone(),
+                binding_id: binding_id.clone(),
+                event: HarnessEvent {
+                    occurred_at: Timestamp::now(),
+                    turn_id: None,
+                    item_id: None,
+                    request_id: None,
+                    provider_references: ProviderEventReferences::default(),
+                    payload: HarnessEventPayload::ContextUsageUpdated { usage },
+                },
+            })
+            .await
+            .unwrap();
     }
 
     async fn ingest_completed_turn(

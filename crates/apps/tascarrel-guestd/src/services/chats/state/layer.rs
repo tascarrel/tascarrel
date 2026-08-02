@@ -955,6 +955,7 @@ mod tests {
             attention_required: false,
             harness: ChatHarnessKind::Codex,
             model: None,
+            context_usage: None,
             cost_center_id: None,
             purpose: Some(ChatPurpose::Automation(AutomationChatPurpose {
                 execution_id: "automation_execution_test".into(),

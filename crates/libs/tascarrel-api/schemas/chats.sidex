@@ -564,6 +564,8 @@ record ChatSummary {
     purpose?: ChatPurpose,
     /// Latest effective model selection, or the harness default when unknown.
     model?: ChatModelSelection,
+    /// Latest observed model-context occupancy, or none when unavailable.
+    context_usage?: ChatContextUsage,
     /// Workspace-local cost center to which all usage from this chat is attributed.
     cost_center_id?: ChatCostCenterId,
     /// User-facing title.
@@ -572,6 +574,30 @@ record ChatSummary {
     created_at: Timestamp,
     /// Time of the most recent durable change.
     updated_at: Timestamp,
+}
+
+/// Latest absolute observation of the model context occupied by a chat.
+/// This is independent of cumulative turn usage. Clients replace older observations and must not
+/// add them together.
+record ChatContextUsage {
+    /// Tokens currently counted as occupied by the harness.
+    used_tokens: u64,
+    /// Effective model context-window capacity, when known.
+    context_window_tokens?: u64,
+    /// Whether the occupied-token count was reported or estimated.
+    accuracy: ChatContextUsageAccuracy,
+    /// Time at which Tascarrel observed this context usage.
+    observed_at: Timestamp,
+}
+
+/// Accuracy of a current-context observation.
+#[json(tagged = externally)]
+#[rust(derive(Copy))]
+variant ChatContextUsageAccuracy {
+    /// The harness or model provider reported the occupied-token count.
+    Reported,
+    /// Tascarrel estimated the occupied-token count from conversation content.
+    Estimated,
 }
 
 /// Product feature which owns a durable chat.
@@ -822,6 +848,8 @@ record ChatHarnessCapabilities {
     structured_user_input: bool,
     /// Whether the harness can compact the model context of an existing chat.
     compact_context: bool,
+    /// Whether the harness can expose current model-context occupancy.
+    context_usage: bool,
     /// How model changes are handled after a session has started.
     model_switching: ChatModelSwitching,
 }

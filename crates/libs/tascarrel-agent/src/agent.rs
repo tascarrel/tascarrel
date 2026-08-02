@@ -226,6 +226,7 @@ impl Agent {
                 &mut session,
                 ModelMessage::Assistant(response.message.clone()),
             )?;
+            self.record_context_usage(&session, &mut events, event_handler.as_ref())?;
 
             if response.message.tool_calls.is_empty() {
                 record_event(
@@ -261,11 +262,32 @@ impl Agent {
                 event_handler.as_ref(),
             )
             .await?;
+            self.record_context_usage(&session, &mut events, event_handler.as_ref())?;
         }
 
         Err(Report::new(AgentError::StepLimit {
             limit: self.config.max_steps,
         }))
+    }
+
+    /// Records the effective context after a session mutation.
+    fn record_context_usage(
+        &self,
+        session: &AgentSession,
+        events: &mut Vec<AgentEvent>,
+        event_handler: Option<&AgentEventHandler>,
+    ) -> AgentResult<()> {
+        let estimate = crate::compaction::estimate_context(session).map_err(session_error)?;
+        record_event(
+            events,
+            event_handler,
+            AgentEvent::ContextUsageUpdated {
+                used_tokens: estimate.tokens,
+                context_window: self.config.context_window,
+                is_estimated: estimate.is_estimated,
+            },
+        );
+        Ok(())
     }
 
     async fn request_with_overflow_recovery(
@@ -608,6 +630,15 @@ impl Agent {
                 usage: record.usage.clone(),
             },
         );
+        record_event(
+            events,
+            event_handler,
+            AgentEvent::ContextUsageUpdated {
+                used_tokens: record.estimated_tokens_after,
+                context_window: self.config.context_window,
+                is_estimated: true,
+            },
+        );
         Ok(record)
     }
 
@@ -757,6 +788,15 @@ pub enum AgentEvent {
     ModelUsage {
         /// Provider-neutral token counters.
         usage: ModelUsage,
+    },
+    /// The effective context size changed.
+    ContextUsageUpdated {
+        /// Tokens currently counted as occupied.
+        used_tokens: u64,
+        /// Effective model context-window capacity, when configured.
+        context_window: Option<u64>,
+        /// Whether any part of the occupied-token count was estimated.
+        is_estimated: bool,
     },
     /// Context compaction started.
     ContextCompactionStarted {
@@ -1221,6 +1261,14 @@ mod tests {
             event,
             AgentEvent::ContextCompactionCompleted {
                 reason: CompactionReason::Overflow,
+                ..
+            }
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextUsageUpdated {
+                context_window: Some(100),
+                is_estimated: true,
                 ..
             }
         )));

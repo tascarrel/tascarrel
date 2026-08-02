@@ -5,6 +5,7 @@ use reportify::Report;
 use reportify::ResultExt as _;
 use tascarrel_api::ids::ChatId;
 use tascarrel_api::types::chats::ChatAgentStatus;
+use tascarrel_api::types::chats::ChatContextUsage;
 use tascarrel_api::types::chats::ChatCostCenterId;
 use tascarrel_api::types::chats::ChatHarnessKind;
 use tascarrel_api::types::chats::ChatModelSelection;
@@ -50,6 +51,10 @@ impl Storage {
                     summary.model.as_ref(),
                     "unable to serialize initial chat model",
                 )?;
+                let context_usage = encode_optional_json(
+                    summary.context_usage.as_ref(),
+                    "unable to serialize initial chat context usage",
+                )?;
                 let purpose = encode_optional_json(
                     summary.purpose.as_ref(),
                     "unable to serialize chat purpose",
@@ -58,11 +63,11 @@ impl Storage {
                     .execute(
                         "INSERT INTO chats (
                              chat_id, pod_id, title, harness_jsonb, model_jsonb,
-                             resume_cursor_jsonb, archived, attention_required, cost_center_id,
-                             purpose_jsonb, created_at, updated_at
+                             context_usage_jsonb, resume_cursor_jsonb, archived,
+                             attention_required, cost_center_id, purpose_jsonb, created_at, updated_at
                          ) VALUES (
-                             ?1, ?2, ?3, jsonb(?4), jsonb(?5), NULL, 0, ?6, ?7,
-                             jsonb(?8), ?9, ?10
+                             ?1, ?2, ?3, jsonb(?4), jsonb(?5), jsonb(?6), NULL, 0, ?7, ?8,
+                             jsonb(?9), ?10, ?11
                          )",
                         (
                             summary.chat_id.0.as_ref(),
@@ -70,6 +75,7 @@ impl Storage {
                             summary.title.as_ref(),
                             harness,
                             model,
+                            context_usage,
                             summary.attention_required,
                             summary
                                 .cost_center_id
@@ -396,7 +402,8 @@ fn load_chat_summaries(
     let mut statement = database
         .prepare(
             "SELECT chat_id, pod_id, title, json(harness_jsonb), json(model_jsonb),
-                    attention_required, cost_center_id, json(purpose_jsonb), created_at, updated_at
+                    json(context_usage_jsonb), attention_required, cost_center_id,
+                    json(purpose_jsonb), created_at, updated_at
              FROM chats
              WHERE archived = 0
              ORDER BY updated_at DESC, chat_id",
@@ -412,17 +419,21 @@ fn load_chat_summaries(
                 .get::<_, Option<String>>(4)?
                 .map(|value| parse_json::<ChatModelSelection>(&value))
                 .transpose()?;
-            let attention_required = row.get(5)?;
+            let context_usage = row
+                .get::<_, Option<String>>(5)?
+                .map(|value| parse_json::<ChatContextUsage>(&value))
+                .transpose()?;
+            let attention_required = row.get(6)?;
             let cost_center_id = row
-                .get::<_, Option<String>>(6)?
+                .get::<_, Option<String>>(7)?
                 .map(|value| parse_id::<ChatCostCenterId>(&value))
                 .transpose()?;
             let purpose = row
-                .get::<_, Option<String>>(7)?
+                .get::<_, Option<String>>(8)?
                 .map(|value| parse_json::<ChatPurpose>(&value))
                 .transpose()?;
-            let created_at = parse_timestamp(row.get_ref(8)?.as_str()?)?;
-            let updated_at = parse_timestamp(row.get_ref(9)?.as_str()?)?;
+            let created_at = parse_timestamp(row.get_ref(9)?.as_str()?)?;
+            let updated_at = parse_timestamp(row.get_ref(10)?.as_str()?)?;
             Ok(ChatSummary {
                 chat_id,
                 pod_id,
@@ -433,6 +444,7 @@ fn load_chat_summaries(
                 harness,
                 purpose,
                 model,
+                context_usage,
                 cost_center_id,
                 title,
                 created_at,
@@ -580,6 +592,10 @@ fn store_summary(
         summary.model.as_ref(),
         "unable to serialize effective chat model",
     )?;
+    let context_usage = encode_optional_json(
+        summary.context_usage.as_ref(),
+        "unable to serialize chat context usage",
+    )?;
     transaction
         .execute(
             "UPDATE chats SET
@@ -587,9 +603,10 @@ fn store_summary(
                  title = ?3,
                  harness_jsonb = jsonb(?4),
                  model_jsonb = jsonb(?5),
-                 attention_required = ?6,
-                 cost_center_id = ?7,
-                 updated_at = ?8
+                 context_usage_jsonb = jsonb(?6),
+                 attention_required = ?7,
+                 cost_center_id = ?8,
+                 updated_at = ?9
              WHERE chat_id = ?1",
             (
                 summary.chat_id.0.as_ref(),
@@ -597,6 +614,7 @@ fn store_summary(
                 summary.title.as_ref(),
                 harness,
                 model,
+                context_usage,
                 summary.attention_required,
                 summary
                     .cost_center_id
@@ -810,6 +828,7 @@ mod tests {
                 attention_required: false,
                 harness: ChatHarnessKind::Codex,
                 model: None,
+                context_usage: None,
                 cost_center_id: None,
                 purpose: None,
                 title: "Opaque cursor".into(),
@@ -858,6 +877,7 @@ mod tests {
                 attention_required: false,
                 harness: ChatHarnessKind::Codex,
                 model: None,
+                context_usage: None,
                 cost_center_id: Some(ChatCostCenterId::new("client_alpha")),
                 purpose: None,
                 title: "Attributed usage".into(),

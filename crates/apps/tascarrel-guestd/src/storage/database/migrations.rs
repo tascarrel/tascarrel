@@ -31,6 +31,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "add_chat_purpose",
         sql: include_str!("migrations/0006_add_chat_purpose.sql"),
     },
+    Migration {
+        name: "add_chat_context_usage",
+        sql: include_str!("migrations/0007_add_chat_context_usage.sql"),
+    },
 ];
 
 /// One schema change applied in an immediate transaction.

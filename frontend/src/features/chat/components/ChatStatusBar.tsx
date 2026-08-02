@@ -10,6 +10,10 @@ import {
   presentChatLineChanges,
   type LineChangePresentation,
 } from "../model/fileChanges.ts";
+import {
+  presentContextUsage,
+  type ContextUsagePresentation,
+} from "../model/contextUsage.ts";
 import { presentChatUsage, type UsagePresentation } from "../model/usage.ts";
 
 export type ChatStatusVariant = "inline" | "dock" | "quiet";
@@ -39,6 +43,10 @@ export function ChatStatusBar({
     () => replica ? presentChatUsage(turns) : undefined,
     [replica !== undefined, turns],
   );
+  const contextUsage = useMemo(
+    () => presentContextUsage(summary.contextUsage),
+    [summary.contextUsage],
+  );
   const lineChanges = useMemo(
     () => replica ? presentChatLineChanges(timeline) : undefined,
     [replica !== undefined, timeline],
@@ -58,12 +66,14 @@ export function ChatStatusBar({
         role="status"
       >
         <StatusLabel status={status} />
-        {status.detail || totalUsage || lineChanges ? (
-          <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-right text-muted">
-            {status.detail ? <span>{status.detail}</span> : null}
-            <ChatMetrics usage={totalUsage} lineChanges={lineChanges} />
-          </span>
-        ) : null}
+        <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-right text-muted">
+          {status.detail ? <span>{status.detail}</span> : null}
+          <ChatMetrics
+            contextUsage={contextUsage}
+            usage={totalUsage}
+            lineChanges={lineChanges}
+          />
+        </span>
       </div>
     );
   }
@@ -81,7 +91,11 @@ export function ChatStatusBar({
           <span className="text-muted">{descriptiveDetail(status)}</span>
         ) : null}
       </span>
-      <ChatMetrics usage={totalUsage} lineChanges={lineChanges} />
+      <ChatMetrics
+        contextUsage={contextUsage}
+        usage={totalUsage}
+        lineChanges={lineChanges}
+      />
     </div>
   );
 }
@@ -112,14 +126,15 @@ function descriptiveDetail(status: Status): string | undefined {
 }
 
 function ChatMetrics({
+  contextUsage,
   usage,
   lineChanges,
 }: {
+  contextUsage: ContextUsagePresentation;
   usage?: UsagePresentation;
   lineChanges?: LineChangePresentation;
 }) {
-  if (!usage && !lineChanges) return null;
-  const description = [usage?.description, lineChanges?.description]
+  const description = [contextUsage.description, usage?.description, lineChanges?.description]
     .filter((part): part is string => part !== undefined)
     .join(" · ");
   return (
@@ -127,6 +142,7 @@ function ChatMetrics({
       className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 tabular-nums text-muted"
       title={description}
     >
+      <span><span className="text-subtle">Context </span>{contextUsage.value}</span>
       {usage ? (
         <>
           <span><span className="text-subtle">Tokens </span>{usage.total}</span>

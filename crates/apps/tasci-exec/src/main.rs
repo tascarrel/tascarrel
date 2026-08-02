@@ -791,6 +791,7 @@ impl EventPrinter {
             }
             AgentEvent::Completed { .. } => self.ensure_newline(),
             AgentEvent::ModelUsage { .. }
+            | AgentEvent::ContextUsageUpdated { .. }
             | AgentEvent::ReasoningDelta { .. }
             | AgentEvent::ToolCallStarted { .. }
             | AgentEvent::ToolCallCompleted { .. } => {}

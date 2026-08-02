@@ -32,6 +32,7 @@ use tascarrel_api::ids::ChatQuestionId;
 use tascarrel_api::ids::ChatRequestId;
 use tascarrel_api::ids::ChatTurnId;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatContextUsageAccuracy;
 use tascarrel_api::types::chats::ChatFailure;
 use tascarrel_api::types::chats::ChatItemContentAppended;
 use tascarrel_api::types::chats::ChatItemKind;
@@ -67,6 +68,7 @@ use crate::services::chats::harness::HarnessEventStream;
 use crate::services::chats::harness::HarnessSession;
 use crate::services::chats::harness::protocol::HarnessCommand;
 use crate::services::chats::harness::protocol::HarnessCommandResult;
+use crate::services::chats::harness::protocol::HarnessContextUsage;
 use crate::services::chats::harness::protocol::HarnessError;
 use crate::services::chats::harness::protocol::HarnessErrorKind;
 use crate::services::chats::harness::protocol::HarnessEvent;
@@ -538,6 +540,15 @@ impl HarnessEventStream for CodexEvents {
                 };
                 match message {
                     CodexMessage::Notification { method, params } => {
+                        if method == "thread/tokenUsage/updated"
+                            && belongs_to_session(&self.state, &params)?
+                        {
+                            self.pending.extend(token_usage_updated(
+                                &self.state,
+                                decode(&params, &method)?,
+                            ));
+                            continue;
+                        }
                         if let Some(event) = normalize_notification(&self.state, &method, &params)?
                         {
                             return Ok(Some(event));
@@ -763,7 +774,6 @@ fn normalize_notification(
         }
         "turn/started" => Ok(Some(turn_started(state, decode(params, method)?))),
         "turn/completed" => Ok(Some(turn_completed(state, decode(params, method)?))),
-        "thread/tokenUsage/updated" => Ok(token_usage_updated(state, decode(params, method)?)),
         "item/started" => item_started(state, decode(params, method)?).map(Some),
         "item/completed" => item_completed(state, decode(params, method)?).map(Some),
         "item/agentMessage/delta"
@@ -991,11 +1001,14 @@ fn turn_completed(
     )
 }
 
+/// Projects one native usage notification into independent turn and context
+/// observations.
 fn token_usage_updated(
     state: &Arc<Mutex<CodexSessionState>>,
     params: TokenUsageParams,
-) -> Option<HarnessEvent> {
+) -> Vec<HarnessEvent> {
     let latest = params.token_usage.last;
+    let current_context_tokens = latest.total_tokens;
     let latest = ChatTokenUsage {
         input_tokens: latest.input_tokens,
         output_tokens: latest.output_tokens,
@@ -1005,52 +1018,72 @@ fn token_usage_updated(
         reasoning_output_tokens: Some(latest.reasoning_output_tokens),
     };
     let mut session = lock(state);
-    if session
+    let active_turn = session
         .provider_active_turn_id
         .as_ref()
-        .is_none_or(|active| active.0 != params.turn_id)
-    {
-        return None;
-    }
-    let turn_id = tascarrel_turn_id(&mut session, &params.turn_id);
-    let tokens = session.active_turn_usage.get_or_insert_with(empty_usage);
-    accumulate_token_usage(tokens, &latest);
-    let tokens = tokens.clone();
-    let models = session
-        .info
-        .model
-        .clone()
-        .map(|model| ChatModelUsage {
-            model,
-            tokens: tokens.clone(),
-            pricing: None,
-            provider_estimated_cost: None,
-        })
-        .into_iter()
-        .collect::<Vec<_>>()
-        .into();
+        .is_some_and(|active| active.0 == params.turn_id);
+    let turn_usage = active_turn.then(|| {
+        let turn_id = tascarrel_turn_id(&mut session, &params.turn_id);
+        let tokens = session.active_turn_usage.get_or_insert_with(empty_usage);
+        accumulate_token_usage(tokens, &latest);
+        let tokens = tokens.clone();
+        let models = session
+            .info
+            .model
+            .clone()
+            .map(|model| ChatModelUsage {
+                model,
+                tokens: tokens.clone(),
+                pricing: None,
+                provider_estimated_cost: None,
+            })
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+        (turn_id, tokens, models)
+    });
     let provider_session_id = session.provider_session_id.clone();
     drop(session);
-    Some(event(
+    let event_references = || {
         references(
-            Some(provider_session_id),
-            Some(ProviderTurnId(params.turn_id)),
+            Some(provider_session_id.clone()),
+            Some(ProviderTurnId(params.turn_id.clone())),
             None,
             None,
-        ),
-        Some(turn_id),
-        None,
-        None,
-        HarnessEventPayload::TurnUsageUpdated {
-            usage: ChatUsageSnapshot {
-                coverage: ChatUsageCoverage::ExecutionTree,
-                tokens,
-                models,
-                provider_estimated_cost: None,
+        )
+    };
+    let mut events = Vec::with_capacity(2);
+    if let Some((turn_id, tokens, models)) = turn_usage {
+        events.push(event(
+            event_references(),
+            Some(turn_id),
+            None,
+            None,
+            HarnessEventPayload::TurnUsageUpdated {
+                usage: ChatUsageSnapshot {
+                    coverage: ChatUsageCoverage::ExecutionTree,
+                    tokens,
+                    models,
+                    provider_estimated_cost: None,
+                },
+                state: ChatUsageState::Provisional,
             },
-            state: ChatUsageState::Provisional,
+        ));
+    }
+    events.push(event(
+        event_references(),
+        None,
+        None,
+        None,
+        HarnessEventPayload::ContextUsageUpdated {
+            usage: Some(HarnessContextUsage {
+                used_tokens: current_context_tokens,
+                context_window_tokens: params.token_usage.model_context_window,
+                accuracy: ChatContextUsageAccuracy::Reported,
+            }),
         },
-    ))
+    ));
+    events
 }
 
 fn item_started(
@@ -2210,6 +2243,8 @@ struct TokenUsageParams {
 #[derive(Deserialize)]
 struct NativeTokenUsage {
     last: NativeTokenCounts,
+    #[serde(default, rename = "modelContextWindow")]
+    model_context_window: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2224,6 +2259,8 @@ struct NativeTokenCounts {
     cached_input_tokens: u64,
     #[serde(default)]
     reasoning_output_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -2409,5 +2446,73 @@ mod tests {
             params.turn.error.map(|error| error.message),
             Some("authentication required".to_owned())
         );
+    }
+
+    /// Confirms Codex's latest request counters drive both turn usage and the
+    /// independent current-context observation.
+    #[test]
+    fn token_usage_notification_preserves_context_usage() {
+        let turn_id = ChatTurnId::generate();
+        let state = Arc::new(Mutex::new(CodexSessionState {
+            info: HarnessSessionInfo {
+                state: SessionState::Running,
+                model: Some(ChatModelSelection {
+                    model: "gpt-5.4".into(),
+                    options: ArcVec::new(),
+                }),
+                active_turn_id: Some(turn_id.clone()),
+                resume_cursor: None,
+            },
+            provider_session_id: ProviderSessionId("thread-1".to_owned()),
+            provider_active_turn_id: Some(ProviderTurnId("turn-1".to_owned())),
+            active_turn_usage: None,
+            turns: HashMap::from([("turn-1".to_owned(), turn_id)]),
+            items: HashMap::new(),
+            pending_requests: HashMap::new(),
+            provider_requests: HashMap::new(),
+            pending_prompts: HashMap::new(),
+            stopped: false,
+        }));
+        let params = serde_json::from_str(
+            r#"{
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 300,
+                        "outputTokens": 20,
+                        "cachedInputTokens": 100,
+                        "reasoningOutputTokens": 10,
+                        "totalTokens": 320
+                    },
+                    "total": {
+                        "inputTokens": 900,
+                        "outputTokens": 100,
+                        "cachedInputTokens": 200,
+                        "reasoningOutputTokens": 40,
+                        "totalTokens": 1000
+                    },
+                    "modelContextWindow": 258400
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let events = token_usage_updated(&state, params);
+
+        assert!(matches!(
+            &events[0].payload,
+            HarnessEventPayload::TurnUsageUpdated { usage, .. }
+                if usage.tokens.input_tokens == 300 && usage.tokens.output_tokens == 20
+        ));
+        assert!(matches!(
+            &events[1].payload,
+            HarnessEventPayload::ContextUsageUpdated {
+                usage: Some(HarnessContextUsage {
+                    used_tokens: 320,
+                    context_window_tokens: Some(258_400),
+                    accuracy: ChatContextUsageAccuracy::Reported,
+                })
+            }
+        ));
     }
 }

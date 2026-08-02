@@ -349,7 +349,7 @@ pub(crate) fn estimate_messages(messages: &[ModelMessage]) -> u64 {
     messages.iter().map(estimate_message).sum()
 }
 
-fn estimate_context(session: &AgentSession) -> crate::SessionResult<ContextEstimate> {
+pub(crate) fn estimate_context(session: &AgentSession) -> crate::SessionResult<ContextEstimate> {
     let effective = session.effective_messages()?;
     let search_start = session
         .latest_compaction()
@@ -369,6 +369,7 @@ fn estimate_context(session: &AgentSession) -> crate::SessionResult<ContextEstim
         return Ok(ContextEstimate {
             tokens: estimate_messages(&effective),
             has_provider_usage: false,
+            is_estimated: true,
         });
     };
     let trailing = session.entries()[usage_index.saturating_add(1)..]
@@ -379,6 +380,7 @@ fn estimate_context(session: &AgentSession) -> crate::SessionResult<ContextEstim
     Ok(ContextEstimate {
         tokens: usage.total_tokens().saturating_add(trailing),
         has_provider_usage: true,
+        is_estimated: trailing > 0,
     })
 }
 
@@ -611,9 +613,15 @@ struct PathToolArguments {
     path: Option<String>,
 }
 
-struct ContextEstimate {
-    tokens: u64,
-    has_provider_usage: bool,
+/// Effective model context derived from provider usage and local message
+/// estimates.
+pub(crate) struct ContextEstimate {
+    /// Tokens currently projected into the model context.
+    pub(crate) tokens: u64,
+    /// Whether the estimate starts from a provider usage observation.
+    pub(crate) has_provider_usage: bool,
+    /// Whether local token estimation contributes to the total.
+    pub(crate) is_estimated: bool,
 }
 
 struct CutPoint {

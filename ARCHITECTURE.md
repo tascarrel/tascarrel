@@ -352,7 +352,9 @@ other pods.
 
 Pod, image, and chat records live in a SQLite database in the guest. Chat
 records include their current workspace-local cost-center assignment and the
-latest absolute token-usage and calculated-cost snapshot for each turn.
+latest absolute token-usage and calculated-cost snapshot for each turn. They
+also retain the latest current-context observation independently of turn usage;
+that observation may be unavailable or estimated and does not affect billing.
 `guestd` computes interval usage reports from those durable records, including
 archived chats; changing a chat assignment therefore reattributes its whole
 recorded history. Cost-center declarations and display names remain portable

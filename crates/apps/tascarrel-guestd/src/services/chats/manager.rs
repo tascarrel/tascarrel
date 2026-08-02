@@ -1495,6 +1495,7 @@ fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
             steer_turn: false,
             structured_user_input: false,
             compact_context: true,
+            context_usage: true,
             model_switching: api::ChatModelSwitching::InSession,
         },
         api::ChatHarnessKind::Codex => api::ChatHarnessCapabilities {
@@ -1503,6 +1504,7 @@ fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
             steer_turn: true,
             structured_user_input: true,
             compact_context: true,
+            context_usage: true,
             model_switching: api::ChatModelSwitching::InSession,
         },
         api::ChatHarnessKind::ClaudeCode => api::ChatHarnessCapabilities {
@@ -1511,6 +1513,7 @@ fn capabilities(kind: &api::ChatHarnessKind) -> api::ChatHarnessCapabilities {
             steer_turn: true,
             structured_user_input: true,
             compact_context: false,
+            context_usage: true,
             model_switching: api::ChatModelSwitching::InSession,
         },
     }

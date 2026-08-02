@@ -620,6 +620,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Latest effective model selection, or the harness default when unknown.
                                             */
                                                         "model"?: ChatModelSelection, /**
+                                            * Latest observed model-context occupancy, or none when unavailable.
+                                            */
+                                                        "contextUsage"?: ChatContextUsage, /**
                                             * Workspace-local cost center to which all usage from this chat is attributed.
                                             */
                                                         "costCenterId"?: ChatCostCenterId, /**
@@ -632,6 +635,28 @@ import * as __schema_workspaces from "./workspaces";
                                             * Time of the most recent durable change.
                                             */
                                                         "updatedAt": __schema_common.Timestamp };
+/**
+ * Latest absolute observation of the model context occupied by a chat.
+ * This is independent of cumulative turn usage. Clients replace older observations and must not
+ * add them together.
+ */
+ export type ChatContextUsage = { /**
+                                            * Tokens currently counted as occupied by the harness.
+                                            */
+                                                        "usedTokens": __sidex_types.builtins.U64, /**
+                                            * Effective model context-window capacity, when known.
+                                            */
+                                                        "contextWindowTokens"?: __sidex_types.builtins.U64, /**
+                                            * Whether the occupied-token count was reported or estimated.
+                                            */
+                                                        "accuracy": ChatContextUsageAccuracy, /**
+                                            * Time at which Tascarrel observed this context usage.
+                                            */
+                                                        "observedAt": __schema_common.Timestamp };
+/**
+ * Accuracy of a current-context observation.
+ */
+ export type ChatContextUsageAccuracy = ("Reported" | "Estimated");
 /**
  * Product feature which owns a durable chat.
  */
@@ -862,6 +887,9 @@ import * as __schema_workspaces from "./workspaces";
                                             * Whether the harness can compact the model context of an existing chat.
                                             */
                                                         "compactContext": __sidex_types.builtins.Bool, /**
+                                            * Whether the harness can expose current model-context occupancy.
+                                            */
+                                                        "contextUsage": __sidex_types.builtins.Bool, /**
                                             * How model changes are handled after a session has started.
                                             */
                                                         "modelSwitching": ChatModelSwitching };

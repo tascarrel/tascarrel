@@ -255,7 +255,19 @@ impl ScenarioEngine {
             }
         }
 
-        let actual_event_kinds = events.iter().map(event_kind).collect::<Vec<_>>();
+        let expects_context_usage = self
+            .scenario
+            .expected
+            .event_kinds
+            .iter()
+            .any(|kind| kind == "context_usage_updated");
+        let actual_event_kinds = events
+            .iter()
+            .filter(|event| {
+                expects_context_usage || !matches!(event, AgentEvent::ContextUsageUpdated { .. })
+            })
+            .map(event_kind)
+            .collect::<Vec<_>>();
         if actual_event_kinds != self.scenario.expected.event_kinds {
             return Err(format!(
                 "{}: event kinds differ\nexpected: {:?}\nactual:   {:?}",
@@ -683,6 +695,7 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::ModelRequestStarted { .. } => "model_request_started",
         AgentEvent::ModelRequestRetrying { .. } => "model_request_retrying",
         AgentEvent::ModelUsage { .. } => "model_usage",
+        AgentEvent::ContextUsageUpdated { .. } => "context_usage_updated",
         AgentEvent::ContextCompactionStarted { .. } => "context_compaction_started",
         AgentEvent::ContextCompactionCompleted { .. } => "context_compaction_completed",
         AgentEvent::ContextCompactionFailed { .. } => "context_compaction_failed",

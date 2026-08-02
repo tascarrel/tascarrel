@@ -36,6 +36,7 @@ use tascarrel_api::ids::ChatQuestionId;
 use tascarrel_api::ids::ChatRequestId;
 use tascarrel_api::ids::ChatTurnId;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatContextUsageAccuracy;
 use tascarrel_api::types::chats::ChatFailure;
 use tascarrel_api::types::chats::ChatItemContentAppended;
 use tascarrel_api::types::chats::ChatItemKind;
@@ -72,6 +73,7 @@ use crate::services::chats::harness::HarnessEventStream;
 use crate::services::chats::harness::HarnessSession;
 use crate::services::chats::harness::protocol::HarnessCommand;
 use crate::services::chats::harness::protocol::HarnessCommandResult;
+use crate::services::chats::harness::protocol::HarnessContextUsage;
 use crate::services::chats::harness::protocol::HarnessError;
 use crate::services::chats::harness::protocol::HarnessErrorKind;
 use crate::services::chats::harness::protocol::HarnessEvent;
@@ -93,6 +95,8 @@ use crate::services::chats::process::ProcessEnvironment;
 
 const REQUEST_ID_PREFIX: &str = "tascarrel-claude-";
 const SETTING_SOURCES: &str = "user,project,local";
+const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+const EXTENDED_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 
 struct CuratedClaudeModel {
     id: &'static str,
@@ -1142,6 +1146,9 @@ fn normalize_assistant(
         return Ok(events);
     };
     let turn_completed = native_turn_is_completed(state, &turn_id);
+    if let Some(event) = assistant_context_usage_event(state, &turn_id, turn_completed, &message) {
+        events.push(event);
+    }
     let message_id = message
         .message
         .id
@@ -1229,6 +1236,35 @@ fn normalize_assistant(
         ));
     }
     Ok(events)
+}
+
+/// Projects primary-agent usage without counting delegated Claude Code
+/// sessions.
+fn assistant_context_usage_event(
+    state: &Arc<Mutex<ClaudeSessionState>>,
+    turn_id: &ChatTurnId,
+    turn_completed: bool,
+    message: &AssistantMessage,
+) -> Option<HarnessEvent> {
+    if turn_completed || message.parent_tool_use_id.is_some() {
+        return None;
+    }
+    let usage = message.message.usage.as_ref()?;
+    Some(event(
+        session_references(state, None, None),
+        Some(turn_id.clone()),
+        None,
+        None,
+        HarnessEventPayload::ContextUsageUpdated {
+            usage: Some(HarnessContextUsage {
+                used_tokens: token_usage(usage).input_tokens,
+                context_window_tokens: selected_context_window_tokens(
+                    lock(state).info.model.as_ref(),
+                ),
+                accuracy: ChatContextUsageAccuracy::Reported,
+            }),
+        },
+    ))
 }
 
 fn normalize_user_message(
@@ -1393,11 +1429,20 @@ fn normalize_system(
             }
             Ok(events)
         }
-        "compact_boundary" => Ok(vec![base_warning(
-            state,
-            "context_compacted",
-            "Claude Code compacted the session context".to_owned(),
-        )]),
+        "compact_boundary" => Ok(vec![
+            event(
+                session_references(state, None, None),
+                current_turn(state),
+                None,
+                None,
+                HarnessEventPayload::ContextUsageUpdated { usage: None },
+            ),
+            base_warning(
+                state,
+                "context_compacted",
+                "Claude Code compacted the session context".to_owned(),
+            ),
+        ]),
         "api_retry" => Ok(vec![base_warning(
             state,
             "api_retry",
@@ -2183,6 +2228,21 @@ fn selected_string_option<'a>(selection: &'a ChatModelSelection, id: &str) -> Op
     })
 }
 
+/// Resolves a context capacity only when Tascarrel knows the selected model's
+/// limit.
+fn selected_context_window_tokens(selection: Option<&ChatModelSelection>) -> Option<u64> {
+    let selection = selection?;
+    match selected_string_option(selection, "contextWindow") {
+        Some("1m") => Some(EXTENDED_CONTEXT_WINDOW_TOKENS),
+        Some("200k") => Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
+        Some(_) => None,
+        None => CURATED_MODELS
+            .iter()
+            .any(|model| model_matches(selection.model.as_ref(), model.id))
+            .then_some(DEFAULT_CONTEXT_WINDOW_TOKENS),
+    }
+}
+
 fn native_model_id(selection: &ChatModelSelection) -> String {
     let model = selection.model.as_ref();
     if selected_string_option(selection, "contextWindow") == Some("1m") && !model.ends_with("[1m]")
@@ -2897,6 +2957,8 @@ enum ClaudeDelta {
 struct AssistantMessage {
     message: AssistantMessageBody,
     uuid: Option<String>,
+    #[serde(default)]
+    parent_tool_use_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2904,6 +2966,7 @@ struct AssistantMessageBody {
     id: Option<String>,
     #[serde(default)]
     content: Vec<RawJson>,
+    usage: Option<NativeUsage>,
 }
 
 #[derive(Deserialize)]
@@ -3080,6 +3143,93 @@ mod tests {
             server.headers.get("Authorization").map(String::as_str),
             Some("Bearer tascarrel-secret:mcp-token"),
         );
+    }
+
+    /// Confirms primary assistant usage becomes current-context usage while
+    /// subagent usage is ignored and compaction invalidates the observation.
+    #[test]
+    fn normalizes_primary_context_usage_and_compaction() {
+        let turn_id = ChatTurnId::generate();
+        let state = Arc::new(Mutex::new(ClaudeSessionState {
+            info: HarnessSessionInfo {
+                state: SessionState::Running,
+                model: Some(ChatModelSelection {
+                    model: "claude-opus-5".into(),
+                    options: vec![ChatModelOptionSelection {
+                        id: "contextWindow".into(),
+                        value: ChatModelOptionValue::String("1m".into()),
+                    }]
+                    .into(),
+                }),
+                active_turn_id: Some(turn_id.clone()),
+                resume_cursor: None,
+            },
+            provider_session_id: ProviderSessionId("session-1".to_owned()),
+            active_turn: Some(turn_id.clone()),
+            turn_queue: VecDeque::from([turn_id]),
+            completed_turns: HashSet::new(),
+            current_message_id: None,
+            blocks: HashMap::new(),
+            tools: HashMap::new(),
+            tool_indices: HashMap::new(),
+            completed_provider_items: HashSet::new(),
+            pending_requests: HashMap::new(),
+            provider_requests: HashMap::new(),
+            last_assistant_uuid: None,
+            stopped: false,
+        }));
+        let primary = serde_json::from_str::<RawJson>(
+            r#"{
+                "type": "assistant",
+                "parent_tool_use_id": null,
+                "message": {
+                    "id": "message-1",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "cache_read_input_tokens": 300,
+                        "cache_creation_input_tokens": 50
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let events = normalize_assistant(&state, &primary).unwrap();
+        assert!(matches!(
+            &events[0].payload,
+            HarnessEventPayload::ContextUsageUpdated {
+                usage: Some(HarnessContextUsage {
+                    used_tokens: 450,
+                    context_window_tokens: Some(1_000_000),
+                    accuracy: ChatContextUsageAccuracy::Reported,
+                })
+            }
+        ));
+
+        let subagent = serde_json::from_str::<RawJson>(
+            r#"{
+                "type": "assistant",
+                "parent_tool_use_id": "tool-1",
+                "message": {
+                    "id": "message-2",
+                    "content": [],
+                    "usage": {"input_tokens": 999}
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(normalize_assistant(&state, &subagent).unwrap().is_empty());
+
+        let compact =
+            serde_json::from_str::<RawJson>(r#"{"type":"system","subtype":"compact_boundary"}"#)
+                .unwrap();
+        let events = normalize_system(&state, &compact).unwrap();
+        assert!(matches!(
+            events[0].payload,
+            HarnessEventPayload::ContextUsageUpdated { usage: None }
+        ));
     }
 
     fn model(id: &str) -> ChatModel {

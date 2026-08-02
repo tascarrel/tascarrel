@@ -21,6 +21,7 @@ use tascarrel_api::ArcVec;
 use tascarrel_api::ids::ChatItemId;
 use tascarrel_api::ids::ChatTurnId;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatContextUsageAccuracy;
 use tascarrel_api::types::chats::ChatFailure;
 use tascarrel_api::types::chats::ChatItemContentAppended;
 use tascarrel_api::types::chats::ChatItemKind;
@@ -48,6 +49,7 @@ use crate::services::chats::harness::HarnessEventStream;
 use crate::services::chats::harness::HarnessSession;
 use crate::services::chats::harness::protocol::HarnessCommand;
 use crate::services::chats::harness::protocol::HarnessCommandResult;
+use crate::services::chats::harness::protocol::HarnessContextUsage;
 use crate::services::chats::harness::protocol::HarnessError;
 use crate::services::chats::harness::protocol::HarnessErrorKind;
 use crate::services::chats::harness::protocol::HarnessEvent;
@@ -595,6 +597,11 @@ fn project_agent_event(
             start_turn_presentation(state, output);
         }
         AgentEvent::ModelUsage { usage } => project_usage(state, output, &usage),
+        AgentEvent::ContextUsageUpdated {
+            used_tokens,
+            context_window,
+            is_estimated,
+        } => project_context_usage(state, output, used_tokens, context_window, is_estimated),
         AgentEvent::ContextCompactionStarted { reason } => {
             start_turn_presentation(state, output);
             complete_streaming_text(state, output, StreamingTextKind::Reasoning);
@@ -790,6 +797,35 @@ fn project_usage(
                     provider_estimated_cost: None,
                 },
                 state: ChatUsageState::Provisional,
+            },
+        ),
+    );
+}
+
+/// Projects Tasci's effective-context observation without changing turn usage.
+fn project_context_usage(
+    state: &Arc<Mutex<TasciSessionState>>,
+    output: &mpsc::UnboundedSender<Result<HarnessEvent, HarnessError>>,
+    used_tokens: u64,
+    context_window_tokens: Option<u64>,
+    is_estimated: bool,
+) {
+    let turn = lock(state).active_turn.as_ref().map(|turn| turn.id.clone());
+    emit_event(
+        output,
+        base_event(
+            turn,
+            None,
+            HarnessEventPayload::ContextUsageUpdated {
+                usage: Some(HarnessContextUsage {
+                    used_tokens,
+                    context_window_tokens,
+                    accuracy: if is_estimated {
+                        ChatContextUsageAccuracy::Estimated
+                    } else {
+                        ChatContextUsageAccuracy::Reported
+                    },
+                }),
             },
         ),
     );
@@ -1482,6 +1518,53 @@ mod tests {
         let cursor = resume_cursor(&provider_session_id).unwrap();
 
         assert_eq!(parse_resume_cursor(&cursor).unwrap(), provider_session_id.0);
+    }
+
+    /// Verifies Tasci preserves estimated context usage independently of
+    /// cumulative turn usage.
+    #[test]
+    fn projects_estimated_context_usage() {
+        let turn_id = ChatTurnId::generate();
+        let state = Arc::new(Mutex::new(TasciSessionState {
+            active_turn: Some(ActiveTasciTurn {
+                id: turn_id.clone(),
+                user_item_id: ChatItemId::generate(),
+                user_content: None,
+                changed_model: None,
+                presentation_started: true,
+            }),
+            reasoning_item: None,
+            assistant_item: None,
+            tool_items: HashMap::new(),
+            compaction_item: None,
+            turn_usage: ModelUsage::default(),
+            current_model: selection("local-model"),
+            stopped: false,
+        }));
+        let (events, mut receiver) = mpsc::unbounded_channel();
+
+        project_agent_event(
+            AgentEvent::ContextUsageUpdated {
+                used_tokens: 12_345,
+                context_window: Some(128_000),
+                is_estimated: true,
+            },
+            &state,
+            &events,
+        );
+
+        let event = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(event.turn_id, Some(turn_id));
+        assert!(matches!(
+            event.payload,
+            HarnessEventPayload::ContextUsageUpdated {
+                usage: Some(HarnessContextUsage {
+                    used_tokens: 12_345,
+                    context_window_tokens: Some(128_000),
+                    accuracy: ChatContextUsageAccuracy::Estimated,
+                })
+            }
+        ));
     }
 
     /// Verifies one turn presents its user message and model change exactly

@@ -12,6 +12,7 @@ use tascarrel_api::ids::ChatItemId;
 use tascarrel_api::ids::ChatRequestId;
 use tascarrel_api::ids::ChatTurnId;
 use tascarrel_api::types::chats::ChatContent;
+use tascarrel_api::types::chats::ChatContextUsageAccuracy;
 use tascarrel_api::types::chats::ChatFailure;
 use tascarrel_api::types::chats::ChatItemContentAppended;
 use tascarrel_api::types::chats::ChatItemKind;
@@ -160,6 +161,17 @@ pub struct HarnessEvent {
     pub payload: HarnessEventPayload,
 }
 
+/// Provider-neutral current-context counters reported by a harness.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct HarnessContextUsage {
+    /// Tokens currently counted as occupied by the harness.
+    pub used_tokens: u64,
+    /// Effective model context-window capacity, when known.
+    pub context_window_tokens: Option<u64>,
+    /// Whether the occupied-token count was reported or estimated.
+    pub accuracy: ChatContextUsageAccuracy,
+}
+
 /// Payload of a normalized event produced by a running harness session.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum HarnessEventPayload {
@@ -194,6 +206,12 @@ pub enum HarnessEventPayload {
     ModelChanged {
         /// New effective model selection.
         model: ChatModelSelection,
+    },
+    /// The harness supplied or invalidated its current-context observation.
+    ContextUsageUpdated {
+        /// Complete replacement observation, or none when no observation is
+        /// currently available.
+        usage: Option<HarnessContextUsage>,
     },
     /// The harness began processing a submitted turn.
     TurnStarted,
