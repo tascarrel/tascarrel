@@ -10,6 +10,13 @@ import { TextInput } from "../../components/ui/TextInput.tsx";
 import { useWorkspaceConfig } from "../workspaces/runtimeState.ts";
 import { sameWorkspaceSettings } from "./settingsComparison.ts";
 import { SettingsField } from "./SettingsField.tsx";
+import { TasciPricingEditor } from "./TasciPricingEditor.tsx";
+import {
+  tasciPricing,
+  tasciPricingDraft,
+  type TasciPricingDraft,
+  validateTasciPricingDraft,
+} from "./tasciPricing.ts";
 
 const NO_DEFAULT_MODEL = "__tasci_no_default_model__";
 
@@ -43,7 +50,7 @@ type ModelDraft = {
   maxOutputTokens: string;
   toolCalls: boolean;
   parallelToolCalls: boolean;
-  pricing?: config.WorkspaceTasciModel["pricing"];
+  pricing: TasciPricingDraft;
 };
 
 type DeleteTarget =
@@ -182,7 +189,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
       maxOutputTokens: positiveInteger(modelDraft.maxOutputTokens) as config.WorkspaceTasciModel["maxOutputTokens"],
       toolCalls: modelDraft.toolCalls,
       parallelToolCalls: modelDraft.parallelToolCalls,
-      pricing: modelDraft.pricing,
+      pricing: tasciPricing(modelDraft.pricing),
     };
     const defaultModel = tasci.defaultModel === modelDraft.originalAlias
       ? alias
@@ -314,7 +321,7 @@ export function TasciSettings({ workspace }: { workspace: workspaces.WorkspaceNa
         <section aria-labelledby="tasci-models-title">
           <SectionHeader
             title="Models"
-            description="Model aliases bind provider-native identifiers and capabilities to an endpoint. Pricing, when present in settings.json, is preserved by this editor."
+            description="Model aliases bind provider-native identifiers, capabilities, and optional token prices to an endpoint."
             action={(
               <Button
                 size="small"
@@ -617,11 +624,26 @@ function ModelEditor({
           Parallel tool calls
         </label>
       </div>
-      {draft.pricing ? (
-        <p className="mt-3 text-[10px] text-subtle">
-          Pricing catalog <code>{draft.pricing.catalogVersion}</code> is preserved. Edit detailed rates directly in <code>settings.json</code> until pricing discovery is available.
-        </p>
-      ) : null}
+      <div className="mt-4 border-t border-ui-border/70 pt-4">
+        <label className="flex items-center gap-2 text-xs text-muted">
+          <input
+            checked={draft.pricing.enabled}
+            className="size-3.5 accent-accent"
+            type="checkbox"
+            onChange={(event) => onChange({
+              ...draft,
+              pricing: { ...draft.pricing, enabled: event.target.checked },
+            })}
+          />
+          Associate token prices with this model
+        </label>
+        {draft.pricing.enabled ? (
+          <TasciPricingEditor
+            draft={draft.pricing}
+            onChange={(pricing) => onChange({ ...draft, pricing })}
+          />
+        ) : null}
+      </div>
       <EditorActions disabled={disabled} onCancel={onCancel} />
     </form>
   );
@@ -716,6 +738,7 @@ function newModelDraft(endpoint: string): ModelDraft {
     maxOutputTokens: "",
     toolCalls: true,
     parallelToolCalls: true,
+    pricing: tasciPricingDraft(),
   };
 }
 
@@ -730,7 +753,7 @@ function editModelDraft(alias: string, model: config.WorkspaceTasciModel): Model
     maxOutputTokens: model.maxOutputTokens?.toString() ?? "",
     toolCalls: model.toolCalls !== false,
     parallelToolCalls: model.parallelToolCalls === true,
-    pricing: model.pricing,
+    pricing: tasciPricingDraft(model.pricing),
   };
 }
 
@@ -773,7 +796,7 @@ function validateModelDraft(
   if (draft.model.trim() !== draft.model) return "Provider model identifier cannot contain surrounding whitespace.";
   if (draft.contextWindow && !positiveInteger(draft.contextWindow)) return "Context window must be a positive integer.";
   if (draft.maxOutputTokens && !positiveInteger(draft.maxOutputTokens)) return "Maximum output tokens must be a positive integer.";
-  return undefined;
+  return validateTasciPricingDraft(draft.pricing);
 }
 
 function authorizationValue(
