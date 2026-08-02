@@ -107,7 +107,8 @@ pub enum TasciHarnessEvent {
     },
     /// The active turn reached a terminal state.
     TurnFinished {
-        /// Secret-safe failure message, or none for a successful turn.
+        /// Secret-safe, location-free failure report including nested causes,
+        /// or none for a successful turn.
         error: Option<String>,
         /// Whether cooperative cancellation ended the turn.
         cancelled: bool,

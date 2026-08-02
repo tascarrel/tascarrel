@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
+use reportify::render::ColorMode;
+use reportify::render::RenderOptions;
 use tascarrel_agent::Agent;
 use tascarrel_agent::AgentConfig;
 use tascarrel_agent::AgentEvent;
@@ -312,7 +314,7 @@ async fn run_harness_turn(
             })
         }
         Err(error) => {
-            let message = error.error().to_string();
+            let message = render_harness_error(&error);
             tracing::warn!(%error, "Tasci turn failed");
             write_harness_event(
                 output,
@@ -406,7 +408,7 @@ async fn run_harness_compaction(
             })
         }
         Err(error) => {
-            let message = error.error().to_string();
+            let message = render_harness_error(&error);
             tracing::warn!(%error, "Tasci context compaction failed");
             write_harness_event(
                 output,
@@ -485,7 +487,7 @@ async fn initialize_protocol_session(
             write_harness_event(
                 output,
                 TasciHarnessEvent::Failed {
-                    message: error.error().to_string(),
+                    message: render_harness_error(&error),
                 },
             )
             .await?;
@@ -523,7 +525,7 @@ async fn finish_successful_harness_operation(
         write_harness_event(
             output,
             TasciHarnessEvent::TurnFinished {
-                error: Some(error.error().to_string()),
+                error: Some(render_harness_error(&error)),
                 cancelled: false,
             },
         )
@@ -578,6 +580,12 @@ async fn write_harness_event(
         .await
         .escalate(TasciExecError::ProtocolWrite)?;
     output.flush().await.escalate(TasciExecError::ProtocolWrite)
+}
+
+/// Renders a complete, location-free diagnostic for presentation to harness
+/// users.
+fn render_harness_error<E: reportify::Error>(error: &Report<E>) -> String {
+    error.render(RenderOptions::new().compact().color(ColorMode::Never))
 }
 
 struct AgentRuntime {

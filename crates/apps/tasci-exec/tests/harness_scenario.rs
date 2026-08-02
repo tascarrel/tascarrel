@@ -220,6 +220,73 @@ async fn harness_scenario_reports_an_empty_model_response() {
     server.await.unwrap();
 }
 
+/// Exercises propagation of a provider rejection through the harness failure
+/// event.
+#[tokio::test]
+async fn harness_scenario_reports_provider_error_details() {
+    let provider_message =
+        "Insufficient credits for request. Required: 0.108792 EUR, Available: 0.063478 EUR";
+    let (base_url, _requests, server) = serve_provider_error(provider_message).await;
+    let workspace = tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tasci-exec"))
+        .arg("--harness")
+        .current_dir(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Start {
+            configuration: TasciHarnessConfiguration {
+                base_url: format!("{base_url}/v1"),
+                model: "rejected-model".to_owned(),
+                context_window: None,
+                max_output_tokens: None,
+                authorization: None,
+                working_directory: workspace.path().to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
+            },
+            session: None,
+        },
+    )
+    .await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Started);
+
+    send_command(
+        &mut input,
+        TasciHarnessCommand::Prompt {
+            prompt: "Return a response.".to_owned(),
+            configuration: None,
+        },
+    )
+    .await;
+    loop {
+        match read_event(&mut output).await {
+            TasciHarnessEvent::TurnFinished {
+                error: Some(error),
+                cancelled: false,
+            } => {
+                assert!(error.contains("model request failed"));
+                assert!(error.contains(provider_message));
+                break;
+            }
+            TasciHarnessEvent::Agent { .. } => {}
+            event => panic!("unexpected harness event: {event:?}"),
+        }
+    }
+
+    send_command(&mut input, TasciHarnessCommand::Stop).await;
+    assert_eq!(read_event(&mut output).await, TasciHarnessEvent::Stopped);
+    assert!(child.wait().await.unwrap().success());
+    server.await.unwrap();
+}
+
 /// Exercises manual compaction, split-turn summaries, and subsequent context
 /// reconstruction through the complete harness protocol.
 #[tokio::test]
@@ -566,25 +633,54 @@ async fn serve_owned_model_scenario(
     mpsc::UnboundedReceiver<ObservedChatRequest>,
     tokio::task::JoinHandle<()>,
 ) {
+    let response_bodies = responses
+        .into_iter()
+        .map(|response_text| {
+            format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n",
+                serde_json::to_string(&response_text).unwrap()
+            )
+        })
+        .collect();
+    serve_model_stream_scenario(response_bodies).await
+}
+
+async fn serve_provider_error(
+    message: &str,
+) -> (
+    String,
+    mpsc::UnboundedReceiver<ObservedChatRequest>,
+    tokio::task::JoinHandle<()>,
+) {
+    let response_body = format!(
+        "data: {{\"error\":{{\"message\":{}}}}}\n\n",
+        serde_json::to_string(message).unwrap()
+    );
+    serve_model_stream_scenario(vec![response_body]).await
+}
+
+async fn serve_model_stream_scenario(
+    response_bodies: Vec<String>,
+) -> (
+    String,
+    mpsc::UnboundedReceiver<ObservedChatRequest>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (request_sender, request_receiver) = mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
-        for response_text in responses {
+        for response_body in response_bodies {
             let (socket, _) = listener.accept().await.unwrap();
             let request_sender = request_sender.clone();
             let service = service_fn(move |request: Request<Incoming>| {
                 let request_sender = request_sender.clone();
-                let response_text = response_text.clone();
+                let response_body = response_body.clone();
                 async move {
                     let body = request.into_body().collect().await.unwrap().to_bytes();
                     request_sender
                         .send(serde_json::from_slice::<ObservedChatRequest>(&body).unwrap())
                         .unwrap();
-                    let response_body = format!(
-                        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n",
-                        serde_json::to_string(&response_text).unwrap()
-                    );
                     Ok::<_, Infallible>(
                         Response::builder()
                             .header(CONTENT_TYPE, "text/event-stream")
