@@ -1411,14 +1411,14 @@ mod tests {
 
     /// Terminates a Git subprocess at the configured deadline instead of
     /// waiting for its output pipes to close.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn git_command_timeout_kills_the_subprocess() {
         let root = tempfile::tempdir().expect("command fixture is created");
         let executable = root.path().join("slow-git");
         let shell = fixture_program("sh");
         std::fs::write(
             &executable,
-            format!("#!{}\nwhile :; do :; done\n", shell.display()),
+            format!("#!{}\nkill -s STOP \"$$\"\n", shell.display()),
         )
         .expect("command fixture is written");
         let mut permissions = std::fs::metadata(&executable)
