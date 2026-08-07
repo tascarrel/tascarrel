@@ -97,6 +97,7 @@ use tascarrel_protocol::Framed;
 use tascarrel_protocol::GuestControlIdentity;
 use tascarrel_protocol::HostOperationInputRequest;
 use tascarrel_protocol::HostOperationInputResponse;
+use tascarrel_protocol::MAX_POD_FILE_WRITE_BYTES;
 use tascarrel_protocol::MAX_SHARE_OVERLAY_FRAME_LEN;
 use tascarrel_protocol::MAX_WORKSPACE_ENVIRONMENT_FRAME_LEN;
 use tascarrel_protocol::MAX_WORKSPACE_SHARES_FRAME_LEN;
@@ -106,6 +107,7 @@ use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
 use tascarrel_protocol::MUX_CONTROL_PLANE_ENDPOINT;
 use tascarrel_protocol::MUX_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_POD_FILE_READ_ENDPOINT;
+use tascarrel_protocol::MUX_POD_FILE_WRITE_ENDPOINT;
 use tascarrel_protocol::MUX_POD_HOST_OPERATION_INPUT_ENDPOINT;
 use tascarrel_protocol::MUX_PUBLISH_GUEST_ENDPOINT;
 use tascarrel_protocol::MUX_SHARE_OVERLAY_GUEST_ENDPOINT;
@@ -115,6 +117,9 @@ use tascarrel_protocol::MUX_WORKSPACE_SHARES_HOST_ENDPOINT;
 use tascarrel_protocol::Pod;
 use tascarrel_protocol::PodFileReadRequest;
 use tascarrel_protocol::PodFileReadResponse;
+use tascarrel_protocol::PodFileWriteRejectionCode;
+use tascarrel_protocol::PodFileWriteRequest;
+use tascarrel_protocol::PodFileWriteResponse;
 use tascarrel_protocol::PodHostOperationInputRequest;
 use tascarrel_protocol::PodId;
 use tascarrel_protocol::PublishedPortConnect;
@@ -1171,6 +1176,7 @@ async fn main() -> Result<()> {
             files_config.add_directory_share(
                 share.name.clone(),
                 Path::new(host_shares::HOST_SHARES_DIRECTORY).join(&share.name),
+                share.mode == WorkspaceHostShareMode::ReadWrite,
             )
         };
         configured
@@ -1925,6 +1931,21 @@ fn accept_mux_request(
         }
         return;
     }
+    if request.endpoint() == MUX_POD_FILE_WRITE_ENDPOINT {
+        match request.accept() {
+            Ok(channel) => {
+                let files = control.files.clone();
+                let pods = control.pods.clone();
+                connections.spawn(async move {
+                    if let Err(error) = serve_pod_file_write(channel, files, &pods).await {
+                        warn!(%error, "logical pod file write ended with an error");
+                    }
+                });
+            }
+            Err(error) => warn!(%error, "could not accept pod file write"),
+        }
+        return;
+    }
     if request.endpoint() == MUX_SHARE_OVERLAY_GUEST_ENDPOINT {
         match request.accept() {
             Ok(channel) => {
@@ -2192,7 +2213,10 @@ async fn serve_pod_file_read(
     {
         Ok(mut opened) => {
             framed
-                .write(&PodFileReadResponse::Found { size: opened.size })
+                .write(&PodFileReadResponse::Found {
+                    size: opened.size,
+                    writable: opened.writable,
+                })
                 .await
                 .map_err(|error| stream_failed("failed to write pod file response", error))?;
             let mut channel = framed.into_inner();
@@ -2207,6 +2231,8 @@ async fn serve_pod_file_read(
         Err(error) => {
             let code = match error.error() {
                 FilesServiceError::InvalidRequest(_) => "invalid_path",
+                FilesServiceError::ReadOnly => "read_only",
+                FilesServiceError::Conflict => "conflict",
                 FilesServiceError::Unavailable(_) => "unavailable",
                 FilesServiceError::Internal(_) => "internal",
             };
@@ -2219,6 +2245,84 @@ async fn serve_pod_file_read(
                 .map_err(|error| stream_failed("failed to write rejected pod file response", error))
         }
     }
+}
+
+/// Accepts one bounded UTF-8 replacement and returns its revision.
+async fn serve_pod_file_write(
+    channel: Channel,
+    files: FilesService,
+    pods: &tascarrel_guest::PodService,
+) -> std::result::Result<(), Report<PodFileStreamError>> {
+    let mut framed = Framed::new(channel);
+    let request = framed
+        .read::<PodFileWriteRequest>()
+        .await
+        .map_err(|error| stream_failed("failed to read pod file write request", error))?
+        .ok_or_else(|| stream_failed("pod file write closed before its request", "EOF"))?;
+    let mut channel = framed.into_inner();
+    let mut contents = Vec::new();
+    (&mut channel)
+        .take(MAX_POD_FILE_WRITE_BYTES + 1)
+        .read_to_end(&mut contents)
+        .await
+        .map_err(|error| stream_failed("failed to read pod file replacement", error))?;
+    let response = if contents.len() as u64 > MAX_POD_FILE_WRITE_BYTES {
+        PodFileWriteResponse::Rejected {
+            code: PodFileWriteRejectionCode::TooLarge,
+            message: format!(
+                "replacement exceeds the {MAX_POD_FILE_WRITE_BYTES}-byte editor limit"
+            ),
+        }
+    } else {
+        match files
+            .replace_file(
+                &request.pod_id,
+                &request.root,
+                request.path.as_str(),
+                &request.expected_revision,
+                contents,
+                pods,
+            )
+            .await
+        {
+            Ok(written) => PodFileWriteResponse::Written {
+                revision: written.revision,
+            },
+            Err(error) => match error.error() {
+                FilesServiceError::Conflict => PodFileWriteResponse::Conflict,
+                FilesServiceError::InvalidRequest(_) => PodFileWriteResponse::Rejected {
+                    code: PodFileWriteRejectionCode::InvalidRequest,
+                    message: error.to_string(),
+                },
+                FilesServiceError::ReadOnly => PodFileWriteResponse::Rejected {
+                    code: PodFileWriteRejectionCode::ReadOnly,
+                    message: error.to_string(),
+                },
+                FilesServiceError::Unavailable(_) => PodFileWriteResponse::Rejected {
+                    code: PodFileWriteRejectionCode::Unavailable,
+                    message: error.to_string(),
+                },
+                FilesServiceError::Internal(_) => PodFileWriteResponse::Rejected {
+                    code: PodFileWriteRejectionCode::Internal,
+                    message: error.to_string(),
+                },
+            },
+        }
+    };
+    let mut framed = Framed::new(channel);
+    framed
+        .write(&response)
+        .await
+        .map_err(|error| stream_failed("failed to write pod file write response", error))?;
+    let mut channel = framed.into_inner();
+    channel
+        .shutdown()
+        .await
+        .map_err(|error| stream_failed("failed to finish pod file write response", error))?;
+    if let Err(error) = tokio::io::copy(&mut channel, &mut tokio::io::sink()).await {
+        debug!(%error, "pod file writer disconnected after receiving its result");
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

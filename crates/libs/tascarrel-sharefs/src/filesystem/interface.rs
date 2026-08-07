@@ -27,8 +27,10 @@ use super::normalize_non_root_path;
 use super::normalize_path;
 use super::prepare_lower_directory;
 use super::prepare_state_directory;
+use crate::ContentDigest;
 use crate::DirectoryEntry;
 use crate::EntryMetadata;
+use crate::FileWriteOutcome;
 use crate::LowerLease;
 use crate::ShareChange;
 use crate::ShareFsError;
@@ -192,6 +194,40 @@ impl ShareFileSystem {
     pub fn write_file(&self, path: impl AsRef<Path>, contents: &[u8]) -> ShareFsResult<()> {
         let path = normalize_non_root_path(path.as_ref())?;
         self.lock()?.write_file(&path, contents)
+    }
+
+    /// Replaces an existing regular file when its contents match one revision.
+    ///
+    /// The comparison and replacement are serialized with every mounted
+    /// `ShareFS` operation for the same upper state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is unsafe, absent, not a regular file,
+    /// changes while being captured, or cannot be written.
+    #[tracing::instrument(
+        name = "tascarrel_sharefs.write_file_if_revision",
+        level = "debug",
+        skip_all,
+        fields(path = %path.as_ref().display(), bytes = contents.len()),
+        err
+    )]
+    pub fn write_file_if_revision(
+        &self,
+        path: impl AsRef<Path>,
+        expected: ContentDigest,
+        contents: &[u8],
+    ) -> ShareFsResult<FileWriteOutcome> {
+        let path = normalize_non_root_path(path.as_ref())?;
+        let mut core = self.lock()?;
+        let current = ContentDigest::from_bytes(&core.read_file(&path)?);
+        if current != expected {
+            return Ok(FileWriteOutcome::Conflict { revision: current });
+        }
+        core.write_file(&path, contents)?;
+        Ok(FileWriteOutcome::Written {
+            revision: ContentDigest::from_bytes(contents),
+        })
     }
 
     /// Writes bytes at one offset in an existing merged regular file.

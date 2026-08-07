@@ -1,11 +1,17 @@
 //! Descriptor-relative pod file operations.
 //!
-//! [`FilesService`] performs uncached directory reads and opens file bodies for
-//! streaming below the workspace or a configured host-share root. Every path
-//! component is resolved without following symbolic links.
+//! [`FilesService`] performs uncached directory reads, opens file bodies for
+//! streaming, and revision-safely replaces complete text files below the
+//! workspace or a configured host-share root. Every path component is resolved
+//! without following symbolic links.
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read as _;
+use std::io::Write as _;
+use std::os::fd::AsFd as _;
 use std::os::fd::OwnedFd;
 use std::path::Component;
 use std::path::Path;
@@ -17,18 +23,25 @@ use reportify::Report;
 use rustix::fs::AtFlags;
 use rustix::fs::Dir;
 use rustix::fs::FileType;
+use rustix::fs::Gid;
 use rustix::fs::Mode;
 use rustix::fs::OFlags;
+use rustix::fs::Uid;
 use rustix::fs::fstat;
 use rustix::fs::open;
 use rustix::fs::openat;
 use rustix::fs::statat;
+use sha2::Digest as _;
+use sha2::Sha256;
 use tascarrel_api::MAX_RELATIVE_PATH_BYTES;
 use tascarrel_api::types::files as api;
 use tascarrel_api::types::pods::PodId;
+use tascarrel_protocol::MAX_POD_FILE_WRITE_BYTES;
 use tascarrel_protocol::valid_workspace_share_name;
+use tascarrel_sharefs::ContentDigest;
 use tascarrel_sharefs::DirectoryEntry as ShareDirectoryEntry;
 use tascarrel_sharefs::EntryKind as ShareEntryKind;
+use tascarrel_sharefs::FileWriteOutcome as ShareFileWriteOutcome;
 use thiserror::Error;
 
 use crate::services::changes::ChangesService;
@@ -43,6 +56,9 @@ pub struct FilesServiceConfig {
 impl FilesServiceConfig {
     /// Adds one ordinary host share backed by a guest directory.
     ///
+    /// `writable` indicates whether browser replacements may pass through to
+    /// the host directory.
+    ///
     /// # Errors
     ///
     /// Returns an invalid-request report when the share name or root is unsafe.
@@ -50,6 +66,7 @@ impl FilesServiceConfig {
         &mut self,
         name: impl Into<String>,
         root: impl Into<PathBuf>,
+        writable: bool,
     ) -> Result<(), Report<FilesServiceError>> {
         let name = name.into();
         let root = root.into();
@@ -57,7 +74,8 @@ impl FilesServiceConfig {
         if !root.is_absolute() {
             return Err(invalid("share file root must be absolute"));
         }
-        self.shares.insert(name, ConfiguredShare::Directory(root));
+        self.shares
+            .insert(name, ConfiguredShare::Directory { root, writable });
         Ok(())
     }
 
@@ -77,10 +95,11 @@ impl FilesServiceConfig {
     }
 }
 
-/// Uncached inspection service for pod-visible file roots.
+/// Uncached access service for pod-visible file roots.
 #[derive(Clone, Debug)]
 pub struct FilesService {
     config: Arc<FilesServiceConfig>,
+    direct_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FilesService {
@@ -89,6 +108,7 @@ impl FilesService {
     pub fn new(config: FilesServiceConfig) -> Self {
         Self {
             config: Arc::new(config),
+            direct_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -154,7 +174,7 @@ impl FilesService {
             Some(api::FileRoot::Share(share)) => {
                 let configured = self.configured_share(share.name.as_ref())?;
                 let entries = match configured {
-                    ConfiguredShare::Directory(root) => {
+                    ConfiguredShare::Directory { root, .. } => {
                         list_directory_blocking(root.clone(), relative.to_owned()).await?
                     }
                     ConfiguredShare::Overlay => pods
@@ -222,8 +242,10 @@ impl FilesService {
                 open_file_blocking(workspace, path.to_owned()).await?
             }
             api::FileRoot::Share(share) => match self.configured_share(share.name.as_ref())? {
-                ConfiguredShare::Directory(root) => {
-                    open_file_blocking(root.clone(), path.to_owned()).await?
+                ConfiguredShare::Directory { root, writable } => {
+                    open_file_blocking(root.clone(), path.to_owned())
+                        .await?
+                        .with_writable(*writable)
                 }
                 ConfiguredShare::Overlay => {
                     let descriptor = pods
@@ -243,6 +265,7 @@ impl FilesService {
                     OpenedRegularFile {
                         descriptor: descriptor.into(),
                         size,
+                        writable: true,
                     }
                 }
             },
@@ -250,7 +273,77 @@ impl FilesService {
         Ok(FileRead {
             file: tokio::fs::File::from_std(std::fs::File::from(opened.descriptor)),
             size: opened.size,
+            writable: opened.writable,
         })
+    }
+
+    /// Replaces one complete UTF-8 file when its contents match a revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract report for invalid content or paths, a read-only
+    /// report for immutable roots, a conflict report for stale revisions, and
+    /// an unavailable report when the replacement cannot be committed.
+    #[tracing::instrument(level = "debug", skip_all, fields(pod_id = %pod_id.0, root = ?root, path, bytes = contents.len()))]
+    pub async fn replace_file(
+        &self,
+        pod_id: &PodId,
+        root: &api::FileRoot,
+        path: &str,
+        expected_revision: &str,
+        contents: Vec<u8>,
+        pods: &PodService,
+    ) -> Result<FileWrite, Report<FilesServiceError>> {
+        validate_relative(path, false)?;
+        validate_file_contents(&contents)?;
+        let expected = parse_revision(expected_revision)?;
+        let revision = match root {
+            api::FileRoot::Workspace => {
+                let _write = self.direct_write_lock.lock().await;
+                let workspace = pods.workspace_root(pod_id).await.map_err(|report| {
+                    report.escalate(FilesServiceError::Unavailable(
+                        "failed to resolve pod workspace".to_owned(),
+                    ))
+                })?;
+                replace_file_blocking(workspace, path.to_owned(), expected, contents).await?
+            }
+            api::FileRoot::Share(share) => match self.configured_share(share.name.as_ref())? {
+                ConfiguredShare::Directory {
+                    root: _,
+                    writable: false,
+                } => return Err(FilesServiceError::ReadOnly.report()),
+                ConfiguredShare::Directory {
+                    root,
+                    writable: true,
+                } => {
+                    let _write = self.direct_write_lock.lock().await;
+                    replace_file_blocking(root.clone(), path.to_owned(), expected, contents).await?
+                }
+                ConfiguredShare::Overlay => {
+                    let expected = ContentDigest::from_array(expected);
+                    match pods
+                        .write_share_overlay_file_if_revision(
+                            pod_id,
+                            share.name.as_ref(),
+                            Path::new(path),
+                            expected,
+                            &contents,
+                        )
+                        .await
+                        .map_err(|report| {
+                            report.escalate(FilesServiceError::Unavailable(
+                                "failed to replace pod overlay share file".to_owned(),
+                            ))
+                        })? {
+                        ShareFileWriteOutcome::Written { revision } => revision.to_string(),
+                        ShareFileWriteOutcome::Conflict { .. } => {
+                            return Err(FilesServiceError::Conflict.report());
+                        }
+                    }
+                }
+            },
+        };
+        Ok(FileWrite { revision })
     }
 
     /// Resolves one configured share while rejecting arbitrary `/mnt` roots.
@@ -263,32 +356,46 @@ impl FilesService {
     }
 }
 
-#[derive(Clone, Debug)]
-enum ConfiguredShare {
-    Directory(PathBuf),
-    Overlay,
-}
-
 /// One safely opened file ready for raw data-plane streaming.
 pub struct FileRead {
     /// Open file handle pinned to the validated inode.
     pub file: tokio::fs::File,
     /// Byte length observed on the pinned file handle before streaming.
     pub size: u64,
+    /// Whether the selected file root accepts replacements.
+    pub writable: bool,
 }
 
-/// Failure from pod file inspection.
+/// Result of one revision-checked complete-file replacement.
+pub struct FileWrite {
+    /// Lowercase hexadecimal SHA-256 revision of the new contents.
+    pub revision: String,
+}
+
+/// Failure from pod file access.
 #[derive(Debug, Error)]
 pub enum FilesServiceError {
     /// The supplied root or path violates the file request contract.
     #[error("invalid file request: {0}")]
     InvalidRequest(String),
+    /// The selected root does not allow file replacement.
+    #[error("failed to replace pod file: root is read-only")]
+    ReadOnly,
+    /// The file changed since its contents were observed.
+    #[error("failed to replace pod file: file changed since it was read")]
+    Conflict,
     /// The requested pod or file is not currently available.
     #[error("pod file is unavailable: {0}")]
     Unavailable(String),
     /// Guest filesystem inspection failed unexpectedly.
     #[error("file service failed: {0}")]
     Internal(String),
+}
+
+#[derive(Clone, Debug)]
+enum ConfiguredShare {
+    Directory { root: PathBuf, writable: bool },
+    Overlay,
 }
 
 #[derive(Debug)]
@@ -302,6 +409,14 @@ struct ListedEntry {
 struct OpenedRegularFile {
     descriptor: OwnedFd,
     size: u64,
+    writable: bool,
+}
+
+impl OpenedRegularFile {
+    fn with_writable(mut self, writable: bool) -> Self {
+        self.writable = writable;
+        self
+    }
 }
 
 /// Runs descriptor-relative directory inspection outside the async runtime.
@@ -322,6 +437,19 @@ async fn open_file_blocking(
     tokio::task::spawn_blocking(move || open_regular_file(&root, &relative))
         .await
         .map_err(|error| internal(format!("failed to join file open: {error}")))?
+}
+
+/// Runs revision validation and complete-file replacement outside the async
+/// runtime.
+async fn replace_file_blocking(
+    root: PathBuf,
+    relative: String,
+    expected: [u8; 32],
+    contents: Vec<u8>,
+) -> Result<String, Report<FilesServiceError>> {
+    tokio::task::spawn_blocking(move || replace_regular_file(&root, &relative, expected, &contents))
+        .await
+        .map_err(|error| internal(format!("failed to join file replacement: {error}")))?
 }
 
 /// Converts `ShareFS` metadata into the Files API directory representation.
@@ -441,7 +569,176 @@ fn open_regular_file(
     Ok(OpenedRegularFile {
         descriptor: file,
         size: file_size(metadata.st_size)?,
+        writable: true,
     })
+}
+
+/// Publishes a descriptor-relative replacement after revalidating the target.
+fn replace_regular_file(
+    root: &Path,
+    relative: &str,
+    expected: [u8; 32],
+    contents: &[u8],
+) -> Result<String, Report<FilesServiceError>> {
+    let path = Path::new(relative);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("file path must name one file"))?;
+    let parent = parent
+        .to_str()
+        .ok_or_else(|| invalid("file path must be UTF-8"))?;
+    let directory = open_directory(root, parent)?;
+    let current = open_regular_file_at(&directory, name)?;
+    let ownership = file_ownership(&current.descriptor)?;
+    if read_revision(current)? != expected {
+        return Err(FilesServiceError::Conflict.report());
+    }
+
+    let temporary = OsString::from(format!(".tascarrel-edit-{}", uuid::Uuid::new_v4()));
+    let descriptor = openat(
+        &directory,
+        &temporary,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(|error| unavailable(format!("failed to create file replacement: {error}")))?;
+    let mut replacement = File::from(descriptor);
+    let result = (|| {
+        replacement
+            .write_all(contents)
+            .map_err(|error| unavailable(format!("failed to write file replacement: {error}")))?;
+        let replacement_metadata = fstat(&replacement)
+            .map_err(|error| unavailable(format!("failed to inspect file replacement: {error}")))?;
+        if replacement_metadata.st_uid != ownership.owner.as_raw()
+            || replacement_metadata.st_gid != ownership.group.as_raw()
+        {
+            rustix::fs::fchown(
+                replacement.as_fd(),
+                Some(ownership.owner),
+                Some(ownership.group),
+            )
+            .map_err(|error| unavailable(format!("failed to preserve file ownership: {error}")))?;
+        }
+        rustix::fs::fchmod(replacement.as_fd(), ownership.mode)
+            .map_err(|error| unavailable(format!("failed to preserve file mode: {error}")))?;
+        replacement
+            .sync_all()
+            .map_err(|error| unavailable(format!("failed to sync file replacement: {error}")))?;
+        if read_revision(open_regular_file_at(&directory, name)?)? != expected {
+            return Err(FilesServiceError::Conflict.report());
+        }
+        rustix::fs::renameat(&directory, &temporary, &directory, name)
+            .map_err(|error| unavailable(format!("failed to publish file replacement: {error}")))?;
+        rustix::fs::fsync(&directory)
+            .map_err(|error| unavailable(format!("failed to sync file directory: {error}")))?;
+        Ok(content_revision(contents))
+    })();
+    if result.is_err()
+        && let Err(error) = rustix::fs::unlinkat(&directory, &temporary, AtFlags::empty())
+    {
+        tracing::warn!(temporary = ?temporary, %error, "could not remove an unpublished file replacement");
+    }
+    result
+}
+
+/// Opens one regular child without following a symbolic link.
+fn open_regular_file_at(
+    directory: &OwnedFd,
+    name: &std::ffi::OsStr,
+) -> Result<OpenedRegularFile, Report<FilesServiceError>> {
+    let file = openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| unavailable(format!("failed to open pod file: {error}")))?;
+    let metadata = fstat(&file)
+        .map_err(|error| unavailable(format!("failed to inspect pod file: {error}")))?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_file() {
+        return Err(invalid("path does not identify a regular file"));
+    }
+    Ok(OpenedRegularFile {
+        descriptor: file,
+        size: file_size(metadata.st_size)?,
+        writable: true,
+    })
+}
+
+/// Reads and hashes one editor-sized file from its pinned descriptor.
+fn read_revision(opened: OpenedRegularFile) -> Result<[u8; 32], Report<FilesServiceError>> {
+    if opened.size > MAX_POD_FILE_WRITE_BYTES {
+        return Err(invalid(format!(
+            "file exceeds the {MAX_POD_FILE_WRITE_BYTES}-byte editor limit"
+        )));
+    }
+    let mut file = File::from(opened.descriptor);
+    let capacity = usize::try_from(opened.size)
+        .map_err(|error| internal(format!("failed to allocate file revision buffer: {error}")))?;
+    let mut contents = Vec::with_capacity(capacity);
+    file.read_to_end(&mut contents)
+        .map_err(|error| unavailable(format!("failed to read file revision: {error}")))?;
+    if contents.len() as u64 > MAX_POD_FILE_WRITE_BYTES {
+        return Err(invalid(format!(
+            "file exceeds the {MAX_POD_FILE_WRITE_BYTES}-byte editor limit"
+        )));
+    }
+    Ok(Sha256::digest(&contents).into())
+}
+
+/// Captures metadata that a complete-file replacement must preserve.
+fn file_ownership(descriptor: &OwnedFd) -> Result<FileOwnership, Report<FilesServiceError>> {
+    let metadata = fstat(descriptor)
+        .map_err(|error| unavailable(format!("failed to inspect file ownership: {error}")))?;
+    Ok(FileOwnership {
+        owner: Uid::from_raw(metadata.st_uid),
+        group: Gid::from_raw(metadata.st_gid),
+        mode: Mode::from_raw_mode(metadata.st_mode & 0o7777),
+    })
+}
+
+/// Formats the SHA-256 content revision used by the browser contract.
+fn content_revision(contents: &[u8]) -> String {
+    ContentDigest::from_bytes(contents).to_string()
+}
+
+/// Parses a hexadecimal SHA-256 revision from the data-plane request.
+fn parse_revision(value: &str) -> Result<[u8; 32], Report<FilesServiceError>> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(invalid(
+            "file revision must be a lowercase hexadecimal SHA-256 digest",
+        ));
+    }
+    let mut revision = [0_u8; 32];
+    for (index, output) in revision.iter_mut().enumerate() {
+        *output = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| invalid("file revision must be a lowercase hexadecimal SHA-256 digest"))?;
+    }
+    Ok(revision)
+}
+
+/// Enforces the browser editor's size and encoding contract.
+fn validate_file_contents(contents: &[u8]) -> Result<(), Report<FilesServiceError>> {
+    if contents.len() as u64 > MAX_POD_FILE_WRITE_BYTES {
+        return Err(invalid(format!(
+            "replacement exceeds the {MAX_POD_FILE_WRITE_BYTES}-byte editor limit"
+        )));
+    }
+    std::str::from_utf8(contents)
+        .map(|_| ())
+        .map_err(|_| invalid("replacement content must be UTF-8"))
+}
+
+#[derive(Clone, Copy)]
+struct FileOwnership {
+    owner: Uid,
+    group: Gid,
+    mode: Mode,
 }
 
 fn file_size(size: i64) -> Result<u64, Report<FilesServiceError>> {
@@ -526,6 +823,9 @@ fn internal(message: impl Into<String>) -> Report<FilesServiceError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
 
     /// Rejects share names and lookups which are not part of the pinned root
@@ -535,7 +835,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("share fixture is created");
         let mut config = FilesServiceConfig::default();
         config
-            .add_directory_share("source", directory.path())
+            .add_directory_share("source", directory.path(), false)
             .expect("portable share is configured");
         assert!(config.add_overlay_share("invalid.name").is_err());
 
@@ -554,6 +854,32 @@ mod tests {
         }
         assert!(validate_relative("", true).is_ok());
         assert!(validate_relative("repo/src/lib.rs", false).is_ok());
+    }
+
+    /// Verifies matching content is replaced and a stale revision leaves it
+    /// intact.
+    #[test]
+    fn file_replacement_requires_the_observed_revision() {
+        let root = tempfile::tempdir().expect("file root fixture is created");
+        let path = root.path().join("document.md");
+        fs::write(&path, b"before\n").expect("file fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .expect("file fixture mode is set");
+        let before: [u8; 32] = Sha256::digest(b"before\n").into();
+
+        let revision = replace_regular_file(root.path(), "document.md", before, b"after\n")
+            .expect("matching revision is replaced");
+        assert_eq!(revision, content_revision(b"after\n"));
+        assert_eq!(fs::read(&path).unwrap(), b"after\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+
+        let error = replace_regular_file(root.path(), "document.md", before, b"stale\n")
+            .expect_err("stale revision is rejected");
+        assert!(matches!(error.error(), FilesServiceError::Conflict));
+        assert_eq!(fs::read(path).unwrap(), b"after\n");
     }
 
     /// Lists ordinary files, directories, and links without following the link

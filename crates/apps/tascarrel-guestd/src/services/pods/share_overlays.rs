@@ -31,9 +31,11 @@ use tascarrel_protocol::ShareOverlayEntry;
 use tascarrel_protocol::ShareOverlayEntryKind;
 use tascarrel_protocol::ShareOverlayEntryVersion;
 use tascarrel_protocol::ShareOverlaySnapshot;
+use tascarrel_sharefs::ContentDigest;
 use tascarrel_sharefs::DirectoryEntry;
 use tascarrel_sharefs::EntryKind;
 use tascarrel_sharefs::EntryVersion;
+use tascarrel_sharefs::FileWriteOutcome;
 use tascarrel_sharefs::FrozenShareFileSystem;
 use tascarrel_sharefs::MountedShareFileSystem;
 use tascarrel_sharefs::ShareFileSystem;
@@ -219,6 +221,26 @@ impl ShareOverlayRuntime {
             .map_err(|error| {
                 RuntimeError::InvalidConfig(format!(
                     "failed to open overlay host share file {share:?}: {error}"
+                ))
+                .report()
+            })
+    }
+
+    /// Replaces one regular file when its merged contents match a revision.
+    #[tracing::instrument(level = "debug", skip(self, contents), fields(pod_id = %pod, share, path = %path.display(), bytes = contents.len()), err)]
+    pub(crate) fn write_file_if_revision(
+        &self,
+        pod: &PodId,
+        share: &str,
+        path: &Path,
+        expected: ContentDigest,
+        contents: &[u8],
+    ) -> Result<FileWriteOutcome, Report<RuntimeError>> {
+        self.inspection_filesystem(pod, share)?
+            .write_file_if_revision(path, expected, contents)
+            .map_err(|error| {
+                RuntimeError::InvalidConfig(format!(
+                    "failed to replace overlay host share file {share:?}: {error}"
                 ))
                 .report()
             })

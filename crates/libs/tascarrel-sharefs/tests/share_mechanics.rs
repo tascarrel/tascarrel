@@ -8,7 +8,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tascarrel_sharefs::ContentDigest;
 use tascarrel_sharefs::EntryKind;
+use tascarrel_sharefs::FileWriteOutcome;
 use tascarrel_sharefs::ShareChange;
 use tascarrel_sharefs::ShareFileSystem;
 use tascarrel_sharefs::ShareFsError;
@@ -177,6 +179,34 @@ fn opens_merged_regular_files_for_streaming() {
     let mut upper_contents = Vec::new();
     upper.read_to_end(&mut upper_contents).unwrap();
     assert_eq!(upper_contents, b"upper");
+}
+
+/// Verifies a complete replacement is serialized with revision validation.
+#[test]
+fn complete_write_requires_the_current_revision() {
+    let fixture = Fixture::new();
+    fs::write(fixture.lower.join("file"), b"before").unwrap();
+    let filesystem = fixture.open();
+    let before = ContentDigest::from_bytes(b"before");
+
+    assert_eq!(
+        filesystem
+            .write_file_if_revision("file", before, b"after")
+            .unwrap(),
+        FileWriteOutcome::Written {
+            revision: ContentDigest::from_bytes(b"after"),
+        }
+    );
+    assert_eq!(filesystem.read_file("file").unwrap(), b"after");
+    assert_eq!(
+        filesystem
+            .write_file_if_revision("file", before, b"stale")
+            .unwrap(),
+        FileWriteOutcome::Conflict {
+            revision: ContentDigest::from_bytes(b"after"),
+        }
+    );
+    assert_eq!(filesystem.read_file("file").unwrap(), b"after");
 }
 
 /// Verifies a synchronized copy of the complete upper state is independently

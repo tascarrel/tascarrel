@@ -82,6 +82,12 @@ fn files_error(report: Report<FilesServiceError>) -> Report<wire::OperationError
         FilesServiceError::InvalidRequest(message) => {
             wire::OperationError::InvalidRequest(operation_error_details(message.clone()))
         }
+        FilesServiceError::ReadOnly => {
+            wire::OperationError::InvalidRequest(operation_error_details("file root is read-only"))
+        }
+        FilesServiceError::Conflict => wire::OperationError::Unavailable(operation_error_details(
+            "file changed since it was read",
+        )),
         FilesServiceError::Unavailable(message) => {
             wire::OperationError::Unavailable(operation_error_details(message.clone()))
         }

@@ -11,6 +11,7 @@ export function ConfirmDialog({
   confirmLabel,
   pending = false,
   destructive = false,
+  layer = "default",
   onOpenChange,
   onConfirm,
 }: {
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   confirmLabel: string;
   pending?: boolean;
   destructive?: boolean;
+  layer?: "default" | "overlay";
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
@@ -31,8 +33,8 @@ export function ConfirmDialog({
       }}
     >
       <AlertDialog.Portal>
-        <AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm transition-opacity data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <AlertDialog.Viewport className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4">
+        <AlertDialog.Backdrop className={`fixed inset-0 bg-black/75 backdrop-blur-sm transition-opacity data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 ${layer === "overlay" ? "z-[80]" : "z-50"}`} />
+        <AlertDialog.Viewport className={`fixed inset-0 grid place-items-center overflow-y-auto p-4 ${layer === "overlay" ? "z-[80]" : "z-50"}`}>
           <AlertDialog.Popup
             className={`w-full max-w-md rounded-2xl border bg-surface-raised p-5 text-foreground shadow-2xl shadow-black/70 outline-none transition-[transform,opacity] data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 ${
               destructive ? "border-red-500/25" : "border-ui-border-strong"

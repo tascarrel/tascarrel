@@ -57,11 +57,16 @@ use tascarrel_protocol::DEFAULT_MAX_FRAME_LEN;
 use tascarrel_protocol::FrameReader;
 use tascarrel_protocol::Framed;
 use tascarrel_protocol::MAX_CHAT_ATTACHMENT_BYTES;
+use tascarrel_protocol::MAX_POD_FILE_WRITE_BYTES;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_READ_ENDPOINT;
 use tascarrel_protocol::MUX_CHAT_ATTACHMENT_UPLOAD_ENDPOINT;
 use tascarrel_protocol::MUX_POD_FILE_READ_ENDPOINT;
+use tascarrel_protocol::MUX_POD_FILE_WRITE_ENDPOINT;
 use tascarrel_protocol::PodFileReadRequest;
 use tascarrel_protocol::PodFileReadResponse;
+use tascarrel_protocol::PodFileWriteRejectionCode;
+use tascarrel_protocol::PodFileWriteRequest;
+use tascarrel_protocol::PodFileWriteResponse;
 use tascarrel_protocol::WorkspaceName;
 use tascarrel_protocol::control_plane;
 use tokio::io::AsyncWriteExt as _;
@@ -105,6 +110,7 @@ const UI_DOCUMENT_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-stor
 const UI_ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
 const CHAT_ATTACHMENT_UPLOAD_PROOF: &str = "tascarrel-chat-attachment";
+const POD_FILE_WRITE_PROOF: &str = "tascarrel-pod-file-write";
 const STARTUP_PAGE: &str = include_str!("../startup.html");
 
 pub(crate) struct WebServer {
@@ -264,7 +270,7 @@ fn router(state: WebState) -> Router {
             post(upload_chat_attachment),
         )
         .route("/api/v1/chat/attachment", get(read_chat_attachment))
-        .route("/api/v1/files/raw", get(raw_file))
+        .route("/api/v1/files/raw", get(raw_file).put(write_raw_file))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_browser_session,
@@ -387,10 +393,15 @@ fn frontend_cors(state: &WebState) -> CorsLayer {
                 is_allowed_frontend_origin(origin, web_authority, ready.network_service())
             })
         }))
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PUT])
         .allow_headers([
             header::CONTENT_TYPE,
+            header::IF_MATCH,
             header::HeaderName::from_static("x-tascarrel-request"),
+        ])
+        .expose_headers([
+            header::ETAG,
+            header::HeaderName::from_static("x-tascarrel-file-writable"),
         ])
         .max_age(FRONTEND_CORS_MAX_AGE)
 }
@@ -542,6 +553,7 @@ struct UploadChatAttachmentQuery {
 }
 
 #[allow(clippy::too_many_lines)] // Upload streaming keeps peer cancellation and response ordering together.
+/// Uploads one bounded chat attachment through the guest data plane.
 #[tracing::instrument(
     level = "debug",
     skip(state, input, headers, body),
@@ -681,6 +693,7 @@ struct ReadChatAttachmentQuery {
 }
 
 #[allow(clippy::too_many_lines)] // Response validation and security headers form one delivery boundary.
+/// Streams one stored chat attachment with safe response headers.
 #[tracing::instrument(
     level = "debug",
     skip(state, input),
@@ -915,17 +928,35 @@ async fn raw_file(
                 "pod file read closed without a response",
             )
         })?;
-    let size = match result {
-        PodFileReadResponse::Found { size } => size,
+    let (size, writable) = match result {
+        PodFileReadResponse::Found { size, writable } => (size, writable),
         PodFileReadResponse::Rejected { code, message } => {
             return Err(pod_file_rejection(code, message));
         }
     };
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(framed.into_inner())));
+    let body = Body::from_stream(ReaderStream::new(framed.into_inner()));
+    Ok(raw_file_response(
+        &input.path,
+        input.download,
+        size,
+        writable,
+        body,
+    ))
+}
+
+/// Builds the uncached response for one streamed pod file.
+fn raw_file_response(
+    path: &str,
+    download: bool,
+    size: u64,
+    writable: bool,
+    body: Body,
+) -> Response {
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type(&input.path)),
+        HeaderValue::from_static(content_type(path)),
     );
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     headers.insert(
@@ -933,19 +964,221 @@ async fn raw_file(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    if input.path.to_ascii_lowercase().ends_with(".svg") {
+    headers.insert(
+        header::HeaderName::from_static("x-tascarrel-file-writable"),
+        HeaderValue::from_static(if writable { "true" } else { "false" }),
+    );
+    if path.to_ascii_lowercase().ends_with(".svg") {
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("sandbox; default-src 'none'; style-src 'unsafe-inline'"),
         );
     }
-    if input.download {
+    if download {
         headers.insert(
             header::CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment"),
         );
     }
-    Ok(response)
+    response
+}
+
+/// Replaces one pod text file through the guest data plane.
+#[tracing::instrument(
+    level = "debug",
+    skip(state, input, headers, body),
+    fields(workspace = %input.workspace, pod_id = %input.pod_id, share = ?input.share, path = %input.path),
+    err(Debug)
+)]
+async fn write_raw_file(
+    State(state): State<WebState>,
+    Query(input): Query<RawFileQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let state = state.require_ready()?;
+    let expected_revision = validate_pod_file_write_headers(&headers)?;
+    let workspace = WorkspaceName::new(input.workspace)
+        .map_err(|error| ApiError::bad_request("invalid-workspace", error.to_string()))?;
+    let pod_id = input
+        .pod_id
+        .parse::<tascarrel_api::ids::PodId>()
+        .map_err(|error| ApiError::bad_request("invalid-pod", error.to_string()))?;
+    let mux = state
+        .workspace_service()
+        .connect(workspace)
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "workspace-unavailable",
+                error.to_string(),
+            )
+        })?;
+    let channel = mux
+        .open(MUX_POD_FILE_WRITE_ENDPOINT)
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "file-write-unavailable",
+                format!("failed to open pod file write: {error}"),
+            )
+        })?;
+    let mut framed = Framed::new(channel);
+    framed
+        .write(&PodFileWriteRequest {
+            pod_id,
+            root: raw_file_root(input.share.as_deref()),
+            path: tascarrel_api::types::files::FilePath::new(input.path),
+            expected_revision,
+        })
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "file-write-failed",
+                format!("failed to send pod file write request: {error}"),
+            )
+        })?;
+    let result = stream_pod_file_write(framed.into_inner(), body).await?;
+    pod_file_write_response(result)
+}
+
+/// Validates the browser proof, size declaration, and expected revision.
+fn validate_pod_file_write_headers(headers: &HeaderMap) -> Result<String, ApiError> {
+    if headers
+        .get("x-tascarrel-request")
+        .and_then(|value| value.to_str().ok())
+        != Some(POD_FILE_WRITE_PROOF)
+    {
+        return Err(ApiError::forbidden(
+            "missing-request-proof",
+            "missing pod file write request proof",
+        ));
+    }
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_POD_FILE_WRITE_BYTES)
+    {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file-too-large",
+            format!("replacement exceeds the {MAX_POD_FILE_WRITE_BYTES}-byte editor limit"),
+        ));
+    }
+    file_revision(headers)
+}
+
+/// Streams replacement bytes while observing an early guest rejection.
+async fn stream_pod_file_write(
+    channel: tascarrel_mux::Channel,
+    body: Body,
+) -> Result<PodFileWriteResponse, ApiError> {
+    let (reader, mut writer) = tokio::io::split(channel);
+    let mut response = FrameReader::new(reader);
+    let upload = async move {
+        let mut chunks = body.into_data_stream();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|error| error.to_string())?;
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        writer.shutdown().await.map_err(|error| error.to_string())
+    };
+    let receive = response.read::<PodFileWriteResponse>();
+    tokio::pin!(upload);
+    tokio::pin!(receive);
+    tokio::select! {
+        result = &mut receive => result,
+        upload_result = &mut upload => {
+            upload_result.map_err(|error| {
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "file-write-failed",
+                    format!("failed to stream pod file replacement: {error}"),
+                )
+            })?;
+            receive.await
+        }
+    }
+    .map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "file-write-failed",
+            format!("failed to read pod file write result: {error}"),
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "file-write-failed",
+            "pod file write closed without a result",
+        )
+    })
+}
+
+/// Maps a guest replacement result into the browser HTTP contract.
+fn pod_file_write_response(result: PodFileWriteResponse) -> Result<Response, ApiError> {
+    match result {
+        PodFileWriteResponse::Written { revision } => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().insert(
+                header::ETAG,
+                HeaderValue::from_str(&format!("\"{revision}\"")).map_err(|_| {
+                    ApiError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid-file-revision",
+                        "workspace returned an invalid file revision",
+                    )
+                })?,
+            );
+            Ok(response)
+        }
+        PodFileWriteResponse::Conflict => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "file-conflict",
+            "file changed since it was read",
+        )),
+        PodFileWriteResponse::Rejected { code, message } => {
+            let status = match code {
+                PodFileWriteRejectionCode::InvalidRequest => StatusCode::BAD_REQUEST,
+                PodFileWriteRejectionCode::ReadOnly => StatusCode::FORBIDDEN,
+                PodFileWriteRejectionCode::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                PodFileWriteRejectionCode::Unavailable | PodFileWriteRejectionCode::Internal => {
+                    StatusCode::BAD_GATEWAY
+                }
+            };
+            Err(ApiError::new(status, code.as_str(), message))
+        }
+    }
+}
+
+/// Extracts one strong lowercase SHA-256 entity tag from `If-Match`.
+fn file_revision(headers: &HeaderMap) -> Result<String, ApiError> {
+    let revision = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'))
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::PRECONDITION_REQUIRED,
+                "missing-file-revision",
+                "a valid If-Match file revision is required",
+            )
+        })?;
+    Ok(revision.to_owned())
 }
 
 /// Converts the optional HTTP share selector into the Files API root.

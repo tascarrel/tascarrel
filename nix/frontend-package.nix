@@ -34,7 +34,7 @@ let
       pnpm = pnpm_11;
       fetcherVersion = 4;
       nativeBuildInputs = [ zstd.bin ];
-      hash = "sha256-QapSRf4z38zfLy5zgp8Zynfmu2ds7zYYbvhriQEoVZ4=";
+      hash = "sha256-IgtA1NxgXlNbymooTbUjlJwBIMuNLkTiBPhmjQIfVm4=";
     }).overrideAttrs
       (old: {
         # Avoid a nixpkgs 26.11 split-output issue where `tar --zstd` resolves the

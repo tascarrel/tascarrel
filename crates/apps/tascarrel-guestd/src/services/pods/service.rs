@@ -31,7 +31,9 @@ use tascarrel_api::types::store as store_api;
 use tascarrel_protocol::Health;
 use tascarrel_protocol::Pod as NetworkPrincipal;
 use tascarrel_protocol::PodId as NetworkPodId;
+use tascarrel_sharefs::ContentDigest;
 use tascarrel_sharefs::DirectoryEntry;
+use tascarrel_sharefs::FileWriteOutcome;
 use tascarrel_store::Store;
 use thiserror::Error;
 use tokio::io::AsyncReadExt as _;
@@ -225,6 +227,35 @@ impl PodService {
         blocking("open pod ShareFS file", move || {
             runc.open_share_overlay_file(&runtime_id, &share, &path)
                 .map_err(|error| internal(format!("failed to open pod ShareFS file: {error}")))
+        })
+        .await
+    }
+
+    /// Replaces one file in a pod's merged overlay host-share view.
+    pub(crate) async fn write_share_overlay_file_if_revision(
+        &self,
+        pod_id: &api::PodId,
+        share: &str,
+        path: &Path,
+        expected: ContentDigest,
+        contents: &[u8],
+    ) -> Result<FileWriteOutcome, Report<PodServiceError>> {
+        let _operation = self.pod_operation(pod_id).lock_owned().await;
+        self.public_record(pod_id)?;
+        let runtime_id = runtime_id(pod_id)?;
+        let runc = Arc::clone(&self.inner.runc);
+        let share = share.to_owned();
+        let path = path.to_owned();
+        let contents = contents.to_owned();
+        blocking("replace pod ShareFS file", move || {
+            runc.write_share_overlay_file_if_revision(
+                &runtime_id,
+                &share,
+                &path,
+                expected,
+                &contents,
+            )
+            .map_err(|error| internal(format!("failed to replace pod ShareFS file: {error}")))
         })
         .await
     }

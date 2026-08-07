@@ -2,6 +2,7 @@
 //!
 //! [`ShareChange`] describes one approval candidate, and [`LowerLease`]
 //! retains the lower identity used to detect concurrent host changes.
+//! [`FileWriteOutcome`] reports revision-checked editor replacements.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -74,6 +75,21 @@ pub struct EntryMetadata {
     pub modified_at: FileTime,
 }
 
+/// Outcome of one revision-checked complete-file replacement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileWriteOutcome {
+    /// The file was replaced with the supplied contents.
+    Written {
+        /// Digest of the replacement contents.
+        revision: ContentDigest,
+    },
+    /// The current contents do not match the expected revision.
+    Conflict {
+        /// Digest of the current contents.
+        revision: ContentDigest,
+    },
+}
+
 /// Supported merged filesystem entry type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryKind {
@@ -99,6 +115,20 @@ pub struct FileTime {
 pub struct ContentDigest(pub(crate) [u8; 32]);
 
 impl ContentDigest {
+    /// Computes the digest of one byte string.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        use sha2::Digest as _;
+
+        Self(sha2::Sha256::digest(bytes).into())
+    }
+
+    /// Creates a digest from its raw bytes.
+    #[must_use]
+    pub const fn from_array(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Returns the digest bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {

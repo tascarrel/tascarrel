@@ -1,7 +1,7 @@
 import { FileQuestion, LoaderCircle } from "lucide-react";
 import { lazy, Suspense, type ReactNode, useEffect, useState } from "react";
 
-import { podFileUrl } from "../../api/files.ts";
+import { POD_TEXT_FILE_BYTE_LIMIT, podFileUrl } from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { PdfViewer } from "../../components/pdf/index.ts";
 
@@ -22,6 +22,7 @@ export function PodFileViewer({
   renderMarkdown,
   line,
   revision = 0,
+  onTextFile,
 }: {
   workspace: workspaces.WorkspaceName;
   podId: pods.PodId;
@@ -31,6 +32,7 @@ export function PodFileViewer({
   renderMarkdown: PodMarkdownRenderer;
   line?: number;
   revision?: number;
+  onTextFile?: (file: PodTextFile | undefined) => void;
 }) {
   const [preview, setPreview] = useState<Preview>({ status: "loading" });
   const [imageState, setImageState] = useState<ImageState>("loading");
@@ -48,6 +50,18 @@ export function PodFileViewer({
     });
     return () => controller.abort();
   }, [path, revision, url]);
+
+  useEffect(() => {
+    onTextFile?.(
+      preview.status === "text" && !preview.truncated
+        ? {
+            contents: preview.text,
+            revision: preview.revision,
+            writable: preview.writable,
+          }
+        : undefined,
+    );
+  }, [onTextFile, preview]);
 
   if (preview.status === "loading") {
     return (
@@ -124,6 +138,13 @@ export const MARKDOWN_REPRESENTATIONS = [
   { value: "source", label: "Source" },
 ] as const satisfies ReadonlyArray<{ value: MarkdownRepresentation; label: string }>;
 
+/** An editable text file loaded from a pod file root. */
+export type PodTextFile = {
+  contents: string;
+  revision: string;
+  writable: boolean;
+};
+
 /** Returns whether a pod file path should offer Markdown source and rendered views. */
 export function isMarkdownPath(path: string): boolean {
   return /\.(?:md|markdown|mdown|mkd)$/i.test(path);
@@ -134,8 +155,6 @@ const SyntaxHighlightedFile = lazy(() =>
     default: module.SyntaxHighlightedFile,
   })),
 );
-
-const DEFAULT_PREVIEW_BYTES = 2 * 1024 * 1024;
 
 function FilePreviewError({ message }: { message: string }) {
   return (
@@ -158,13 +177,20 @@ type Preview =
   | { status: "image" }
   | { status: "pdf" }
   | { status: "binary" }
-  | { status: "text"; text: string; truncated: boolean };
+  | {
+      status: "text";
+      text: string;
+      truncated: boolean;
+      revision: string;
+      writable: boolean;
+    };
 
 type ImageState = "loading" | "ready" | "error";
 
 async function loadPreview(url: string, path: string, signal: AbortSignal): Promise<Preview> {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(await responseError(response));
+  const writable = response.headers.get("x-tascarrel-file-writable") === "true";
   const contentType = response.headers.get("content-type")?.split(";", 1)[0].toLowerCase();
   if (contentType?.startsWith("image/")) {
     await response.body?.cancel();
@@ -176,23 +202,31 @@ async function loadPreview(url: string, path: string, signal: AbortSignal): Prom
   }
 
   const reader = response.body?.getReader();
-  if (!reader) return { status: "text", text: "", truncated: false };
+  if (!reader) {
+    return {
+      status: "text",
+      text: "",
+      truncated: false,
+      revision: await contentRevision(new Uint8Array()),
+      writable,
+    };
+  }
   const chunks: Uint8Array[] = [];
   let length = 0;
   let truncated = false;
-  while (length <= DEFAULT_PREVIEW_BYTES) {
+  while (length <= POD_TEXT_FILE_BYTE_LIMIT) {
     const result = await reader.read();
     if (result.done) break;
     chunks.push(result.value);
     length += result.value.byteLength;
-    if (length > DEFAULT_PREVIEW_BYTES) {
+    if (length > POD_TEXT_FILE_BYTE_LIMIT) {
       truncated = true;
       await reader.cancel();
       break;
     }
   }
 
-  const bytes = new Uint8Array(Math.min(length, DEFAULT_PREVIEW_BYTES));
+  const bytes = new Uint8Array(Math.min(length, POD_TEXT_FILE_BYTE_LIMIT));
   let offset = 0;
   for (const chunk of chunks) {
     const available = Math.min(chunk.byteLength, bytes.byteLength - offset);
@@ -201,7 +235,24 @@ async function loadPreview(url: string, path: string, signal: AbortSignal): Prom
     if (offset === bytes.byteLength) break;
   }
   if (looksBinary(bytes, path)) return { status: "binary" };
-  return { status: "text", text: new TextDecoder().decode(bytes), truncated };
+  try {
+    return {
+      status: "text",
+      text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
+      truncated,
+      revision: truncated ? "" : await contentRevision(bytes),
+      writable,
+    };
+  } catch {
+    return { status: "binary" };
+  }
+}
+
+async function contentRevision(bytes: Uint8Array): Promise<string> {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function looksBinary(bytes: Uint8Array, path: string): boolean {

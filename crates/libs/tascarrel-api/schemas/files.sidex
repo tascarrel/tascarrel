@@ -5,8 +5,9 @@
 //! itself. Directory reads are point-in-time traversals and are deliberately not cached. Symbolic
 //! links are returned as entries but are never followed while resolving a request.
 //!
-//! File bodies are read through a guest data-plane request and are not embedded in Sidex
-//! control-plane messages.
+//! File bodies are read and replaced through guest data-plane requests and are not embedded in
+//! Sidex control-plane messages. Browser replacements are bounded, UTF-8, complete-file writes
+//! guarded by an observed content revision.
 
 import pods::PodId
 

@@ -8,6 +8,10 @@
 //! explicitly deletes and recreates a directory, which makes the replacement
 //! opaque.
 //!
+//! Complete-file editor writes use
+//! [`ShareFileSystem::write_file_if_revision`] to compare and replace content
+//! under the same lock as mounted filesystem operations.
+//!
 //! The private state directory contains a transactional `SQLite` namespace
 //! index and regular files addressed by internal node identifiers.
 //! [`MountedShareFileSystem`] exposes the merged view through the kernel FUSE
@@ -34,5 +38,6 @@ pub use types::EntryKind;
 pub use types::EntryMetadata;
 pub use types::EntryVersion;
 pub use types::FileTime;
+pub use types::FileWriteOutcome;
 pub use types::LowerLease;
 pub use types::ShareChange;

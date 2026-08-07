@@ -30,9 +30,15 @@ PDF and image viewers. Absolute links must start with `/workspace/` or `/mnt/<sh
 links in rendered Markdown remain within the containing file's root. The desktop Files view uses the
 same roots and lets users browse the workspace or any attached share.
 
-Code editing, terminals, arbitrary file browsing, network configuration, image management, and
-advanced settings remain desktop-only. Keep new workbench features out of the mobile client unless
-they directly help a user create a pod or unblock ongoing work.
+UTF-8 text files up to 2 MiB can be opened in a lightweight CodeMirror editor from the desktop
+Files view or a chat file preview. The editor is loaded only when editing starts. Saves replace the
+complete file only when its revision still matches the version that was opened; a conflicting
+external change leaves the draft intact and requires an explicit reload. Read-only shares, binary
+files, and truncated previews remain preview-only.
+
+Full VS Code sessions, terminals, arbitrary file browsing, network configuration, image management,
+and advanced settings remain desktop-only. Keep new workbench features out of the mobile client
+unless they directly help a user create a pod or unblock ongoing work.
 
 The API types under `src/api/generated` and the operation registry in
 `src/api/actions.ts` are generated from the Sidex schemas and Rust operation

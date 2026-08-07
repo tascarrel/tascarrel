@@ -24,7 +24,9 @@ use nix::unistd::Uid;
 use reportify::ErrorExt as _;
 use reportify::Report;
 use reportify::ResultExt as _;
+use tascarrel_sharefs::ContentDigest;
 use tascarrel_sharefs::DirectoryEntry;
+use tascarrel_sharefs::FileWriteOutcome;
 
 use super::share_overlays::PreparedShareOverlay;
 use super::share_overlays::ShareOverlayRuntime;
@@ -403,6 +405,19 @@ impl Runc {
         path: &Path,
     ) -> Result<fs::File, Report<RuntimeError>> {
         self.share_overlays.open_file(pod, share, path)
+    }
+
+    /// Replaces one file in a pod's overlay host-share view.
+    pub(crate) fn write_share_overlay_file_if_revision(
+        &self,
+        pod: &RuntimePodId,
+        share: &str,
+        path: &Path,
+        expected: ContentDigest,
+        contents: &[u8],
+    ) -> Result<FileWriteOutcome, Report<RuntimeError>> {
+        self.share_overlays
+            .write_file_if_revision(pod, share, path, expected, contents)
     }
 
     /// Returns process execution coordinates without checking container state.

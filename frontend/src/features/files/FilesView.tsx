@@ -7,6 +7,7 @@ import {
   Folder,
   Link,
   LoaderCircle,
+  Pencil,
   RefreshCw,
 } from "lucide-react";
 import { lazy, useCallback, useEffect, useRef, useState } from "react";
@@ -21,14 +22,17 @@ import {
 } from "../../api/files.ts";
 import type { files, pods, workspaces } from "../../api/generated/index.ts";
 import { Button } from "../../components/ui/Button.tsx";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog.tsx";
 import { SegmentedControl } from "../../components/ui/SegmentedControl.tsx";
 import { SelectControl } from "../../components/ui/SelectControl.tsx";
 import {
   isMarkdownPath,
   MARKDOWN_REPRESENTATIONS,
   type MarkdownRepresentation,
+  type PodTextFile,
   PodFileViewer,
 } from "./PodFileViewer.tsx";
+import { PodFileEditor } from "./PodFileEditor.tsx";
 
 const MarkdownContent = lazy(() =>
   import("../chat/index.ts").then((module) => ({ default: module.MarkdownContent })),
@@ -54,6 +58,9 @@ export function FilesView({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set([""]));
   const [selectedPath, setSelectedPath] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>();
   const requests = useRef(new Map<string, AbortController>());
   const selectedRootKey = fileRootKey(selectedRoot);
 
@@ -136,6 +143,22 @@ export function FilesView({
     setPreviewRevision((revision) => revision + 1);
     void readDirectory("", true);
   };
+  const navigate = (navigation: PendingNavigation) => {
+    if (editorDirty || editorSaving) {
+      setPendingNavigation(navigation);
+      return;
+    }
+    applyNavigation(navigation);
+  };
+  const applyNavigation = (navigation: PendingNavigation) => {
+    setEditorDirty(false);
+    setEditorSaving(false);
+    if (navigation.tag === "path") setSelectedPath(navigation.path);
+    else {
+      setSelectedPath(undefined);
+      setSelectedRoot(navigation.root);
+    }
+  };
   const selectedSize = selectedPath ? fileSize(directories, selectedPath) : undefined;
 
   return (
@@ -155,7 +178,7 @@ export function FilesView({
               variant="sidebar"
               onChange={(value) => {
                 const root = roots.find((candidate) => fileRootKey(candidate) === value);
-                if (root) setSelectedRoot(root);
+                if (root && fileRootKey(root) !== selectedRootKey) navigate({ tag: "root", root });
               }}
             />
             {rootsError ? (
@@ -166,7 +189,13 @@ export function FilesView({
               <p className="mt-0.5 truncate text-[10px] text-subtle">{pod.title}</p>
             )}
           </div>
-          <Button aria-label={`Refresh ${fileRootPath(selectedRoot)} files`} size="icon" onClick={refresh}>
+          <Button
+            aria-label={`Refresh ${fileRootPath(selectedRoot)} files`}
+            disabled={editorDirty || editorSaving}
+            size="icon"
+            title={editorDirty || editorSaving ? "Finish editing before refreshing" : "Refresh files"}
+            onClick={refresh}
+          >
             <RefreshCw aria-hidden="true" className="size-3.5" />
           </Button>
         </header>
@@ -178,7 +207,9 @@ export function FilesView({
             expanded={expanded}
             selectedPath={selectedPath}
             onToggle={toggleDirectory}
-            onSelect={setSelectedPath}
+            onSelect={(path) => {
+              if (path !== selectedPath) navigate({ tag: "path", path });
+            }}
             onRetry={(path) => void readDirectory(path, true)}
           />
         </div>
@@ -186,21 +217,46 @@ export function FilesView({
 
       {selectedPath ? (
         <FilePreview
+          key={`${selectedRootKey}:${selectedPath}`}
           workspace={workspace}
           podId={pod.id}
           root={selectedRoot}
           path={selectedPath as files.FilePath}
           revision={previewRevision}
           size={selectedSize}
+          onDirtyChange={setEditorDirty}
+          onSavingChange={setEditorSaving}
         />
       ) : (
         <div className="flex min-h-0 items-center justify-center p-8 text-center text-xs text-subtle">
           Select a file to preview it. Directories are read only when expanded.
         </div>
       )}
+      <ConfirmDialog
+        confirmLabel={editorDirty ? "Discard changes" : "Continue"}
+        description={editorSaving
+          ? "Wait for the current save to finish before navigating away."
+          : editorDirty
+            ? "Your unsaved file edits will be lost when you navigate away."
+            : "The save finished. Continue to the selected file?"}
+        open={pendingNavigation !== undefined}
+        pending={editorSaving}
+        title="Discard unsaved changes?"
+        onConfirm={() => {
+          if (pendingNavigation) applyNavigation(pendingNavigation);
+          setPendingNavigation(undefined);
+        }}
+        onOpenChange={(open) => {
+          if (!open) setPendingNavigation(undefined);
+        }}
+      />
     </div>
   );
 }
+
+type PendingNavigation =
+  | { tag: "path"; path: string }
+  | { tag: "root"; root: files.FileRoot };
 
 function DirectoryChildren({
   directory,
@@ -299,6 +355,8 @@ function FilePreview({
   path,
   revision,
   size,
+  onDirtyChange,
+  onSavingChange,
 }: {
   workspace: workspaces.WorkspaceName;
   podId: pods.PodId;
@@ -306,11 +364,29 @@ function FilePreview({
   path: files.FilePath;
   revision: number;
   size?: files.FileEntry["size"];
+  onDirtyChange: (dirty: boolean) => void;
+  onSavingChange: (saving: boolean) => void;
 }) {
   const [markdownRepresentation, setMarkdownRepresentation] =
     useState<MarkdownRepresentation>("source");
+  const [textFile, setTextFile] = useState<PodTextFile>();
+  const [editing, setEditing] = useState(false);
+  const [localRevision, setLocalRevision] = useState(0);
   const markdown = isMarkdownPath(String(path));
   const absolutePath = podFilePath(root, String(path));
+
+  useEffect(() => {
+    setTextFile(undefined);
+    setEditing(false);
+    setLocalRevision(0);
+    onDirtyChange(false);
+    onSavingChange(false);
+  }, [onDirtyChange, onSavingChange, path, root]);
+
+  useEffect(() => () => {
+    onDirtyChange(false);
+    onSavingChange(false);
+  }, [onDirtyChange, onSavingChange]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden" aria-label={`Preview ${absolutePath}`}>
@@ -322,13 +398,21 @@ function FilePreview({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {markdown ? (
+          {markdown && !editing ? (
             <SegmentedControl
               label="Markdown representation"
               options={MARKDOWN_REPRESENTATIONS}
               value={markdownRepresentation}
               onValueChange={setMarkdownRepresentation}
             />
+          ) : null}
+          {textFile && !textFile.writable ? (
+            <span className="text-[10px] text-subtle">Read-only</span>
+          ) : null}
+          {textFile?.writable && !editing ? (
+            <Button size="small" onClick={() => setEditing(true)}>
+              <Pencil aria-hidden="true" className="size-3.5" /> Edit
+            </Button>
           ) : null}
           <a
             className="inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ui-border/70 bg-surface px-2.5 text-xs font-medium text-muted outline-none transition hover:border-ui-border-strong hover:bg-surface-raised hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
@@ -340,17 +424,50 @@ function FilePreview({
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-hidden">
-        <PodFileViewer
-          markdownRepresentation={markdownRepresentation}
-          path={path}
-          podId={podId}
-          renderMarkdown={(content, markdownRoot, markdownPath) => (
-            <MarkdownContent content={content} fileTarget={{ root: markdownRoot, path: markdownPath }} />
-          )}
-          revision={revision}
-          root={root}
-          workspace={workspace}
-        />
+        {editing && textFile ? (
+          <PodFileEditor
+            key={`${fileRootKey(root)}:${String(path)}`}
+            initial={textFile}
+            path={path}
+            podId={podId}
+            renderMarkdown={(content, markdownRoot, markdownPath) => (
+              <MarkdownContent content={content} fileTarget={{ root: markdownRoot, path: markdownPath }} />
+            )}
+            root={root}
+            workspace={workspace}
+            onCancel={() => {
+              setEditing(false);
+              onDirtyChange(false);
+              onSavingChange(false);
+            }}
+            onDirtyChange={onDirtyChange}
+            onSavingChange={onSavingChange}
+            onReload={() => {
+              setEditing(false);
+              setTextFile(undefined);
+              setLocalRevision((current) => current + 1);
+              onDirtyChange(false);
+              onSavingChange(false);
+            }}
+            onSaved={(file) => {
+              setTextFile(file);
+              setLocalRevision((current) => current + 1);
+            }}
+          />
+        ) : (
+          <PodFileViewer
+            markdownRepresentation={markdownRepresentation}
+            path={path}
+            podId={podId}
+            renderMarkdown={(content, markdownRoot, markdownPath) => (
+              <MarkdownContent content={content} fileTarget={{ root: markdownRoot, path: markdownPath }} />
+            )}
+            revision={revision + localRevision}
+            root={root}
+            workspace={workspace}
+            onTextFile={setTextFile}
+          />
+        )}
       </div>
     </section>
   );
